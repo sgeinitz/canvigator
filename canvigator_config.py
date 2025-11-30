@@ -1,8 +1,8 @@
 import os
 
 
-class PicataConfig:
-    """ Picata configuration class, mostly for file paths """
+class CanvigatorConfig:
+    """ Canvigator configuration class, mostly for file paths """
 
     def __init__(self):
         """ Simple file path configuration for data and figures (for both input and output). """

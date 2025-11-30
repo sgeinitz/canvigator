@@ -27,8 +27,8 @@ if task == "help" or task == "--help":
 import os
 import re
 import canvasapi
-import picata_utils as pu
-import picata_config as pc
+import canvigator_utils as pu
+#import picata_config as pc
 
 # User/instructor must first have created and downloaded a token in Canvas, and
 # set up environment vars appropriately (e.g. 'source <file w/ canvas info>').
