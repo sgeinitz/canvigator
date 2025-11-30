@@ -1,4 +1,4 @@
-class PicaCourse:
+class CanvigatorCourse:
     """ A general class for a course and associated attributes/data. """
 
     def __init__(self, canvas_course, config, verbose=False):

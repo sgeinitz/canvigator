@@ -1,4 +1,4 @@
-class PicaQuiz:
+class CanvigatorQuiz:
     """ A class for one quiz and associated attributes/data. """
 
     def __init__(self, canvas, canvas_quiz, config, verbose=False):

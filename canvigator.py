@@ -5,13 +5,13 @@ tasks = ['activity', 'award-bonus', 'pair', 're-award-bonus']
 task = None
 
 if len(sys.argv) < 2:
-    print(f"Usage: picata {' | '.join(tasks)}")
+    print(f"Usage: canvigator {' | '.join(tasks)}")
     sys.exit(1)
 else: 
     task = sys.argv[1]
 
 if task == "help" or task == "--help":
-    print(f"Usage: picata.py [{'|'.join(tasks)}]")
+    print(f"Usage: canvigator.py [{'|'.join(tasks)}]")
     sys.exit(1)
 
 #elif task not in tasks:
@@ -27,6 +27,8 @@ if task == "help" or task == "--help":
 import os
 import re
 import canvasapi
+import canvigator_course
+import canvigator_quiz
 import canvigator_utils as pu
 #import picata_config as pc
 
@@ -37,7 +39,7 @@ API_KEY = os.environ.get("CANVAS_TOKEN")
 if not (API_URL or API_KEY):
     raise Exception("'CANVAS_' environment variables not set - see installation instructions to resolve this")
 
-pica_config = pc.PicataConfig()
+canv_config = pc.CanvigatorConfig()
 
 # Initialize a new Canvas object
 canvas = canvasapi.Canvas(API_URL, API_KEY)
@@ -49,10 +51,10 @@ chosen_course = pu.selectCourse(canvas)
 
 print(f"\nSelected course: {chosen_course.name}")
 
-pica_course = pu.PicaCourse(chosen_course, pica_config, verbose=False)
+pica_course = pu.CanvigatorCourse(chosen_course, canv_config, verbose=False)
 
 if task == 'activity':
-    pica_course.saveStudentActivity(pica_config.data_path)
+    pica_course.saveStudentActivity(canv_config.data_path)
 
 elif task in ['pair', 'award-bonus', 're-award-bonus']:
     # Prompt user to select a quiz
@@ -60,7 +62,7 @@ elif task in ['pair', 'award-bonus', 're-award-bonus']:
     print(f"\nSelected quiz: {chosen_quiz.title}")
 
     # Obtain quiz data and generate plots to visualize the data.
-    pica_quiz = pu.PicaQuiz(canvas, chosen_quiz, pica_config, verbose=False)
+    pica_quiz = pu.CanvigatorQuiz(canvas, chosen_quiz, canv_config, verbose=False)
     pica_quiz.generateQuestionHistograms()
     pica_quiz.generateDistanceMatrix(only_present=False)
     pica_quiz.getUserQuizEvents()
