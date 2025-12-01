@@ -1,3 +1,11 @@
+import pandas as pd
+import scipy.stats as stats
+import scipy.spatial.distance as distance
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import seaborn as sbn
+from datetime import datetime
+
 class CanvigatorQuiz:
     """ A class for one quiz and associated attributes/data. """
 

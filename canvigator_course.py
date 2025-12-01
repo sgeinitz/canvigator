@@ -1,3 +1,7 @@
+import pandas as pd
+from datetime import datetime
+
+
 class CanvigatorCourse:
     """ A general class for a course and associated attributes/data. """
 
