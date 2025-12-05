@@ -1,7 +1,7 @@
 
 
 ![Canvigator](images/canvigator_small.png) 
-## Canvigator: Helping educators enhance their teaching by guiding and supporting them with the Canvas LMS 
+## Canvigator: Helping educators enhance their teaching by applying tried-and-true pedagogical techniques via the Canvas LMS
 
 ### Overview 
 
@@ -37,7 +37,7 @@ in just one place on your local system, or separately for each course that it wi
    ```
    You will be prompted to enter:
    - Your institution's Canvas LMS base URL (you can find this on your Canvas home page).
-   - The token can be created by navigating to _'Account'_, then _'Settings'_. Towards the bottom of this window in your LMS you will see a blue button, _'+ New Access Token_'. Click on this button to copy/download the token to your local system, but be careful not to share it (e.g. do not save it a shared directory). 
+   - Your Canvas token, which can be created by navigating to _'Account'_, then _'Settings'_. Towards the bottom of this window in Canvas you will see a blue button, _'+ New Access Token_'. Click on this button to copy/download the token to your local system. DO NOT TO SHARE YOUR CANVAS TOKEN w/ ANYONE (e.g. do not save it a shared directory). 
  
 This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 
