@@ -10,7 +10,6 @@ visualize_events.ipynb
 *.csv
 *.pickle
 *.pkl
-*.png
 data/*
 figures/*
 
