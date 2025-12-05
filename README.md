@@ -1,4 +1,6 @@
-## Canvigator: Guiding instructors through Canvas to enhance their teaching and help students learn
+## Canvigator: Helping educators/instructors enhance their teaching by guiding and supporting them with Canvas
+
+![Canvigator](images/canvigator_small.png)
 
 ### Overview 
 
