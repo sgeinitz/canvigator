@@ -1,3 +1,6 @@
+import sys
+import time
+import requests
 import pandas as pd
 import scipy.stats as stats
 import scipy.spatial.distance as distance
@@ -9,9 +12,10 @@ from datetime import datetime
 class CanvigatorQuiz:
     """ A class for one quiz and associated attributes/data. """
 
-    def __init__(self, canvas, canvas_quiz, config, verbose=False):
+    def __init__(self, canvas, canvas_course, canvas_quiz, config, verbose=False):
         """ Initialize quiz object by getting all quiz data from Canvas. """
         self.canvas = canvas
+        self.canvas_course = canvas_course
         self.canvas_quiz = canvas_quiz
         self.verbose = verbose
         self.config = config
@@ -92,6 +96,7 @@ class CanvigatorQuiz:
         if self.verbose:
             for key, val in self.question_stats.items():
                 print("key =", key, "->", val)
+
 
     def progressBar(self, current, total, bar_length=20):
         """ Displays or updates a console progress bar. """
@@ -467,6 +472,35 @@ class CanvigatorQuiz:
         user_events_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
             "_user_events_" + datetime.today().strftime('%Y%m%d') + ".csv"
         user_events.to_csv(user_events_csv, index=False)
+
+    def getAllSubmissionsAndEvents(self):
+        quiz_takers = self.quiz_df[['name', 'id']].copy()
+
+        # Define a user_events dataframe with columns 'name', 'id', 'event', 'timestamp'
+        all_submissions = pd.DataFrame(columns=['id', 'attempt', 'score', 'timestamp'])
+        all_submissions_detailed = pd.DataFrame(columns=['id', 'attempt', 'question', 'points', 'correct', 'timestamp'])
+        all_events = pd.DataFrame(columns=['id', 'attempt', 'event', 'timestamp'])
+
+        subs = self.canvas_quiz.get_submissions()#include=['submission_history'])
+        for i, sub in enumerate(subs):
+            student_subs = self.canvas_course.canvas_course.get_multiple_submissions(student_ids=[sub.user_id], 
+                                                                       assignment_ids=[self.canvas_quiz.assignment_id], 
+                                                                       include=['submission_history'])[0]    
+            n_attempts = len(student_subs.submission_history)
+            for i in range(n_attempts):
+                new_row = {'id': sub.user_id, 
+                        'attempt': student_subs.submission_history[i]['attempt'],
+                        'score': student_subs.submission_history[i]['score'],
+                        'timestamp': student_subs.submission_history[i]['submitted_at']}
+                all_submissions = pd.concat([all_submissions, pd.DataFrame([new_row])], ignore_index=True)
+
+        # do a full outer join of quiz_takers with all_submissions on 'id' to get names
+        all_submissions = pd.merge(quiz_takers[['name', 'id']], all_submissions, on='id', how='outer')
+        
+        all_submissions_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
+            "_all_submissions_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        all_submissions.to_csv(all_submissions_csv, index=False)
+
 
     def awardBonusPoints(self):
         """ Award bonus points to students who received it by setting fudge points. """
