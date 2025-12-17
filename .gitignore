@@ -5,6 +5,7 @@ __pycache__/
 .vscode/launch.json
 
 visualize_events.ipynb
+scratchwork.py
 
 # any data figures and their directories
 *.csv
