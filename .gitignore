@@ -5,6 +5,8 @@ __pycache__/
 .vscode/launch.json
 
 visualize_events.ipynb
+check4_3subs_cs3120.ipynb
+check4_3subs_cs4050.ipynb
 scratchwork.py
 
 # any data figures and their directories

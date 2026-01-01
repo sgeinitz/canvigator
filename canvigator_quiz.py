@@ -56,8 +56,8 @@ class CanvigatorQuiz:
         quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
         quiz_csv_url = quiz_report.file['url']
         quiz_csv = requests.get(quiz_csv_url)
-        csv_name = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + "_" + \
-            datetime.today().strftime('%Y%m%d') + "_student_analysis.csv"
+        csv_name = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
+            "_student_analysis_" + datetime.today().strftime('%Y%m%d') + ".csv"
 
         csv = open(csv_name, 'wb')
         for content in quiz_csv.iter_content(chunk_size=2**20):
@@ -479,9 +479,9 @@ class CanvigatorQuiz:
         # Define a user_events dataframe with columns 'name', 'id', 'event', 'timestamp'
         all_submissions = pd.DataFrame(columns=['id', 'attempt', 'score', 'timestamp'])
         all_submissions_detailed = pd.DataFrame(columns=['id', 'attempt', 'question', 'points', 'correct', 'timestamp'])
-        all_events = pd.DataFrame(columns=['id', 'attempt', 'event', 'timestamp'])
+        all_subs_and_events = pd.DataFrame(columns=['id', 'attempt', 'event', 'timestamp'])
 
-        subs = self.canvas_quiz.get_submissions()#include=['submission_history'])
+        subs = self.canvas_quiz.get_submissions(include=['submission_history'])
         for i, sub in enumerate(subs):
             student_subs = self.canvas_course.canvas_course.get_multiple_submissions(student_ids=[sub.user_id], 
                                                                        assignment_ids=[self.canvas_quiz.assignment_id], 
@@ -492,15 +492,51 @@ class CanvigatorQuiz:
                         'attempt': student_subs.submission_history[i]['attempt'],
                         'score': student_subs.submission_history[i]['score'],
                         'timestamp': student_subs.submission_history[i]['submitted_at']}
-                all_submissions = pd.concat([all_submissions, pd.DataFrame([new_row])], ignore_index=True)
+                if len(all_submissions) == 0:
+                    all_submissions = pd.DataFrame([new_row])
+                else:
+                    all_submissions = pd.concat([all_submissions, pd.DataFrame([new_row])], ignore_index=True)
+                #all_submissions.loc[len(all_submissions)] = [sub.user_id,
+                #                                             student_subs.submission_history[i]['attempt'],
+                #                                             student_subs.submission_history[i]['score'],
+                #                                             student_subs.submission_history[i]['submitted_at']],
 
-        # do a full outer join of quiz_takers with all_submissions on 'id' to get names
-        all_submissions = pd.merge(quiz_takers[['name', 'id']], all_submissions, on='id', how='outer')
+                # check that this an attempt/submission exists before trying to get all of the events for it
+                try:
+                    if new_row['attempt'] is None:
+                        break
+                except Exception:
+                    break
+
+                # see scratch_work.py for this
+                this_submission_events = sub.get_submission_events(attempt=i+1) # get sub. events for this attempt
+                #print(type(this_submission_events))
+
+                for event in this_submission_events:
+                    # check that event.event_type exists and break if it does not
+                    #try:
+                    #    if event is None:
+                    #        break
+                    #except AttributeError:
+                    #    break
+                    #new_event_row = {'id': sub.user_id, 
+                    #        'attempt': i+1,
+                    #        'event': event.event_type,
+                    #        'timestamp': event.created_at}
+                    #all_subs_and_events = pd.concat([all_subs_and_events, pd.DataFrame([new_event_row])], ignore_index=True)
+                    all_subs_and_events.loc[len(all_subs_and_events)] = [sub.user_id, i+1, event.event_type, event.created_at]
+
+        # do a full outer join of quiz_takers on 'id' to get names for the submission data
+        all_submissions = pd.merge(quiz_takers[['name', 'id']], all_submissions, on='id', how='inner')
+        all_subs_and_events = pd.merge(quiz_takers[['name', 'id']], all_subs_and_events, on='id', how='inner')
         
         all_submissions_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
             "_all_submissions_" + datetime.today().strftime('%Y%m%d') + ".csv"
         all_submissions.to_csv(all_submissions_csv, index=False)
 
+        all_sub_and_events_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
+            "_all_subs_and_events_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)
 
     def awardBonusPoints(self):
         """ Award bonus points to students who received it by setting fudge points. """
