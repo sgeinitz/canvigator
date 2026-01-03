@@ -478,7 +478,7 @@ class CanvigatorQuiz:
 
         # Define a user_events dataframe with columns 'name', 'id', 'event', 'timestamp'
         all_submissions = pd.DataFrame(columns=['id', 'attempt', 'score', 'timestamp'])
-        all_submissions_detailed = pd.DataFrame(columns=['id', 'attempt', 'question', 'points', 'correct', 'timestamp'])
+        all_subs_by_question = pd.DataFrame(columns=['id', 'attempt', 'question', 'points', 'correct', 'timestamp'])
         all_subs_and_events = pd.DataFrame(columns=['id', 'attempt', 'event', 'timestamp'])
 
         subs = self.canvas_quiz.get_submissions(include=['submission_history'])
@@ -508,7 +508,26 @@ class CanvigatorQuiz:
                 except Exception:
                     break
 
-                # see scratch_work.py for this
+                # now get question-level data for this attempt
+                for q, qdata in enumerate(student_subs.submission_history[i]['submission_data']):
+                    new_q_row = {'id': sub.user_id,
+                                 'attempt': student_subs.submission_history[i]['attempt'],
+                                 'question': q+1,
+                                 'points': qdata['points'],
+                                 'correct': qdata['correct'],
+                                 'timestamp': student_subs.submission_history[i]['submitted_at']}
+                    if len(all_subs_by_question) == 0:
+                        all_subs_by_question = pd.DataFrame([new_q_row])
+                    else:
+                        all_subs_by_question = pd.concat([all_subs_by_question, pd.DataFrame([new_q_row])], ignore_index=True)
+                    #all_subs_by_question.loc[len(all_subs_by_question)] = [sub.user_id,
+                    #                                                       student_subs.submission_history[i]['attempt'],
+                    #                                                       qdata['question_id'],
+                    #                                                       qdata['points'],
+                    #                                                       qdata['correct'],
+                    #                                                       student_subs.submission_history[i]['submitted_at']]
+
+                # see scratch_work.py for getting all events for this submission
                 this_submission_events = sub.get_submission_events(attempt=i+1) # get sub. events for this attempt
                 #print(type(this_submission_events))
 
@@ -528,11 +547,16 @@ class CanvigatorQuiz:
 
         # do a full outer join of quiz_takers on 'id' to get names for the submission data
         all_submissions = pd.merge(quiz_takers[['name', 'id']], all_submissions, on='id', how='inner')
+        all_subs_by_question = pd.merge(quiz_takers[['name', 'id']], all_subs_by_question, on='id', how='inner')
         all_subs_and_events = pd.merge(quiz_takers[['name', 'id']], all_subs_and_events, on='id', how='inner')
         
         all_submissions_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
             "_all_submissions_" + datetime.today().strftime('%Y%m%d') + ".csv"
         all_submissions.to_csv(all_submissions_csv, index=False)
+
+        all_subs_by_question_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
+            "_all_subs_by_question_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        all_subs_by_question.to_csv(all_subs_by_question_csv, index=False)
 
         all_sub_and_events_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
             "_all_subs_and_events_" + datetime.today().strftime('%Y%m%d') + ".csv"

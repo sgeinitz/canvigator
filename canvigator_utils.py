@@ -22,6 +22,12 @@ class CanvigatorConfig:
         self.figures_path = os.getcwd() + "/figures/"
         self.quiz_prefix = "quiz_"
 
+    def addCourseToDataPath(self, course_path):
+        """ Create data path directory if it does not already exist. """
+        if not os.path.exists(self.data_path + course_path):
+            os.makedirs(self.data_path + course_path)
+        self.data_path += course_path + "/"
+
 
 def selectFromList(paginated_list, item_type="item"):
     """
