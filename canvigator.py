@@ -30,7 +30,6 @@ import canvasapi
 import canvigator_course as cc
 import canvigator_quiz as cq
 import canvigator_utils as cu
-#import picata_config as pc
 
 # User/instructor must first have created and downloaded a token in Canvas, and
 # set up environment vars appropriately (e.g. 'source <file w/ canvas info>').
@@ -51,16 +50,17 @@ course_choice = cu.selectCourse(canvas)
 
 print(f"\nSelected course: {course_choice.name}")
 
-course = cc.CanvigatorCourse(course_choice, canv_config, verbose=False)
+course = cc.CanvigatorCourse(canvas, course_choice, canv_config, verbose=False)
 
 if task == 'activity':
     course.saveStudentActivity(canv_config.data_path)
 
-elif task in ['all-subs']:
-    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
-    print(f"\nSelected quiz: {quiz_choice.title}")
-    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
-    quiz.getAllSubmissionsAndEvents()
+elif task  == 'all-subs':
+    course.getAllQuizzesAndSubmissions()
+    #quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
+    #print(f"\nSelected quiz: {quiz_choice.title}")
+    #quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
+    #$quiz.getAllSubmissionsAndEvents()
 
 elif task in ['pair', 'award-bonus', 're-award-bonus']:
     # Prompt user to select a quiz

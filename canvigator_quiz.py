@@ -1,5 +1,7 @@
 import sys
+import os
 import time
+import random
 import requests
 import pandas as pd
 import scipy.stats as stats
@@ -17,9 +19,11 @@ class CanvigatorQuiz:
         self.canvas = canvas
         self.canvas_course = canvas_course
         self.canvas_quiz = canvas_quiz
+        self.published = canvas_quiz.published
         self.verbose = verbose
         self.config = config
-        self.config.modifyQuizPrefix(self.canvas_quiz.title.lower().replace(" ", "_") + "_")
+        self.quiz_name = self.canvas_quiz.title.lower().replace(" ", "_")
+        self.config.modifyQuizPrefix(self.quiz_name + "_")
         
         # use course_code prefix, course number, and CRN to create course_path
         tmp_course_code = str(self.canvas_course.canvas_course.course_code)
@@ -42,7 +46,8 @@ class CanvigatorQuiz:
             if verbose:
                 print(f"Question {i}: {quest}")
         self.quiz_question_ids = [str(c.id) for c in self.quiz_questions]
-        self.getQuizData()
+        if self.published:
+            self.getQuizData()
 
     def getQuizData(self):
         """ Download student_analysis csv quiz report. """
@@ -59,7 +64,7 @@ class CanvigatorQuiz:
             time.sleep(0.1)
             quiz_report_progress = self.canvas.get_progress(request_id)
         self.progressBar(quiz_report_progress.completion, 100)
-        print("\nQuiz download complete!")
+        print(f"\n{self.quiz_name} download complete")
 
         quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
         quiz_csv_url = quiz_report.file['url']
@@ -88,6 +93,10 @@ class CanvigatorQuiz:
                 self.quiz_df[next_col_new_name].apply(pd.to_numeric)
 
         self.n_students = self.quiz_df.shape[0]
+        if self.verbose:
+            print(f"Number of students who took quiz: {self.n_students}")
+        if self.n_students == 0:
+            return
 
         # dictionary w/ question id as key and summary stats for each question
         self.question_stats = dict()
@@ -98,7 +107,7 @@ class CanvigatorQuiz:
                 'var': self.quiz_df[score_col].var(),
                 'n_zeros': sum(self.quiz_df[score_col] == 0.0),
                 'n_ones': sum(self.quiz_df[score_col] == 1.0),
-                'entropy': stats.entropy(self.quiz_df[score_col])
+                #'entropy': stats.entropy(self.quiz_df[score_col])
             }
 
         if self.verbose:
@@ -491,6 +500,8 @@ class CanvigatorQuiz:
 
         subs = self.canvas_quiz.get_submissions(include=['submission_history'])
         for i, sub in enumerate(subs):
+            if self.verbose:
+                print(f"Processing submission for student id {sub.user_id}")
             student_subs = self.canvas_course.canvas_course.get_multiple_submissions(student_ids=[sub.user_id], 
                                                                        assignment_ids=[self.canvas_quiz.assignment_id], 
                                                                        include=['submission_history'])[0]    
@@ -539,19 +550,22 @@ class CanvigatorQuiz:
                 this_submission_events = sub.get_submission_events(attempt=i+1) # get sub. events for this attempt
                 #print(type(this_submission_events))
 
-                for event in this_submission_events:
-                    # check that event.event_type exists and break if it does not
-                    #try:
-                    #    if event is None:
-                    #        break
-                    #except AttributeError:
-                    #    break
-                    #new_event_row = {'id': sub.user_id, 
-                    #        'attempt': i+1,
-                    #        'event': event.event_type,
-                    #        'timestamp': event.created_at}
-                    #all_subs_and_events = pd.concat([all_subs_and_events, pd.DataFrame([new_event_row])], ignore_index=True)
-                    all_subs_and_events.loc[len(all_subs_and_events)] = [sub.user_id, i+1, event.event_type, event.created_at]
+                try:
+                    for event in this_submission_events:
+                        # check that event.event_type exists and break if it does not
+                        #    if event is None:
+                        #        break
+                        #except AttributeError:
+                        #    break
+                        #new_event_row = {'id': sub.user_id, 
+                        #        'attempt': i+1,
+                        #        'event': event.event_type,
+                        #        'timestamp': event.created_at}
+                        #all_subs_and_events = pd.concat([all_subs_and_events, pd.DataFrame([new_event_row])], ignore_index=True)
+                        all_subs_and_events.loc[len(all_subs_and_events)] = [sub.user_id, i+1, event.event_type, event.created_at]
+                except Exception:
+                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {i+1}")
+                    continue
 
         # do a full outer join of quiz_takers on 'id' to get names for the submission data
         all_submissions = pd.merge(quiz_takers[['name', 'id']], all_submissions, on='id', how='inner')

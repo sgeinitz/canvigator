@@ -1,13 +1,16 @@
 import pandas as pd
+import canvigator_quiz as cq
 from datetime import datetime
 
 
 class CanvigatorCourse:
     """ A general class for a course and associated attributes/data. """
 
-    def __init__(self, canvas_course, config, verbose=False):
+    def __init__(self, canvas, canvas_course, config, verbose=False):
         """ Retrieve the selected course and get list of all students. """
+        self.canvas = canvas
         self.canvas_course = canvas_course
+        self.config = config
         self.students = []
         self.verbose = verbose
         student = None
@@ -23,6 +26,17 @@ class CanvigatorCourse:
                 self.students.append(student.user)
         if verbose:
             print(self.students)
+
+    def getAllQuizzesAndSubmissions(self):
+        """ Get all quizzes and their submissions for the course. """
+        all_quizzes = self.canvas_course.get_quizzes()
+
+        for i, q in enumerate(all_quizzes):
+            # if q is a legit quiz, with at least one submission, then get submissions
+            quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
+            # check that the dataframe, quiz.quiz_df has at least 2 rows (header + at least one submission)
+            if quiz.published and quiz.n_students != None and quiz.n_students > 1:
+                quiz.getAllSubmissionsAndEvents()
 
     def saveStudentActivity(self, data_path):
         """ Get student activity from two sources and save to csv files """
