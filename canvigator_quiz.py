@@ -495,7 +495,7 @@ class CanvigatorQuiz:
 
         # Define a user_events dataframe with columns 'name', 'id', 'event', 'timestamp'
         all_submissions = pd.DataFrame(columns=['id', 'attempt', 'score', 'timestamp'])
-        all_subs_by_question = pd.DataFrame(columns=['id', 'attempt', 'question', 'points', 'correct', 'timestamp'])
+        all_subs_by_question = pd.DataFrame(columns=['id', 'attempt', 'question', 'points', 'correct'])
         all_subs_and_events = pd.DataFrame(columns=['id', 'attempt', 'event', 'timestamp'])
 
         subs = self.canvas_quiz.get_submissions(include=['submission_history'])
@@ -533,8 +533,7 @@ class CanvigatorQuiz:
                                  'attempt': student_subs.submission_history[i]['attempt'],
                                  'question': q+1,
                                  'points': qdata['points'],
-                                 'correct': qdata['correct'],
-                                 'timestamp': student_subs.submission_history[i]['submitted_at']}
+                                 'correct': qdata['correct']}
                     if len(all_subs_by_question) == 0:
                         all_subs_by_question = pd.DataFrame([new_q_row])
                     else:
