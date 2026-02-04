@@ -5,10 +5,11 @@
 
 ### Overview 
 
-Canvigator is a tool for instructors to be able to both automate some 
-common Canvas administrative tasks and utilize proven educational 
-techniques, e.g. Continuous Assessments. This tool can also be used to carry out novel research that utilizes well-known
-methods in education, as see in [this paper](https://link.springer.com/chapter/10.1007/978-3-031-74627-7_1).
+Canvigator is a tool for instructors to be able to both automate some common
+Canvas administrative tasks and utilize proven educational techniques such as
+Continuous Assessments and Collaborative Learning. This tool has been used to
+carry out novel research utilizing these well-known and established methods in
+education (as see in [this paper](https://link.springer.com/chapter/10.1007/978-3-031-74627-7_1)).
 
 Currently, this terminal-based tool works with the Canvas Learning Management System (LMS) using the 
 [CanvasAPI](https://github.com/ucfopen/canvasapi). In addition to increased functionality, development 
