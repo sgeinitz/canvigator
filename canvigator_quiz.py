@@ -26,11 +26,11 @@ class CanvigatorQuiz:
         self.config.modifyQuizPrefix(self.quiz_name + "_")
         
         # use course_code prefix, course number, and CRN to create course_path
-        tmp_course_code = str(self.canvas_course.canvas_course.course_code)
-        course_path = tmp_course_code.split('-')[0] + tmp_course_code.split('-')[1] + "_" + tmp_course_code[-5:]
-        course_path = "/" + course_path.lower()
-        course_path = course_path.replace(" ", "")
-        self.config.addCourseToPath(course_path)
+        #tmp_course_code = str(self.canvas_course.canvas_course.course_code)
+        #course_path = tmp_course_code.split('-')[0] + tmp_course_code.split('-')[1] + "_" + tmp_course_code[-5:]
+        #course_path = "/" + course_path.lower()
+        #course_path = course_path.replace(" ", "")
+        #self.config.addCourseToPath(course_path)
 
         self.quiz_df = None
         self.n_students = None

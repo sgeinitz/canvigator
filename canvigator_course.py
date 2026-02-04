@@ -27,6 +27,13 @@ class CanvigatorCourse:
         if verbose:
             print(self.students)
 
+        # use course_code prefix, course number, and CRN to create course_path
+        tmp_course_code = str(self.canvas_course.course_code)
+        course_path = tmp_course_code.split('-')[0] + tmp_course_code.split('-')[1] + "_" + tmp_course_code[-5:]
+        course_path = "/" + course_path.lower()
+        course_path = course_path.replace(" ", "")
+        self.config.addCourseToPath(course_path)
+
     def getAllQuizzesAndSubmissions(self):
         """ Get all quizzes and their submissions for the course. """
         all_quizzes = self.canvas_course.get_quizzes()
