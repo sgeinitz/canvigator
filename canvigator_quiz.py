@@ -493,10 +493,10 @@ class CanvigatorQuiz:
     def getAllSubmissionsAndEvents(self):
         quiz_takers = self.quiz_df[['name', 'id']].copy()
 
-        # Define a user_events dataframe with columns 'name', 'id', 'event', 'timestamp'
-        all_submissions = pd.DataFrame(columns=['id', 'attempt', 'score', 'timestamp'])
-        all_subs_by_question = pd.DataFrame(columns=['id', 'attempt', 'question', 'points', 'correct'])
-        all_subs_and_events = pd.DataFrame(columns=['id', 'attempt', 'event', 'timestamp'])
+        # Lists to collect data before creating DataFrames
+        submissions_data = []
+        subs_by_question_data = []
+        subs_and_events_data = []
 
         subs = self.canvas_quiz.get_submissions(include=['submission_history'])
         for i, sub in enumerate(subs):
@@ -507,69 +507,58 @@ class CanvigatorQuiz:
                                                                        include=['submission_history'])[0]    
             n_attempts = len(student_subs.submission_history)
             for i in range(n_attempts):
+                attempt_data = student_subs.submission_history[i]
+                attempt_num = attempt_data['attempt']
+                
                 new_row = {'id': sub.user_id, 
-                        'attempt': student_subs.submission_history[i]['attempt'],
-                        'score': student_subs.submission_history[i]['score'],
-                        'timestamp': student_subs.submission_history[i]['submitted_at']}
-                if len(all_submissions) == 0:
-                    all_submissions = pd.DataFrame([new_row])
-                else:
-                    all_submissions = pd.concat([all_submissions, pd.DataFrame([new_row])], ignore_index=True)
-                #all_submissions.loc[len(all_submissions)] = [sub.user_id,
-                #                                             student_subs.submission_history[i]['attempt'],
-                #                                             student_subs.submission_history[i]['score'],
-                #                                             student_subs.submission_history[i]['submitted_at']],
+                        'attempt': attempt_num,
+                        'score': attempt_data['score'],
+                        'timestamp': attempt_data['submitted_at']}
+                submissions_data.append(new_row)
 
                 # check that this an attempt/submission exists before trying to get all of the events for it
                 try:
-                    if new_row['attempt'] is None:
+                    if attempt_num is None:
                         break
                 except Exception:
                     break
 
                 # now get question-level data for this attempt
-                for q, qdata in enumerate(student_subs.submission_history[i]['submission_data']):
+                for q, qdata in enumerate(attempt_data['submission_data']):
                     new_q_row = {'id': sub.user_id,
-                                 'attempt': student_subs.submission_history[i]['attempt'],
+                                 'attempt': attempt_num,
                                  'question': q+1,
                                  'points': qdata['points'],
                                  'correct': qdata['correct']}
-                    if len(all_subs_by_question) == 0:
-                        all_subs_by_question = pd.DataFrame([new_q_row])
-                    else:
-                        all_subs_by_question = pd.concat([all_subs_by_question, pd.DataFrame([new_q_row])], ignore_index=True)
-                    #all_subs_by_question.loc[len(all_subs_by_question)] = [sub.user_id,
-                    #                                                       student_subs.submission_history[i]['attempt'],
-                    #                                                       qdata['question_id'],
-                    #                                                       qdata['points'],
-                    #                                                       qdata['correct'],
-                    #                                                       student_subs.submission_history[i]['submitted_at']]
+                    subs_by_question_data.append(new_q_row)
 
                 # see scratch_work.py for getting all events for this submission
                 this_submission_events = sub.get_submission_events(attempt=i+1) # get sub. events for this attempt
-                #print(type(this_submission_events))
 
                 try:
                     for event in this_submission_events:
-                        # check that event.event_type exists and break if it does not
-                        #    if event is None:
-                        #        break
-                        #except AttributeError:
-                        #    break
-                        #new_event_row = {'id': sub.user_id, 
-                        #        'attempt': i+1,
-                        #        'event': event.event_type,
-                        #        'timestamp': event.created_at}
-                        #all_subs_and_events = pd.concat([all_subs_and_events, pd.DataFrame([new_event_row])], ignore_index=True)
-                        all_subs_and_events.loc[len(all_subs_and_events)] = [sub.user_id, i+1, event.event_type, event.created_at]
+                        subs_and_events_data.append({
+                            'id': sub.user_id, 
+                            'attempt': i+1, 
+                            'event': event.event_type, 
+                            'timestamp': event.created_at
+                        })
                 except Exception:
                     print(f"  !!! could not get events for student id {sub.user_id} for attempt {i+1}")
                     continue
 
+        # Create DataFrames from the collected lists
+        all_submissions = pd.DataFrame(submissions_data)
+        all_subs_by_question = pd.DataFrame(subs_by_question_data)
+        all_subs_and_events = pd.DataFrame(subs_and_events_data, columns=['id', 'attempt', 'event', 'timestamp'])
+
         # do a full outer join of quiz_takers on 'id' to get names for the submission data
-        all_submissions = pd.merge(quiz_takers[['name', 'id']], all_submissions, on='id', how='inner')
-        all_subs_by_question = pd.merge(quiz_takers[['name', 'id']], all_subs_by_question, on='id', how='inner')
-        all_subs_and_events = pd.merge(quiz_takers[['name', 'id']], all_subs_and_events, on='id', how='inner')
+        if not all_submissions.empty:
+            all_submissions = pd.merge(quiz_takers[['name', 'id']], all_submissions, on='id', how='inner')
+        if not all_subs_by_question.empty:
+            all_subs_by_question = pd.merge(quiz_takers[['name', 'id']], all_subs_by_question, on='id', how='inner')
+        if not all_subs_and_events.empty:
+            all_subs_and_events = pd.merge(quiz_takers[['name', 'id']], all_subs_and_events, on='id', how='inner')
         
         all_submissions_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
             "_all_submissions_" + datetime.today().strftime('%Y%m%d') + ".csv"

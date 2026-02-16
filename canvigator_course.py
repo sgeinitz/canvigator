@@ -48,15 +48,30 @@ class CanvigatorCourse:
     def saveStudentActivity(self, data_path):
         """ Get student activity from two sources and save to csv files """
         student_summary_data = self.canvas_course.get_course_level_student_summary_data()
-        summ_acts = pd.DataFrame(columns=['id', 'page_views', 'missing', 'late'])
+        
+        summ_acts_data = []
         for s in student_summary_data:
-            summ_acts.loc[len(summ_acts)] = [s.id, s.page_views, s.tardiness_breakdown['missing'], s.tardiness_breakdown['late']]
+            summ_acts_data.append({
+                'id': s.id, 
+                'page_views': s.page_views, 
+                'missing': s.tardiness_breakdown['missing'], 
+                'late': s.tardiness_breakdown['late']
+            })
+        summ_acts = pd.DataFrame(summ_acts_data, columns=['id', 'page_views', 'missing', 'late'])
+        
         summ_activity_csv = data_path + "course_activity_partA_" + datetime.today().strftime('%Y%m%d') + ".csv"
         summ_acts.to_csv(summ_activity_csv, index=False)
 
-        acts = pd.DataFrame(columns=['name', 'id', 'total_activity_mins', 'last_activity_at'])
+        acts_data = []
         for s in self.students:
-            acts.loc[len(acts)] = [s['name'], s['id'], s['total_activity_time'] / 60.0, s['last_activity_at']]
+            acts_data.append({
+                'name': s['name'], 
+                'id': s['id'], 
+                'total_activity_mins': s['total_activity_time'] / 60.0 if s['total_activity_time'] is not None else None, 
+                'last_activity_at': s['last_activity_at']
+            })
+        acts = pd.DataFrame(acts_data, columns=['name', 'id', 'total_activity_mins', 'last_activity_at'])
+        
         activity_csv = data_path + "course_activity_partB_" + datetime.today().strftime('%Y%m%d') + ".csv"
         acts.to_csv(activity_csv, index=False)
 
