@@ -59,8 +59,8 @@ class CanvigatorCourse:
             })
         summ_acts = pd.DataFrame(summ_acts_data, columns=['id', 'page_views', 'missing', 'late'])
         
-        summ_activity_csv = data_path + "course_activity_partA_" + datetime.today().strftime('%Y%m%d') + ".csv"
-        summ_acts.to_csv(summ_activity_csv, index=False)
+        #summ_activity_csv = data_path + "course_activity_partA_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        #summ_acts.to_csv(summ_activity_csv, index=False)
 
         acts_data = []
         for s in self.students:
@@ -72,11 +72,11 @@ class CanvigatorCourse:
             })
         acts = pd.DataFrame(acts_data, columns=['name', 'id', 'total_activity_mins', 'last_activity_at'])
         
-        activity_csv = data_path + "course_activity_partB_" + datetime.today().strftime('%Y%m%d') + ".csv"
-        acts.to_csv(activity_csv, index=False)
+        #activity_csv = data_path + "course_activity_partB_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        #acts.to_csv(activity_csv, index=False)
 
         # do an outer join of summ_acts and acts on 'id' column and save to csv file
         merged_acts = pd.merge(summ_acts, acts, on='id', how='outer')
         merged_acts = merged_acts[['name', 'id', 'page_views', 'missing', 'late', 'total_activity_mins', 'last_activity_at']]
-        merged_acts_csv = data_path + "course_activity_both_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        merged_acts_csv = data_path + "course_activity_" + datetime.today().strftime('%Y%m%d') + ".csv"
         merged_acts.to_csv(merged_acts_csv, index=False)
