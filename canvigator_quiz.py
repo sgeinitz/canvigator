@@ -425,8 +425,8 @@ class CanvigatorQuiz:
                     print(f"p1, p3, dist = {(pair[0], pair[2], self.dist_matrix.loc[pair[0], pair[2]])}")
                     print(f"p2, p3, dist = {(pair[1], pair[2], self.dist_matrix.loc[pair[1], pair[2]])}")
 
-        df_pairs = pd.DataFrame({'person1': name1, 'person2': name2, 'person3': name3,
-                                 'id1': person1, 'id2': person2, 'id3': person3, 'distance': [x[-1] for x in pairs]})
+        df_pairs = pd.DataFrame({'person1': name1, 'id1': person1, 'person2': name2, 'id2': person2,
+                                 'person3': name3, 'id3': person3, 'distance': [x[-1] for x in pairs]})
         pairs_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
             "_pairing_via_" + method + "_" + datetime.today().strftime('%Y%m%d') + ".csv"
         df_pairs.to_csv(pairs_csv, index=False)
