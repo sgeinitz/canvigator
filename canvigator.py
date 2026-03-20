@@ -63,11 +63,8 @@ elif task in ['pair', 'award-bonus', 're-award-bonus']:
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
 
-    # Obtain quiz data and generate plots to visualize the data.
+    # Obtain quiz data for the selected task.
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
-    quiz.generateQuestionHistograms()
-    quiz.generateDistanceMatrix(only_present=False)
-    quiz.getUserQuizEvents()
 
     if task == 'pair':
         # Open the CSV file with student data for who is present today and recalculate distance matrix.
@@ -81,6 +78,8 @@ elif task in ['pair', 'award-bonus', 're-award-bonus']:
         quiz.createStudentPairings(method='med', write_csv=True)
 
     elif task == 'award-bonus':
+        quiz.generateDistanceMatrix(only_present=False)
+
         # Prompt user to find the pairings CSV file
         quiz.getPastPairingsCSV()
 
@@ -91,6 +90,8 @@ elif task in ['pair', 'award-bonus', 're-award-bonus']:
         quiz.awardBonusPoints(dry_run=dry_run)
 
     elif task == 're-award-bonus':
+        quiz.generateDistanceMatrix(only_present=False)
+
         # Prompt user to find the pairings CSV file
         quiz.getPastBonusCSV()
 

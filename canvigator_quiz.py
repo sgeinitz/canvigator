@@ -107,6 +107,10 @@ class CanvigatorQuiz:
             for key, val in self.question_stats.items():
                 print("key =", key, "->", val)
 
+    def figurePath(self, figure_name):
+        """Return a figure output path with the date suffix at the end."""
+        return self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{figure_name}_{today_str()}.png"
+
     def progressBar(self, current, total, bar_length=20):
         """Displays or updates a console progress bar."""
         progress = current / total
@@ -128,7 +132,7 @@ class CanvigatorQuiz:
             axis[i].set_title('question: ' + q.split('_')[0])
         axis[0].set_ylabel('# of people')
         plt.tight_layout()  # Or try plt.subplots_adjust(left=0.05, right=0.98, bottom=0.15, top=0.9)
-        figure.savefig(self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}_histograms.png", dpi=200)
+        figure.savefig(self.figurePath("histograms"), dpi=200)
         plt.close('all')
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
@@ -173,7 +177,7 @@ class CanvigatorQuiz:
         )
         plt.tight_layout()
         plt.rc('font', size=9)
-        plt.savefig(self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}_dist_{distance_type}.png", dpi=200)
+        plt.savefig(self.figurePath(f"dist_{distance_type}"), dpi=200)
         plt.close()
 
     def openPresentCSV(self, csv_path=None):
@@ -349,7 +353,7 @@ class CanvigatorQuiz:
         axes[3].set_ylim(0, 9)
         axes[0].set_ylabel('# of Student Pairs')
         plt.tight_layout()
-        plt.savefig(self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_compare_pairing_methods_{today_str()}.png", dpi=200)
+        plt.savefig(self.figurePath("compare_pairing_methods"), dpi=200)
         plt.close()
 
     def writePairingsCSV(self, method, pairs):
@@ -437,28 +441,6 @@ class CanvigatorQuiz:
                 self.df_paired_students.loc[self.df_paired_students['id'] == person2, 'bonus'] = bonus
                 if person3 > 0:
                     self.df_paired_students.loc[self.df_paired_students['id'] == person3, 'bonus'] = bonus
-
-    def getUserQuizEvents(self):
-        quiz_takers = self.quiz_df[['name', 'id']].copy()
-
-        # Define a user_events dataframe with columns 'name', 'id', 'event', 'timestamp'
-        user_events = pd.DataFrame(columns=['name', 'id', 'event', 'timestamp'])
-
-        subs = self.canvas_quiz.get_submissions()
-        for i, sub in enumerate(subs):
-            # Get row from quiz_takers where column 'id' matches sub.user_id
-            row = quiz_takers[quiz_takers['id'] == sub.user_id]
-            if len(row) == 0:  # no quiz taker found for this user
-                continue
-
-            # Get user submission events for this submission
-            events = sub.get_submission_events()
-
-            for event in events:
-                user_events.loc[len(user_events)] = [row['name'].values[0], sub.user_id, event.event_type, event.created_at]
-
-        user_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_user_events_{today_str()}.csv"
-        user_events.to_csv(user_events_csv, index=False)
 
     def getAllSubmissionsAndEvents(self):
         quiz_takers = self.quiz_df[['name', 'id']].copy()
