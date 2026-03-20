@@ -46,7 +46,8 @@ class CanvigatorCourse:
             # if q is a legit quiz, with at least one submission, then get submissions
             quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
             # check that the dataframe, quiz.quiz_df has at least 2 rows (header + at least one submission)
-            if quiz.published and quiz.n_students != None and quiz.n_students > 1:
+            if quiz.published and quiz.n_students is not None and quiz.n_students > 1:
+                quiz.generateQuestionHistograms()
                 quiz.getAllSubmissionsAndEvents()
 
     def saveStudentActivity(self, data_path):
