@@ -1,13 +1,16 @@
+import logging
 import pandas as pd
 import canvigator_quiz as cq
-from datetime import datetime
+from canvigator_utils import today_str
+
+logger = logging.getLogger(__name__)
 
 
 class CanvigatorCourse:
-    """ A general class for a course and associated attributes/data. """
+    """A general class for a course and associated attributes/data."""
 
     def __init__(self, canvas, canvas_course, config, verbose=False):
-        """ Retrieve the selected course and get list of all students. """
+        """Retrieve the selected course and get list of all students."""
         self.canvas = canvas
         self.canvas_course = canvas_course
         self.config = config
@@ -33,9 +36,10 @@ class CanvigatorCourse:
         course_path = "/" + course_path.lower()
         course_path = course_path.replace(" ", "")
         self.config.addCourseToPath(course_path)
+        logger.info(f"Initialized course: {self.canvas_course.name}")
 
     def getAllQuizzesAndSubmissions(self):
-        """ Get all quizzes and their submissions for the course. """
+        """Get all quizzes and their submissions for the course."""
         all_quizzes = self.canvas_course.get_quizzes()
 
         for i, q in enumerate(all_quizzes):
@@ -46,37 +50,32 @@ class CanvigatorCourse:
                 quiz.getAllSubmissionsAndEvents()
 
     def saveStudentActivity(self, data_path):
-        """ Get student activity from two sources and save to csv files """
+        """Get student activity from two sources and save to csv files."""
         student_summary_data = self.canvas_course.get_course_level_student_summary_data()
-        
+
         summ_acts_data = []
         for s in student_summary_data:
             summ_acts_data.append({
-                'id': s.id, 
-                'page_views': s.page_views, 
-                'missing': s.tardiness_breakdown['missing'], 
+                'id': s.id,
+                'page_views': s.page_views,
+                'missing': s.tardiness_breakdown['missing'],
                 'late': s.tardiness_breakdown['late']
             })
         summ_acts = pd.DataFrame(summ_acts_data, columns=['id', 'page_views', 'missing', 'late'])
-        
-        #summ_activity_csv = data_path + "course_activity_partA_" + datetime.today().strftime('%Y%m%d') + ".csv"
-        #summ_acts.to_csv(summ_activity_csv, index=False)
 
         acts_data = []
         for s in self.students:
             acts_data.append({
-                'name': s['name'], 
-                'id': s['id'], 
-                'total_activity_mins': s['total_activity_time'] / 60.0 if s['total_activity_time'] is not None else None, 
+                'name': s['name'],
+                'id': s['id'],
+                'total_activity_mins': s['total_activity_time'] / 60.0 if s['total_activity_time'] is not None else None,
                 'last_activity_at': s['last_activity_at']
             })
         acts = pd.DataFrame(acts_data, columns=['name', 'id', 'total_activity_mins', 'last_activity_at'])
-        
-        #activity_csv = data_path + "course_activity_partB_" + datetime.today().strftime('%Y%m%d') + ".csv"
-        #acts.to_csv(activity_csv, index=False)
 
         # do an outer join of summ_acts and acts on 'id' column and save to csv file
         merged_acts = pd.merge(summ_acts, acts, on='id', how='outer')
         merged_acts = merged_acts[['name', 'id', 'page_views', 'missing', 'late', 'total_activity_mins', 'last_activity_at']]
-        merged_acts_csv = data_path + "course_activity_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        merged_acts_csv = data_path / f"course_activity_{today_str()}.csv"
         merged_acts.to_csv(merged_acts_csv, index=False)
+        logger.info(f"Saved student activity to {merged_acts_csv}")

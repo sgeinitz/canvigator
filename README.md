@@ -77,24 +77,115 @@ subdirectories have been created.
 
 ### Usage
 
-There are two main workflows that are a part of utilizing PICA in a course. The
-first is in creating the pairs of students to work together on a
-(collaborative) CA, i.e., quiz, in their LMS. This requires that the students'
-previous (independent) CA. This first workflow is the one that is currently
-implemented here in Canvigator and can be carried out by following these steps: 
+```bash
+source set_env.sh                        # set Canvas environment variables (once per terminal session)
+python canvigator.py <task>              # run a task
+python canvigator.py --dry-run <task>    # preview bonus changes without modifying Canvas
+```
 
-1. Open a command line terminal and navigate to the __canvigator__ directory containing the repository that was cloned during installation (see above).  
-2. Run the configuration script to set the environment variables by typing, `source set_env.sh`, at the terminal prompt.  
-3. Before running the canvigator script to create student pairs, you will first need to mark which students are physically present in the classroom.  This is the same class session in which students will take the collaborative quiz. You  mark which students are present
-in the classroom today by modifying the _'present_xxx.csv'_ file in the _data/_
-directory.  See the example _'present_example.csv'_ file in the _data/_
-directory and keep the same format (i.e. columns, column names, etc.).  
-4. Run the canvigator application by typing, `python canvigator.py`.  This will prompt you for the course, (independent) quiz to use for the pairing method, the exact filename of _'present_xxx.csv'_ file denoting which students are present today, and the pairing method to be used.  
-5. Once the canvigator application has been run, open the _data/_ directory and look for a file that was just created with a name matching the pattern, _'quiz_xxx_pairing_via_xxx.csv'_.  
-6. You can then share this list with students in the classroom, and allow them to move around to work with their assigned partner. 
+Available tasks: `activity`, `pair`, `award-bonus`, `re-award-bonus`, `all-subs`
 
-The second workflow, which is not yet implemented in Canvigator, 
-involves scoring the collaborative quizzes and awarding bonus points 
-when there is evidence that students have discussed and agreed upon 
-the answers to the quiz (as intended). To carry this out we currently 
-use a Jupyter notebook (see notebooks directory). 
+All tasks begin by prompting you to select a course. Output files are written to
+`data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
+Canvas course code. In the file names below, `<quiz>` refers to the quiz title
+(lowercased, spaces replaced with underscores), `<id>` is the Canvas quiz ID,
+and `YYYYMMDD` is the current date.
+
+---
+
+#### `activity` — Export student activity
+
+Fetches enrollment activity data and course-level summary data from Canvas,
+merges them, and saves a single CSV.
+
+| | Files |
+|---|---|
+| **Input** | _(none — data comes from the Canvas API)_ |
+| **Output** | `data/<course>/course_activity_YYYYMMDD.csv` |
+
+The output CSV contains columns: `name`, `id`, `page_views`, `missing`, `late`,
+`total_activity_mins`, `last_activity_at`.
+
+---
+
+#### `pair` — Create student pairings from quiz scores
+
+Uses an independent (pre-class) quiz to pair students for a collaborative
+in-class quiz. Computes pairwise Euclidean distance between student
+answer-score vectors and applies a greedy pairing algorithm.
+
+**Before running:** create a `present_*.csv` file in `data/<course>/` marking
+which students are physically present. See `data/present_example.csv` for the
+required format (columns: `name`, `id`, `present` where 1 = present).
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/present_*.csv` (user-created, selected via prompt) |
+| **Output — data** | `data/<course>/<quiz>_<id>_student_analysis_YYYYMMDD.csv` — raw quiz report downloaded from Canvas |
+| | `data/<course>/<quiz>_<id>_user_events_YYYYMMDD.csv` — per-student quiz submission events |
+| | `data/<course>/<quiz>_<id>_pairing_via_med_YYYYMMDD.csv` — student pairings (median method) |
+| **Output — figures** | `figures/<course>/<quiz>_<id>_YYYYMMDD_histograms.png` — per-question score histograms |
+| | `figures/<course>/<quiz>_<id>_YYYYMMDD_dist_euclid.png` — distance matrix heatmap (present students) |
+| | `figures/<course>/<quiz>_<id>_compare_pairing_methods_YYYYMMDD.png` — comparison of all four pairing methods |
+
+**Typical workflow:**
+1. Mark which students are present in your `present_*.csv` file.
+2. Run `python canvigator.py pair` and select the course, quiz, and presence CSV when prompted.
+3. Open the generated `*_pairing_via_med_*.csv` and share pairings with the class.
+
+---
+
+#### `award-bonus` — Award bonus points for collaborative quiz answers
+
+After students complete the collaborative quiz, this task checks whether paired
+students answered identically (distance ≤ 0.01) and awards bonus fudge points
+on their Canvas submissions.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/*pairing*.csv` (a pairings CSV from a prior `pair` run, selected via prompt) |
+| **Output** | `data/<course>/<quiz>_<id>_student_analysis_YYYYMMDD.csv` — raw quiz report |
+| | `data/<course>/<quiz>_<id>_user_events_YYYYMMDD.csv` — quiz submission events |
+| | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with bonus column |
+| **Output — figures** | `figures/<course>/<quiz>_<id>_YYYYMMDD_histograms.png` — per-question score histograms |
+| | `figures/<course>/<quiz>_<id>_YYYYMMDD_dist_euclid.png` — distance matrix heatmap |
+| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
+
+Use `--dry-run` to preview which students would receive bonus points without
+modifying anything in Canvas. In dry-run mode the output CSV is named
+`*_scores_w_bonus_dryrun_*.csv`.
+
+---
+
+#### `re-award-bonus` — Re-award bonus points after a quiz retake
+
+If students retake the quiz and score higher than their original attempt, this
+task re-applies the previously earned bonus as fudge points on the new
+submission.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/*w_bonus*.csv` (a bonus CSV from a prior `award-bonus` run, selected via prompt) |
+| **Output** | `data/<course>/<quiz>_<id>_student_analysis_YYYYMMDD.csv` — raw quiz report |
+| | `data/<course>/<quiz>_<id>_user_events_YYYYMMDD.csv` — quiz submission events |
+| | `data/<course>/<quiz>_<id>_scores_w_bonus_new_YYYYMMDD.csv` — updated scores with bonus |
+| **Output — figures** | `figures/<course>/<quiz>_<id>_YYYYMMDD_histograms.png` — per-question score histograms |
+| | `figures/<course>/<quiz>_<id>_YYYYMMDD_dist_euclid.png` — distance matrix heatmap |
+| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
+
+In dry-run mode the output CSV is named `*_scores_w_bonus_new_dryrun_*.csv`.
+
+---
+
+#### `all-subs` — Export all quiz submissions and events
+
+Iterates over every published quiz in the course and downloads detailed
+submission history and events for each one.
+
+| | Files |
+|---|---|
+| **Input** | _(none — data comes from the Canvas API)_ |
+| **Output (per quiz)** | `data/<course>/<quiz>_<id>_student_analysis_YYYYMMDD.csv` — raw quiz report |
+| | `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv` — all submission attempts with scores |
+| | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` — per-question results for each attempt |
+| | `data/<course>/<quiz>_<id>_all_subs_and_events_YYYYMMDD.csv` — timestamped submission events |

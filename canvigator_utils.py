@@ -1,41 +1,93 @@
 import os
 import re
 import sys
-import random
-import requests
-import time
-import pandas as pd
-import scipy.stats as stats
-import scipy.spatial.distance as distance
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-import seaborn as sbn
+import logging
+from pathlib import Path
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+
+def today_str():
+    """Return today's date as a YYYYMMDD string."""
+    return datetime.today().strftime('%Y%m%d')
+
+
+def setup_logging():
+    """Configure logging to file and console (warnings only on console, all to file)."""
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    file_handler = logging.FileHandler(f"canvigator_{today_str()}.log")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
+
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+
+def prompt_for_index(prompt_msg, max_index):
+    """Prompt the user for a numeric index, retrying on invalid input."""
+    while True:
+        raw = input(prompt_msg)
+        try:
+            index = int(re.sub(r'\D', '', raw))
+        except ValueError:
+            print(f"Invalid input. Please enter a number between 0 and {max_index}.")
+            continue
+        if index < 0 or index > max_index:
+            print(f"Invalid selection. Please enter a number between 0 and {max_index}.")
+            continue
+        return index
+
+
+def selectCSVFromList(directory, keyword, prompt_msg, verbose=False):
+    """
+    List CSV files in directory matching keyword, prompt user to select one,
+    and return the full path as a Path object.
+    """
+    csv_files = sorted(f for f in os.listdir(directory) if keyword in f)
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files containing '{keyword}' found in {directory}")
+
+    print("\nCSV Options:")
+    for i, f in enumerate(csv_files):
+        fstring = f"[ {i:2d} ] {f}" if len(csv_files) > 10 else f"[ {i} ] {f}"
+        print(fstring)
+
+    csv_index = prompt_for_index(prompt_msg, len(csv_files) - 1)
+    selected = csv_files[csv_index]
+    print(f"\nSelected csv: {selected}")
+    logger.info(f"Selected CSV: {selected}")
+    return Path(directory) / selected
 
 
 class CanvigatorConfig:
-    """ Canvigator configuration class, mostly for file paths """
+    """Canvigator configuration class, mostly for file paths."""
 
     def __init__(self):
-        """ Simple file path configuration for data and figures (for both input and output). """
-        self.data_path = os.getcwd() + "/data/"
-        self.figures_path = os.getcwd() + "/figures/"
+        """Simple file path configuration for data and figures (for both input and output)."""
+        self.data_path = Path.cwd() / "data"
+        self.figures_path = Path.cwd() / "figures"
         self.quiz_prefix = "quiz_"
 
     def modifyQuizPrefix(self, new_prefix):
-        """ Modify the quiz file name prefix. """
+        """Modify the quiz file name prefix."""
         self.quiz_prefix = new_prefix
 
     def addCourseToPath(self, course_path):
-        # change data and figures paths if necessary, creating them if they don't exist
-        if not self.data_path.endswith(course_path + "/"):    
-            if not os.path.exists(self.data_path + course_path):
-                os.makedirs(self.data_path + course_path)
-            self.data_path += course_path + "/"
-        if not self.figures_path.endswith(course_path + "/"):
-            if not os.path.exists(self.figures_path + course_path):
-                os.makedirs(self.figures_path + course_path)
-            self.figures_path += course_path + "/"
+        """Change data and figures paths if necessary, creating them if they don't exist."""
+        course_dir = course_path.lstrip("/")
+        if self.data_path.name != course_dir:
+            self.data_path = self.data_path / course_dir
+            self.data_path.mkdir(parents=True, exist_ok=True)
+        if self.figures_path.name != course_dir:
+            self.figures_path = self.figures_path / course_dir
+            self.figures_path.mkdir(parents=True, exist_ok=True)
 
 
 def selectFromList(paginated_list, item_type="item"):
@@ -44,17 +96,17 @@ def selectFromList(paginated_list, item_type="item"):
     and lists each item in it, then prompts user to select one item.
     """
     print(f"\nOptions:")
-    i = 0
     subobject_list = []
     for i, so in enumerate(paginated_list):
         print(f"[ {i:2d} ] {so}")
         subobject_list.append(so)
-    str_index = input(f"\nSelect {item_type} from above using index in square brackets: ")
 
-    if int(str_index) < 0 or int(str_index) > i:
-        raise IndexError("Invalid selection")
+    if not subobject_list:
+        raise ValueError(f"No {item_type}s found.")
 
-    return subobject_list[int(str_index)]
+    index = prompt_for_index(f"\nSelect {item_type} from above using index in square brackets: ", len(subobject_list) - 1)
+    logger.info(f"Selected {item_type} at index {index}: {subobject_list[index]}")
+    return subobject_list[index]
 
 
 def selectCourse(canvas):
@@ -92,37 +144,29 @@ def selectCourse(canvas):
     print("\nSelect Course Type:")
     print("[ 0 ] Past Courses")
     print("[ 1 ] Current Courses")
-    selection = input("\nSelect course type (using index in '[ ]'): ")
-    selection = int(re.sub(r'\D', '', selection))
+    selection = prompt_for_index("\nSelect course type (using index in '[ ]'): ", 1)
 
     if selection == 0:
         print("\nPast Courses:")
         for i, course in enumerate(past_courses):
             print(f"[ {i:2d} ] {course.name}")
         valid_courses = past_courses
-
-    elif selection == 1:
+    else:
         print("\nCurrent Courses:")
         for i, course in enumerate(current_courses):
             print(f"[ {i:2d} ] {course.name}")
         valid_courses = current_courses
-    else:
-        raise IndexError("Invalid selection format. Please select '0' for past or '1' for current.")
 
-    str_index = input("\nSelect a course from the list above (using index in '[ ]'): ")
+    if not valid_courses:
+        print("No courses found for the selected type.")
+        sys.exit(1)
 
-    # if not str_index.startswith("[") or not str_index.endswith("]"):
-    #    raise ValueError("Invalid selection format. Please use '[ ]' around the index.")
-    # Convert input into an integer
-    # course_index = int(str_index[1:-1])
+    course_index = prompt_for_index("\nSelect a course from the list above (using index in '[ ]'): ", len(valid_courses) - 1)
 
-    # remove any characters that are not digits
-    course_index = int(re.sub(r'\D', '', str_index))
+    selected = canvas.get_course(valid_courses[course_index].id)
+    logger.info(f"Selected course: {selected.name}")
+    return selected
 
-    if course_index < 0 or course_index >= len(valid_courses):
-        raise IndexError("Invalid course selection.")
-
-    return canvas.get_course(valid_courses[course_index].id)
 
 def sendMessage(canvas, pica_course, pairs):
     """

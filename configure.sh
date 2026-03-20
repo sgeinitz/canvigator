@@ -24,8 +24,8 @@ echo "#!/bin/bash" > "$SETENV"
 echo "export CANVAS_URL=\"$LMSURL\"" >> "$SETENV"
 echo "export CANVAS_TOKEN=\"$TOKEN\"" >> "$SETENV"
 
-# Set the execute permission for the configuration script
-chmod +x "$SETENV"
+# Restrict permissions so only the owner can read the token
+chmod 600 "$SETENV"
 
 
 DATA="data"

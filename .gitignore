@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 .vscode/launch.json
 GEMINI.md
+CLAUDE.md
 
 visualize_events.ipynb
 check4_3subs_cs3120.ipynb
@@ -11,6 +12,7 @@ check4_3subs_cs4050.ipynb
 scratchwork.py
 
 # any data figures and their directories
+*.log
 *.csv
 *.pickle
 *.pkl

@@ -1,7 +1,7 @@
 import sys
-import os
 import time
 import random
+import logging
 import requests
 import pandas as pd
 import scipy.stats as stats
@@ -9,13 +9,16 @@ import scipy.spatial.distance as distance
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import seaborn as sbn
-from datetime import datetime
+from canvigator_utils import today_str, selectCSVFromList
+
+logger = logging.getLogger(__name__)
+
 
 class CanvigatorQuiz:
-    """ A class for one quiz and associated attributes/data. """
+    """A class for one quiz and associated attributes/data."""
 
     def __init__(self, canvas, canvas_course, canvas_quiz, config, verbose=False):
-        """ Initialize quiz object by getting all quiz data from Canvas. """
+        """Initialize quiz object by getting all quiz data from Canvas."""
         self.canvas = canvas
         self.canvas_course = canvas_course
         self.canvas_quiz = canvas_quiz
@@ -24,13 +27,6 @@ class CanvigatorQuiz:
         self.config = config
         self.quiz_name = self.canvas_quiz.title.lower().replace(" ", "_")
         self.config.modifyQuizPrefix(self.quiz_name + "_")
-        
-        # use course_code prefix, course number, and CRN to create course_path
-        #tmp_course_code = str(self.canvas_course.canvas_course.course_code)
-        #course_path = tmp_course_code.split('-')[0] + tmp_course_code.split('-')[1] + "_" + tmp_course_code[-5:]
-        #course_path = "/" + course_path.lower()
-        #course_path = course_path.replace(" ", "")
-        #self.config.addCourseToPath(course_path)
 
         self.quiz_df = None
         self.n_students = None
@@ -50,7 +46,7 @@ class CanvigatorQuiz:
             self.getQuizData()
 
     def getQuizData(self):
-        """ Download student_analysis csv quiz report. """
+        """Download student_analysis csv quiz report."""
         quiz_report_request = self.canvas_quiz.create_report('student_analysis')
         request_id = quiz_report_request.progress_url.split('/')[-1]
         if self.verbose:
@@ -59,24 +55,22 @@ class CanvigatorQuiz:
 
         quiz_report_progress = self.canvas.get_progress(request_id)
         while quiz_report_progress.workflow_state != 'completed':
-            #print(f"  report progress: {quiz_report_progress.completion}% completed")
             self.progressBar(quiz_report_progress.completion, 100)
             time.sleep(0.1)
             quiz_report_progress = self.canvas.get_progress(request_id)
         self.progressBar(quiz_report_progress.completion, 100)
         print(f"\n{self.quiz_name} download complete")
+        logger.info(f"Quiz report downloaded: {self.quiz_name}")
 
         quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
         quiz_csv_url = quiz_report.file['url']
         quiz_csv = requests.get(quiz_csv_url)
-        csv_name = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_student_analysis_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_student_analysis_{today_str()}.csv"
 
-        csv = open(csv_name, 'wb')
-        for content in quiz_csv.iter_content(chunk_size=2**20):
-            if content:
-                csv.write(content)
-        csv.close()
+        with open(csv_name, 'wb') as f:
+            for content in quiz_csv.iter_content(chunk_size=2**20):
+                if content:
+                    f.write(content)
 
         self.quiz_df = pd.read_csv(csv_name)
 
@@ -107,16 +101,14 @@ class CanvigatorQuiz:
                 'var': self.quiz_df[score_col].var(),
                 'n_zeros': sum(self.quiz_df[score_col] == 0.0),
                 'n_ones': sum(self.quiz_df[score_col] == 1.0),
-                #'entropy': stats.entropy(self.quiz_df[score_col])
             }
 
         if self.verbose:
             for key, val in self.question_stats.items():
                 print("key =", key, "->", val)
 
-
     def progressBar(self, current, total, bar_length=20):
-        """ Displays or updates a console progress bar. """
+        """Displays or updates a console progress bar."""
         progress = current / total
         arrow = '=' * int(progress * bar_length - 1) + '>' if current < total else '=' * bar_length
         spaces = ' ' * (bar_length - len(arrow))
@@ -125,7 +117,7 @@ class CanvigatorQuiz:
         sys.stdout.flush()
 
     def generateQuestionHistograms(self):
-        """ Draw a histogram of scores of each question. """
+        """Draw a histogram of scores of each question."""
         mpl.style.use('seaborn-v0_8')
         figure, axis = plt.subplots(1, len(self.quiz_question_ids), sharey=True)
         figure.set_size_inches(13, 3)
@@ -136,12 +128,14 @@ class CanvigatorQuiz:
             axis[i].set_title('question: ' + q.split('_')[0])
         axis[0].set_ylabel('# of people')
         plt.tight_layout()  # Or try plt.subplots_adjust(left=0.05, right=0.98, bottom=0.15, top=0.9)
-        figure.savefig(self.config.figures_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + "_" +
-                       datetime.today().strftime('%Y%m%d') + "_histograms.png", dpi=200)
+        figure.savefig(self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}_histograms.png", dpi=200)
         plt.close('all')
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
-        """ Calculate vector distance between all possible student pairs. """
+        """Calculate vector distance between all possible student pairs."""
+        if only_present and getattr(self, 'df_quiz_scores_present', None) is None:
+            raise RuntimeError("openPresentCSV() must be called before generateDistanceMatrix(only_present=True)")
+
         quiz_df_local = self.df_quiz_scores_present.copy() if only_present else self.quiz_df.copy()
         student_ids = list(quiz_df_local['id'])
         student_ids.sort()
@@ -164,7 +158,6 @@ class CanvigatorQuiz:
                         dist = distance.cosine(x, y)
                     if dist == 0:
                         dist = 1E-4
-                    #self.dist_matrix.loc[id1][id2] = dist # this won't work with pandas v3
                     self.dist_matrix.loc[id1, id2] = dist
                     self.dist_matrix.loc[id2, id1] = dist
 
@@ -180,36 +173,26 @@ class CanvigatorQuiz:
         )
         plt.tight_layout()
         plt.rc('font', size=9)
-        plt.savefig(self.config.figures_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + "_" +
-                    datetime.today().strftime('%Y%m%d') + "_dist_" + distance_type + ".png", dpi=200)
+        plt.savefig(self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}_dist_{distance_type}.png", dpi=200)
         plt.close()
 
     def openPresentCSV(self, csv_path=None):
-        """ Prompt user for a local CSV file and return a pandas dataframe. """
+        """Prompt user for a local CSV file and return a pandas dataframe."""
         if not csv_path:
             csv_path = self.config.data_path
 
-        print("\nCSV Options:")
-        # List all files in current directory that begin with the string: 'present_'.
-        present_csvs = [f for f in os.listdir(csv_path) if f.startswith('present')]
-        present_csvs.sort()
-        for i, f in enumerate(present_csvs):
-            fstring = f"[ {i:2d} ] {f}" if len(present_csvs) > 10 else f"[ {i} ] {f}"
-            if self.verbose:
-                print(f"  [ {i:2d} ] {f}")
-            print(fstring)
-
-        # Prompt user to select a file from the list above.
-        csv_index = input("\nSelect csv of students present from above using index: ")
-
-        print(f"\nSelected csv: {present_csvs[int(csv_index)]}")
+        selected = selectCSVFromList(
+            csv_path, 'present',
+            "\nSelect csv of students present from above using index: ",
+            verbose=self.verbose
+        )
 
         # Open the file and remove those that are not present today, then return this dataframe.
-        df_present_all = pd.read_csv(csv_path + present_csvs[int(csv_index)])
+        df_present_all = pd.read_csv(selected)
         self.df_present = df_present_all[df_present_all['present'] == 1]
         print(f"  *** (double check there are {len(self.df_present)} students present today) ***")
 
-        self.df_quiz_scores_present = pd.merge(self.df_present[['name', 'id']], self.quiz_df, how='left')  # on=['name','id'])
+        self.df_quiz_scores_present = pd.merge(self.df_present[['name', 'id']], self.quiz_df, how='left')
         # replace missing vals with zero (for people who missed pre-quiz)
         with pd.option_context("future.no_silent_downcasting", True):
             self.df_quiz_scores_present = self.df_quiz_scores_present.fillna(0).infer_objects(copy=False)
@@ -218,28 +201,18 @@ class CanvigatorQuiz:
         assert len(self.df_quiz_scores_present) == len(self.df_present)
 
     def getPastPairingsCSV(self, csv_path=None):
-
-        """ Prompt for a CSV that contains past pairings for this quiz and return a pandas dataframe. """
+        """Prompt for a CSV that contains past pairings for this quiz and return a pandas dataframe."""
         if not csv_path:
             csv_path = self.config.data_path
-        print("\nCSV Options:")
 
-        # List all files in current directory that contain the string: 'pairing'.
-        pastpairs_csvs = [f for f in os.listdir(csv_path) if 'pairing' in f]
-        pastpairs_csvs.sort()
-        for i, f in enumerate(pastpairs_csvs):
-            fstring = f"[ {i:2d} ] {f}" if len(pastpairs_csvs) > 10 else f"[ {i} ] {f}"
-            if self.verbose:
-                print(f"  [ {i:2d} ] {f}")
-            print(fstring)
-
-        # Prompt user to select a file from the list above.
-        csv_index = input("\nSelect csv with student pairings from past quiz using index: ")
-
-        print(f"\nSelected csv: {pastpairs_csvs[int(csv_index)]}")
+        selected = selectCSVFromList(
+            csv_path, 'pairing',
+            "\nSelect csv with student pairings from past quiz using index: ",
+            verbose=self.verbose
+        )
 
         # Open the file and return the dataframe
-        self.df_past_pairings = pd.read_csv(csv_path + pastpairs_csvs[int(csv_index)])
+        self.df_past_pairings = pd.read_csv(selected)
 
         # Get list of students who were paired in the past and put into long format
         paired_students1 = self.df_past_pairings[['person1', 'id1']].copy()
@@ -259,31 +232,24 @@ class CanvigatorQuiz:
         self.df_paired_students = paired_students.drop_duplicates()
 
     def getPastBonusCSV(self, csv_path=None):
-
-        """ Prompt for a CSV that contains past pairings for this quiz and return a pandas dataframe. """
+        """Prompt for a CSV that contains past pairings for this quiz and return a pandas dataframe."""
         if not csv_path:
             csv_path = self.config.data_path
-        print("\nCSV Options:")
 
-        # List all files in current directory that contain the string: 'pairing'.
-        pastbonus_csvs = [f for f in os.listdir(csv_path) if 'w_bonus' in f]
-        pastbonus_csvs.sort()
-        for i, f in enumerate(pastbonus_csvs):
-            fstring = f"[ {i:2d} ] {f}" if len(pastbonus_csvs) > 10 else f"[ {i} ] {f}"
-            if self.verbose:
-                print(f"  [ {i:2d} ] {f}")
-            print(fstring)
-
-        # Prompt user to select a file from the list above.
-        csv_index = input("\nSelect csv with past student bonus awards using index: ")
-
-        print(f"\nSelected csv: {pastbonus_csvs[int(csv_index)]}")
+        selected = selectCSVFromList(
+            csv_path, 'w_bonus',
+            "\nSelect csv with past student bonus awards using index: ",
+            verbose=self.verbose
+        )
 
         # Open the file and return the dataframe
-        self.df_past_bonus = pd.read_csv(csv_path + pastbonus_csvs[int(csv_index)])
+        self.df_past_bonus = pd.read_csv(selected)
 
     def createStudentPairings(self, method='med', write_csv=True):
-        """ Generate student pairings using one of several methods, but not saved unless write_csv is True. """
+        """Generate student pairings using one of several methods, but not saved unless write_csv is True."""
+        if self.dist_matrix is None:
+            raise RuntimeError("generateDistanceMatrix() must be called before createStudentPairings()")
+
         dm = self.dist_matrix.copy()
         pairings = []
 
@@ -352,7 +318,10 @@ class CanvigatorQuiz:
         return pairings
 
     def comparePairingMethods(self):
-        """ Compare the median, max, min, and rand methods of pairing students. """
+        """Compare the median, max, min, and rand methods of pairing students."""
+        if self.dist_matrix is None:
+            raise RuntimeError("generateDistanceMatrix() must be called before comparePairingMethods()")
+
         pairs_med = self.createStudentPairings(method='med', write_csv=False)
         pairs_max = self.createStudentPairings(method='max', write_csv=False)
         pairs_min = self.createStudentPairings(method='min', write_csv=False)
@@ -380,12 +349,14 @@ class CanvigatorQuiz:
         axes[3].set_ylim(0, 9)
         axes[0].set_ylabel('# of Student Pairs')
         plt.tight_layout()
-        plt.savefig(self.config.figures_path + self.config.quiz_prefix + str(self.canvas_quiz.id) +
-                    "_compare_pairing_methods_" + datetime.today().strftime('%Y%m%d') + ".png", dpi=200)
+        plt.savefig(self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_compare_pairing_methods_{today_str()}.png", dpi=200)
         plt.close()
 
     def writePairingsCSV(self, method, pairs):
-        """ Create an output csv file in data/ with the given student pairings. """
+        """Create an output csv file in data/ with the given student pairings."""
+        if getattr(self, 'df_quiz_scores_present', None) is None:
+            raise RuntimeError("openPresentCSV() must be called before writePairingsCSV()")
+
         df = self.df_quiz_scores_present.copy()
         name1 = []
         name2 = []
@@ -413,7 +384,6 @@ class CanvigatorQuiz:
             if len(pair) == 2 + 1:
                 name3.append(None)
                 person3.append(-1)
-                # print(f"    2-tuple {i+1:2.0f}: {df.name[df.id == pair[0]].to_string(index=False)}, {df.name[df.id == pair[1]].to_string(index=False)}")
             if len(pair) == 3 + 1:
                 name3.append(df.name[df.id == pair[2]].to_string(index=False))
                 person3.append(pair[2])
@@ -427,12 +397,15 @@ class CanvigatorQuiz:
 
         df_pairs = pd.DataFrame({'person1': name1, 'id1': person1, 'person2': name2, 'id2': person2,
                                  'person3': name3, 'id3': person3, 'distance': [x[-1] for x in pairs]})
-        pairs_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_pairing_via_" + method + "_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        pairs_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_pairing_via_{method}_{today_str()}.csv"
         df_pairs.to_csv(pairs_csv, index=False)
 
     def checkForBonusEarned(self, bonus_amount=0.2):
-        """ Check if any students have a distance of 0 with their partner. """
+        """Check if any students have a distance of 0 with their partner."""
+        if self.dist_matrix is None:
+            raise RuntimeError("generateDistanceMatrix() must be called before checkForBonusEarned()")
+        if getattr(self, 'df_past_pairings', None) is None or getattr(self, 'df_paired_students', None) is None:
+            raise RuntimeError("getPastPairingsCSV() must be called before checkForBonusEarned()")
 
         # Rename the column 'distance' to 'previous_distance' in df_past_pairings
         self.df_past_pairings.rename(columns={'distance': 'previous_distance'}, inplace=True)
@@ -467,17 +440,15 @@ class CanvigatorQuiz:
 
     def getUserQuizEvents(self):
         quiz_takers = self.quiz_df[['name', 'id']].copy()
-        #quiz_takers = pica_quiz.quiz_df[['name', 'id']].copy()
 
         # Define a user_events dataframe with columns 'name', 'id', 'event', 'timestamp'
         user_events = pd.DataFrame(columns=['name', 'id', 'event', 'timestamp'])
 
         subs = self.canvas_quiz.get_submissions()
-        #subs = pica_quiz.canvas_quiz.get_submissions()
         for i, sub in enumerate(subs):
             # Get row from quiz_takers where column 'id' matches sub.user_id
             row = quiz_takers[quiz_takers['id'] == sub.user_id]
-            if len(row) == 0: # no quiz taker found for this user
+            if len(row) == 0:  # no quiz taker found for this user
                 continue
 
             # Get user submission events for this submission
@@ -486,8 +457,7 @@ class CanvigatorQuiz:
             for event in events:
                 user_events.loc[len(user_events)] = [row['name'].values[0], sub.user_id, event.event_type, event.created_at]
 
-        user_events_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_user_events_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        user_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_user_events_{today_str()}.csv"
         user_events.to_csv(user_events_csv, index=False)
 
     def getAllSubmissionsAndEvents(self):
@@ -502,15 +472,15 @@ class CanvigatorQuiz:
         for i, sub in enumerate(subs):
             if self.verbose:
                 print(f"Processing submission for student id {sub.user_id}")
-            student_subs = self.canvas_course.canvas_course.get_multiple_submissions(student_ids=[sub.user_id], 
-                                                                       assignment_ids=[self.canvas_quiz.assignment_id], 
-                                                                       include=['submission_history'])[0]    
+            student_subs = self.canvas_course.canvas_course.get_multiple_submissions(student_ids=[sub.user_id],
+                                                                       assignment_ids=[self.canvas_quiz.assignment_id],
+                                                                       include=['submission_history'])[0]
             n_attempts = len(student_subs.submission_history)
             for i in range(n_attempts):
                 attempt_data = student_subs.submission_history[i]
                 attempt_num = attempt_data['attempt']
-                
-                new_row = {'id': sub.user_id, 
+
+                new_row = {'id': sub.user_id,
                         'attempt': attempt_num,
                         'score': attempt_data['score'],
                         'timestamp': attempt_data['submitted_at']}
@@ -533,14 +503,14 @@ class CanvigatorQuiz:
                     subs_by_question_data.append(new_q_row)
 
                 # see scratch_work.py for getting all events for this submission
-                this_submission_events = sub.get_submission_events(attempt=i+1) # get sub. events for this attempt
+                this_submission_events = sub.get_submission_events(attempt=i+1)  # get sub. events for this attempt
 
                 try:
                     for event in this_submission_events:
                         subs_and_events_data.append({
-                            'id': sub.user_id, 
-                            'attempt': i+1, 
-                            'event': event.event_type, 
+                            'id': sub.user_id,
+                            'attempt': i+1,
+                            'event': event.event_type,
                             'timestamp': event.created_at
                         })
                 except Exception:
@@ -559,21 +529,21 @@ class CanvigatorQuiz:
             all_subs_by_question = pd.merge(quiz_takers[['name', 'id']], all_subs_by_question, on='id', how='inner')
         if not all_subs_and_events.empty:
             all_subs_and_events = pd.merge(quiz_takers[['name', 'id']], all_subs_and_events, on='id', how='inner')
-        
-        all_submissions_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_all_submissions_" + datetime.today().strftime('%Y%m%d') + ".csv"
+
+        all_submissions_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_submissions_{today_str()}.csv"
         all_submissions.to_csv(all_submissions_csv, index=False)
 
-        all_subs_by_question_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_all_subs_by_question_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        all_subs_by_question_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_by_question_{today_str()}.csv"
         all_subs_by_question.to_csv(all_subs_by_question_csv, index=False)
 
-        all_sub_and_events_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_all_subs_and_events_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        all_sub_and_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_and_events_{today_str()}.csv"
         all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)
 
-    def awardBonusPoints(self):
-        """ Award bonus points to students who received it by setting fudge points. """
+    def awardBonusPoints(self, dry_run=False):
+        """Award bonus points to students who received it by setting fudge points."""
+        if getattr(self, 'df_paired_students', None) is None:
+            raise RuntimeError("checkForBonusEarned() must be called before awardBonusPoints()")
+
         quiz_summary = self.quiz_df[['name', 'id', 'n_correct', 'n_incorrect', 'score']].copy()
 
         # Left join quiz_summary with df_paired_students on 'id' to get bonus points
@@ -595,6 +565,9 @@ class CanvigatorQuiz:
         quiz_summary.drop(columns='lastname', inplace=True)
         quiz_summary.reset_index(drop=True, inplace=True)
 
+        if dry_run:
+            print("\n=== DRY RUN MODE - No changes will be made to Canvas ===\n")
+
         subs = self.canvas_quiz.get_submissions()
         for i, sub in enumerate(subs):
             # Get row from quiz_summary where column 'id' matches sub.user_id
@@ -611,13 +584,20 @@ class CanvigatorQuiz:
             # Check if bonus needs to be added
             if row['bonus'].values[0] > 0:
 
-                # Set points before fudget points are added
-                newattributes = { 'excused?': True, 'score_before_regrade': sub.score }
-                upd1 = sub.set_attributes(newattributes)
+                if dry_run:
+                    student_name = quiz_summary.at[row.index[0], 'name']
+                    bonus_pts = row['bonus'].values[0]
+                    print(f"  [DRY RUN] Would award {bonus_pts} bonus points to {student_name} (id: {sub.user_id})")
+                    logger.info(f"[DRY RUN] Would award {bonus_pts} bonus to student {sub.user_id}")
+                else:
+                    # Set points before fudge points are added
+                    newattributes = {'excused?': True, 'score_before_regrade': sub.score}
+                    upd1 = sub.set_attributes(newattributes)
 
-                # Now set fudge points
-                update_obj = [ { 'attempt': sub.attempt, 'fudge_points': row['bonus'].values[0] } ]
-                sub.update_score_and_comments(quiz_submissions=update_obj)
+                    # Now set fudge points
+                    update_obj = [{'attempt': sub.attempt, 'fudge_points': row['bonus'].values[0]}]
+                    sub.update_score_and_comments(quiz_submissions=update_obj)
+                    logger.info(f"Awarded {row['bonus'].values[0]} bonus to student {sub.user_id}")
 
                 # Set quiz_summary for this user_id and column 'score_w_bonus' with sub.score + row['bonus']
                 quiz_summary.at[row.index[0], 'score_w_bonus'] = row['score'].values[0] + row['bonus'].values[0]
@@ -625,27 +605,36 @@ class CanvigatorQuiz:
             else:
                 quiz_summary.at[row.index[0], 'score_w_bonus'] = row['score'].values[0]
 
-        quiz_summary_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_scores_w_bonus_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        suffix = "_dryrun" if dry_run else ""
+        quiz_summary_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_scores_w_bonus{suffix}_{today_str()}.csv"
         quiz_summary.to_csv(quiz_summary_csv, index=False)
 
-    # 1) Need to consider making sure this can run multiple times without continually adding bonus 
+        if dry_run:
+            print(f"\n[DRY RUN] No changes were made to Canvas. Review output: {quiz_summary_csv}")
+
+    # 1) Need to consider making sure this can run multiple times without continually adding bonus
     #    points (since if it is run twice, then sub.score might include a previously added bonus) one
     #    way is to look and see if sub.fudge_points is already set, and if so, then don't add bonus points
-    # 2) also may want to check when get_submissions does not return a student's highest submission, as 
-    #    happned with K.O. in 4050, Quiz 1B (spring25), where their attempt=3 was 3.93 but get_submissions 
+    # 2) also may want to check when get_submissions does not return a student's highest submission, as
+    #    happned with K.O. in 4050, Quiz 1B (spring25), where their attempt=3 was 3.93 but get_submissions
     #    returned attempt=4 with a score of 3.73, this would require getting all of the attempts for a person... see
     #    https://community.canvaslms.com/t5/Archived-Questions/Get-All-Quiz-Submissions-API-not-working/m-p/218389
     #    and  https://canvas.instructure.com/doc/api/quiz_submissions.html
-    def reAwardBonusPoints(self):
-        """ Re-award bonus points by setting fudge points for the highest submission attempt. """
+    def reAwardBonusPoints(self, dry_run=False):
+        """Re-award bonus points by setting fudge points for the highest submission attempt."""
+        if getattr(self, 'df_past_bonus', None) is None:
+            raise RuntimeError("getPastBonusCSV() must be called before reAwardBonusPoints()")
+
         past_bonus = self.df_past_bonus.copy()
         past_bonus['new_score'] = past_bonus['score']
-        past_bonus['start_new']  = 'n/a'
+        past_bonus['start_new'] = 'n/a'
         past_bonus['finish_new'] = 'n/a'
         past_bonus['minutes_new'] = -1
         past_bonus['minutes_new'] = past_bonus['minutes_new'].astype(float)
         past_bonus['new_score_w_bonus'] = past_bonus['score_w_bonus']
+
+        if dry_run:
+            print("\n=== DRY RUN MODE - No changes will be made to Canvas ===\n")
 
         subs = self.canvas_quiz.get_submissions()
         for i, sub in enumerate(subs):
@@ -672,17 +661,27 @@ class CanvigatorQuiz:
             # Check bonus was received before and new score is better than past score (w/o bonus)
             if row['bonus'].values[0] > 0 and sub.score > row['score'].values[0]:
 
-                # Set points before fudget points are added
-                newattributes = { 'excused?': True, 'score_before_regrade': sub.score }
-                upd1 = sub.set_attributes(newattributes)
+                if dry_run:
+                    student_name = past_bonus.at[row.index[0], 'name']
+                    bonus_pts = row['bonus'].values[0]
+                    print(f"  [DRY RUN] Would re-award {bonus_pts} bonus points to {student_name} (id: {sub.user_id})")
+                    logger.info(f"[DRY RUN] Would re-award {bonus_pts} bonus to student {sub.user_id}")
+                else:
+                    # Set points before fudge points are added
+                    newattributes = {'excused?': True, 'score_before_regrade': sub.score}
+                    upd1 = sub.set_attributes(newattributes)
 
-                # Now set fudge points
-                update_obj = [ { 'attempt': sub.attempt, 'fudge_points': row['bonus'].values[0] } ]
-                sub.update_score_and_comments(quiz_submissions=update_obj)
+                    # Now set fudge points
+                    update_obj = [{'attempt': sub.attempt, 'fudge_points': row['bonus'].values[0]}]
+                    sub.update_score_and_comments(quiz_submissions=update_obj)
+                    logger.info(f"Re-awarded {row['bonus'].values[0]} bonus to student {sub.user_id}")
 
                 # Update 'new_score_w_bonus' using sub.score + row['bonus']
                 past_bonus.at[row.index[0], 'new_score_w_bonus'] = sub.score + row['bonus'].values[0]
 
-        past_bonus_csv = self.config.data_path + self.config.quiz_prefix + str(self.canvas_quiz.id) + \
-            "_scores_w_bonus_new_" + datetime.today().strftime('%Y%m%d') + ".csv"
+        suffix = "_dryrun" if dry_run else ""
+        past_bonus_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_scores_w_bonus_new{suffix}_{today_str()}.csv"
         past_bonus.to_csv(past_bonus_csv, index=False)
+
+        if dry_run:
+            print(f"\n[DRY RUN] No changes were made to Canvas. Review output: {past_bonus_csv}")
