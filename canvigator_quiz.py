@@ -569,7 +569,38 @@ class CanvigatorQuiz:
 
         events_df['timestamp'] = pd.to_datetime(events_df['timestamp'])
 
-        return events_df, subs_by_q_df
+        # Also load the all_submissions CSV for first-attempt timestamps
+        subs_pattern = file_prefix + "all_submissions_"
+        subs_csv = self.config.data_path / f"{subs_pattern}{selected_date}.csv"
+        if subs_csv.exists():
+            subs_df = pd.read_csv(subs_csv)
+            subs_df = subs_df[subs_df['attempt'] == 1].copy()
+        else:
+            subs_df = None
+
+        return events_df, subs_by_q_df, subs_df
+
+    def _buildFirstAttemptTimes(self, student_ids, events_df, first_attempt_subs):
+        """Build a dict mapping student id to first-attempt start/finish/minutes from event and submission data."""
+        first_attempt_times = {}
+        if first_attempt_subs is not None:
+            for _, srow in first_attempt_subs.iterrows():
+                first_attempt_times[srow['id']] = {'finish': srow['timestamp']}
+
+        for sid in student_ids:
+            ts = events_df[events_df['id'] == sid]['timestamp']
+            if len(ts) > 0:
+                start = ts.min()
+                if sid in first_attempt_times:
+                    finish = pd.to_datetime(first_attempt_times[sid]['finish'])
+                else:
+                    finish = ts.max()
+                first_attempt_times.setdefault(sid, {})
+                first_attempt_times[sid]['start'] = str(start)
+                first_attempt_times[sid]['finish'] = str(finish)
+                first_attempt_times[sid]['minutes'] = (finish - start).total_seconds() / 60.0
+
+        return first_attempt_times
 
     def detectPartners(self, score_threshold=0.8, time_threshold_secs=10, time_overlap_threshold=0.8, bonus_amount=0.2):
         """Detect student partners by comparing first-attempt per-question scores and answer timestamps.
@@ -578,7 +609,7 @@ class CanvigatorQuiz:
         - At least score_threshold fraction of questions with identical scores
         - At least time_overlap_threshold fraction of question_answered timestamps within time_threshold_secs
         """
-        events_df, subs_by_q_df = self._selectSubmissionDataByDate()
+        events_df, subs_by_q_df, first_attempt_subs = self._selectSubmissionDataByDate()
 
         # Build per-student score and timestamp profiles
         student_ids = sorted(subs_by_q_df['id'].unique())
@@ -644,6 +675,9 @@ class CanvigatorQuiz:
             pairs_output.append(row)
 
         self.df_paired_students = pd.DataFrame(paired_data) if paired_data else pd.DataFrame(columns=['name', 'id', 'bonus'])
+
+        # Build first-attempt timestamp lookup for awardBonusPoints
+        self.first_attempt_times = self._buildFirstAttemptTimes(student_ids, events_df, first_attempt_subs)
 
         # Save detected partners CSV
         df_detected = pd.DataFrame(pairs_output)
@@ -768,10 +802,17 @@ class CanvigatorQuiz:
             # Confirm that the sub.score matches row['score'] using an assert statement
             assert abs(sub.score - row['score'].values[0]) < 0.001
 
-            # Set quiz_summary for this user_id and column 'start' with string in sub.started_at
-            quiz_summary.at[row.index[0], 'start'] = sub.started_at
-            quiz_summary.at[row.index[0], 'finish'] = sub.finished_at
-            quiz_summary.at[row.index[0], 'minutes'] = sub.time_spent / 60.0
+            # Use first-attempt timestamps if available (set by detectPartners), otherwise use latest
+            first_times = getattr(self, 'first_attempt_times', {})
+            if sub.user_id in first_times:
+                fa = first_times[sub.user_id]
+                quiz_summary.at[row.index[0], 'start'] = fa.get('start', 'n/a')
+                quiz_summary.at[row.index[0], 'finish'] = fa.get('finish', 'n/a')
+                quiz_summary.at[row.index[0], 'minutes'] = fa.get('minutes', 0.0)
+            else:
+                quiz_summary.at[row.index[0], 'start'] = sub.started_at
+                quiz_summary.at[row.index[0], 'finish'] = sub.finished_at
+                quiz_summary.at[row.index[0], 'minutes'] = sub.time_spent / 60.0
 
             # Check if bonus needs to be added
             if row['bonus'].values[0] > 0:
