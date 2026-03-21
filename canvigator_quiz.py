@@ -9,7 +9,9 @@ import scipy.spatial.distance as distance
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import seaborn as sbn
-from canvigator_utils import today_str, selectCSVFromList
+import os
+import re
+from canvigator_utils import today_str, selectCSVFromList, prompt_for_index
 
 logger = logging.getLogger(__name__)
 
@@ -441,6 +443,214 @@ class CanvigatorQuiz:
                 self.df_paired_students.loc[self.df_paired_students['id'] == person2, 'bonus'] = bonus
                 if person3 > 0:
                     self.df_paired_students.loc[self.df_paired_students['id'] == person3, 'bonus'] = bonus
+
+    def _findMatchingPairs(self, student_ids, student_scores, student_timestamps, n_questions,
+                           score_threshold, time_threshold_secs, time_overlap_threshold):
+        """Compare all student pairs and return edges for those meeting score and timestamp thresholds."""
+        partner_edges = []
+        print(f"\nComparing {len(student_ids)} students across {n_questions} questions...")
+
+        for i in range(len(student_ids)):
+            for j in range(i + 1, len(student_ids)):
+                id1, id2 = student_ids[i], student_ids[j]
+
+                # Score comparison: fraction of questions with identical scores
+                questions = set(student_scores.get(id1, {}).keys()) & set(student_scores.get(id2, {}).keys())
+                if len(questions) < n_questions * score_threshold:
+                    continue
+
+                score_matches = sum(1 for q in questions
+                                    if abs(student_scores[id1][q] - student_scores[id2][q]) < 0.001)
+                score_overlap = score_matches / n_questions
+
+                if score_overlap < score_threshold:
+                    continue
+
+                # Timestamp comparison: greedy closest-match on sorted timestamps
+                ts1 = student_timestamps.get(id1, [])
+                ts2 = student_timestamps.get(id2, [])
+
+                if not ts1 or not ts2:
+                    continue
+
+                # Iterate over the shorter list, matching against the longer
+                shorter, longer = (ts1, ts2) if len(ts1) <= len(ts2) else (ts2, ts1)
+                longer_available = list(longer)
+                time_matches = 0
+
+                for t in shorter:
+                    if not longer_available:
+                        break
+                    diffs = [abs((t_l - t).total_seconds()) for t_l in longer_available]
+                    min_idx = diffs.index(min(diffs))
+                    if diffs[min_idx] <= time_threshold_secs:
+                        time_matches += 1
+                        longer_available.pop(min_idx)
+
+                time_overlap = time_matches / n_questions if n_questions > 0 else 0
+
+                if time_overlap >= time_overlap_threshold:
+                    partner_edges.append((id1, id2, score_overlap, time_overlap))
+
+        return partner_edges
+
+    def _groupPartnerEdges(self, student_ids, partner_edges):
+        """Group matching pair edges into connected components using union-find (to detect triples)."""
+        parent = {sid: sid for sid in student_ids}
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for id1, id2, _, _ in partner_edges:
+            union(id1, id2)
+
+        groups = {}
+        for id1, id2, so, to in partner_edges:
+            root = find(id1)
+            if root not in groups:
+                groups[root] = {'members': set(), 'edges': []}
+            groups[root]['members'].add(id1)
+            groups[root]['members'].add(id2)
+            groups[root]['edges'].append((id1, id2, so, to))
+
+        return groups
+
+    def _selectSubmissionDataByDate(self):
+        """Prompt user to select a date for which events and subs_by_question CSVs exist, then load them."""
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        events_pattern = file_prefix + "all_subs_and_events_"
+        by_question_pattern = file_prefix + "all_subs_by_question_"
+
+        all_files = os.listdir(self.config.data_path)
+        events_dates = set()
+        by_question_dates = set()
+
+        for f in all_files:
+            match = re.search(r'(\d{8})\.csv$', f)
+            if match:
+                date_str = match.group(1)
+                if events_pattern in f:
+                    events_dates.add(date_str)
+                elif by_question_pattern in f:
+                    by_question_dates.add(date_str)
+
+        common_dates = sorted(events_dates & by_question_dates)
+        if not common_dates:
+            raise FileNotFoundError(
+                f"No matching all_subs_and_events / subs_by_question CSV pair found for quiz '{self.quiz_name}'. "
+                "Run the 'all-subs' task first to generate these files."
+            )
+
+        print("\nAvailable dates with submission data:")
+        for i, d in enumerate(common_dates):
+            print(f"[ {i} ] {d}")
+
+        date_index = prompt_for_index("\nSelect date from above using index: ", len(common_dates) - 1)
+        selected_date = common_dates[date_index]
+
+        events_csv = self.config.data_path / f"{events_pattern}{selected_date}.csv"
+        subs_by_q_csv = self.config.data_path / f"{by_question_pattern}{selected_date}.csv"
+        print(f"\nUsing files from {selected_date}")
+
+        # Load and filter to first attempt
+        events_df = pd.read_csv(events_csv)
+        subs_by_q_df = pd.read_csv(subs_by_q_csv)
+
+        events_df = events_df[(events_df['attempt'] == 1) & (events_df['event'] == 'question_answered')].copy()
+        subs_by_q_df = subs_by_q_df[subs_by_q_df['attempt'] == 1].copy()
+
+        events_df['timestamp'] = pd.to_datetime(events_df['timestamp'])
+
+        return events_df, subs_by_q_df
+
+    def detectPartners(self, score_threshold=0.8, time_threshold_secs=10, time_overlap_threshold=0.8, bonus_amount=0.2):
+        """Detect student partners by comparing first-attempt per-question scores and answer timestamps.
+
+        Finds pairs (or triples) of students whose first-attempt data shows:
+        - At least score_threshold fraction of questions with identical scores
+        - At least time_overlap_threshold fraction of question_answered timestamps within time_threshold_secs
+        """
+        events_df, subs_by_q_df = self._selectSubmissionDataByDate()
+
+        # Build per-student score and timestamp profiles
+        student_ids = sorted(subs_by_q_df['id'].unique())
+        n_questions = subs_by_q_df['question'].nunique()
+        name_map = dict(zip(self.quiz_df['id'], self.quiz_df['name']))
+
+        student_scores = {}
+        student_timestamps = {}
+
+        for sid in student_ids:
+            scores = subs_by_q_df[subs_by_q_df['id'] == sid]
+            student_scores[sid] = dict(zip(scores['question'], scores['points']))
+
+            ts = events_df[events_df['id'] == sid].sort_values('timestamp')['timestamp'].tolist()
+            student_timestamps[sid] = ts
+
+        # Find all matching pairs, then group into connected components
+        partner_edges = self._findMatchingPairs(student_ids, student_scores, student_timestamps, n_questions,
+                                                score_threshold, time_threshold_secs, time_overlap_threshold)
+        groups = self._groupPartnerEdges(student_ids, partner_edges)
+
+        # Print detected groups
+        print(f"\nDetected {len(groups)} partner group(s):")
+        for root, group in groups.items():
+            members = sorted(group['members'])
+            names = [name_map.get(m, str(m)) for m in members]
+            print(f"  Group: {', '.join(names)}")
+            for id1, id2, so, to in group['edges']:
+                print(f"    {name_map.get(id1, str(id1))} & {name_map.get(id2, str(id2))}: "
+                      f"score overlap={so:.0%}, time overlap={to:.0%}")
+
+        # Calculate bonus amount
+        if bonus_amount < 1.0:
+            bonus = round(bonus_amount * self.canvas_quiz.points_possible)
+        else:
+            bonus = bonus_amount
+
+        # Build df_paired_students (same format awardBonusPoints() expects)
+        paired_data = []
+        pairs_output = []
+
+        for root, group in groups.items():
+            members = sorted(group['members'])
+            if len(members) > 3:
+                print(f"  WARNING: Group of {len(members)} detected — review manually, skipping bonus for this group")
+                continue
+
+            for m in members:
+                paired_data.append({'name': name_map.get(m, str(m)), 'id': m, 'bonus': bonus})
+
+            row = {
+                'person1': name_map.get(members[0], ''),
+                'id1': members[0],
+                'person2': name_map.get(members[1], '') if len(members) > 1 else None,
+                'id2': members[1] if len(members) > 1 else -1,
+                'person3': name_map.get(members[2], '') if len(members) > 2 else None,
+                'id3': members[2] if len(members) > 2 else -1,
+            }
+            avg_score = sum(e[2] for e in group['edges']) / len(group['edges'])
+            avg_time = sum(e[3] for e in group['edges']) / len(group['edges'])
+            row['score_overlap'] = round(avg_score, 3)
+            row['time_overlap'] = round(avg_time, 3)
+            pairs_output.append(row)
+
+        self.df_paired_students = pd.DataFrame(paired_data) if paired_data else pd.DataFrame(columns=['name', 'id', 'bonus'])
+
+        # Save detected partners CSV
+        df_detected = pd.DataFrame(pairs_output)
+        detected_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_detected_partners_{today_str()}.csv"
+        df_detected.to_csv(detected_csv, index=False)
+        print(f"\nSaved detected partners to {detected_csv}")
+        logger.info(f"Detected {len(groups)} partner groups, saved to {detected_csv}")
 
     def getAllSubmissionsAndEvents(self):
         quiz_takers = self.quiz_df[['name', 'id']].copy()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys
 
-tasks = ['activity', 'award-bonus', 'pair', 're-award-bonus', 'all-subs']
+tasks = ['activity', 'auto-award-bonus', 'award-bonus', 'pair', 're-award-bonus', 'all-subs']
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -58,7 +58,7 @@ if task == 'activity':
 elif task == 'all-subs':
     course.getAllQuizzesAndSubmissions()
 
-elif task in ['pair', 'award-bonus', 're-award-bonus']:
+elif task in ['pair', 'auto-award-bonus', 'award-bonus', 're-award-bonus']:
     # Prompt user to select a quiz
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
@@ -76,6 +76,13 @@ elif task in ['pair', 'award-bonus', 're-award-bonus']:
 
         # Generate pairings for today using the median method
         quiz.createStudentPairings(method='med', write_csv=True)
+
+    elif task == 'auto-award-bonus':
+        # Detect partners automatically from submission timestamps and scores
+        quiz.detectPartners()
+
+        # Award bonus points to detected partners
+        quiz.awardBonusPoints(dry_run=dry_run)
 
     elif task == 'award-bonus':
         quiz.generateDistanceMatrix(only_present=False)
