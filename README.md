@@ -78,12 +78,17 @@ subdirectories have been created.
 ### Usage
 
 ```bash
-source set_env.sh                        # set Canvas environment variables (once per terminal session)
-python canvigator.py <task>              # run a task
-python canvigator.py --dry-run <task>    # preview bonus changes without modifying Canvas
+source set_env.sh                            # set Canvas environment variables (once per terminal session)
+python canvigator.py <task>                  # run a task (prompts for course selection)
+python canvigator.py --crn <CRN> <task>      # select course by CRN (last 5 digits of course code)
+python canvigator.py --dry-run <task>        # preview bonus changes without modifying Canvas
 ```
 
-Available tasks: `activity`, `pair`, `award-bonus`, `re-award-bonus`, `all-subs`
+The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
+course code), bypassing the interactive course selection prompt. This is useful
+for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 activity`.
+
+Available tasks: `activity`, `pair`, `auto-award-bonus`, `award-bonus`, `re-award-bonus`, `all-subs`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -134,6 +139,37 @@ required format (columns: `name`, `id`, `present` where 1 = present).
 1. Mark which students are present in your `present_*.csv` file.
 2. Run `python canvigator.py pair` and select the course, quiz, and presence CSV when prompted.
 3. Open the generated `*_pairing_via_med_*.csv` and share pairings with the class.
+
+---
+
+#### `auto-award-bonus` — Automatically detect partners and award bonus points
+
+Automatically detects student partner groups by comparing first-attempt
+per-question scores and answer timestamps from a prior `all-subs` run. Students
+whose first attempts show a high fraction of matching scores (default ≥ 80%)
+and closely timed answers (default within 10 seconds on ≥ 80% of questions)
+are grouped as partners. Groups larger than 3 are flagged for manual review.
+After detection, bonus fudge points are awarded on their Canvas submissions.
+
+**Before running:** the `all-subs` task must have been run first for the same
+quiz so that the events and per-question submission CSVs exist.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/<quiz>_<id>_all_subs_and_events_YYYYMMDD.csv` (from `all-subs`) |
+| | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` (from `all-subs`) |
+| **Output** | `data/<course>/<quiz>_<id>_detected_partners_YYYYMMDD.csv` — detected partner groups |
+| | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with bonus column |
+| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
+
+Use `--dry-run` to preview which students would receive bonus points without
+modifying anything in Canvas. In dry-run mode the scores CSV is named
+`*_scores_w_bonus_dryrun_*.csv`.
+
+**Typical workflow:**
+1. Run `python canvigator.py all-subs` to export submission data for all quizzes.
+2. Run `python canvigator.py [--dry-run] auto-award-bonus` and select the course, quiz, and date when prompted.
+3. Review the `*_detected_partners_*.csv` to verify the detected groups.
 
 ---
 

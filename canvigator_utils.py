@@ -31,18 +31,18 @@ def setup_logging():
 
 
 def prompt_for_index(prompt_msg, max_index):
-    """Prompt the user for a numeric index, retrying on invalid input."""
+    """Prompt the user for a 1-based numeric index, retrying on invalid input. Returns a 0-based index."""
     while True:
         raw = input(prompt_msg)
         try:
             index = int(re.sub(r'\D', '', raw))
         except ValueError:
-            print(f"Invalid input. Please enter a number between 0 and {max_index}.")
+            print(f"Invalid input. Please enter a number between 1 and {max_index + 1}.")
             continue
-        if index < 0 or index > max_index:
-            print(f"Invalid selection. Please enter a number between 0 and {max_index}.")
+        if index < 1 or index > max_index + 1:
+            print(f"Invalid selection. Please enter a number between 1 and {max_index + 1}.")
             continue
-        return index
+        return index - 1
 
 
 def selectCSVFromList(directory, keyword, prompt_msg, verbose=False):
@@ -55,7 +55,7 @@ def selectCSVFromList(directory, keyword, prompt_msg, verbose=False):
         raise FileNotFoundError(f"No CSV files containing '{keyword}' found in {directory}")
 
     print("\nCSV Options:")
-    for i, f in enumerate(csv_files):
+    for i, f in enumerate(csv_files, start=1):
         fstring = f"[ {i:2d} ] {f}" if len(csv_files) > 10 else f"[ {i} ] {f}"
         print(fstring)
 
@@ -73,7 +73,7 @@ class CanvigatorConfig:
         """Simple file path configuration for data and figures (for both input and output)."""
         self.data_path = Path.cwd() / "data"
         self.figures_path = Path.cwd() / "figures"
-        self.quiz_prefix = "quiz_"
+        self.quiz_prefix = "quiz"
 
     def modifyQuizPrefix(self, new_prefix):
         """Modify the quiz file name prefix."""
@@ -97,7 +97,7 @@ def selectFromList(paginated_list, item_type="item"):
     """
     print(f"\nOptions:")
     subobject_list = []
-    for i, so in enumerate(paginated_list):
+    for i, so in enumerate(paginated_list, start=1):
         print(f"[ {i:2d} ] {so}")
         subobject_list.append(so)
 
@@ -107,6 +107,21 @@ def selectFromList(paginated_list, item_type="item"):
     index = prompt_for_index(f"\nSelect {item_type} from above using index in square brackets: ", len(subobject_list) - 1)
     logger.info(f"Selected {item_type} at index {index}: {subobject_list[index]}")
     return subobject_list[index]
+
+
+def selectCourseByCRN(canvas, crn):
+    """Select a course by its CRN (the last 5 digits of the course code). Returns the Canvas course object."""
+    for course in canvas.get_courses():
+        try:
+            if hasattr(course, 'course_code') and str(course.course_code).endswith(crn):
+                selected = canvas.get_course(course.id)
+                logger.info(f"Selected course by CRN {crn}: {selected.name}")
+                return selected
+        except Exception:
+            continue
+
+    print(f"Error: No course found with CRN '{crn}'.")
+    sys.exit(1)
 
 
 def selectCourse(canvas):
@@ -124,10 +139,7 @@ def selectCourse(canvas):
 
     for course in canvas.get_courses():
         try:
-            course_name = course.name
-
             # Check start and end dates
-            start_date = datetime.strptime(course.start_at, '%Y-%m-%dT%H:%M:%SZ') if course.start_at else None
             end_date = datetime.strptime(course.end_at, '%Y-%m-%dT%H:%M:%SZ') if course.end_at else None
 
             # Separate past and current courses
@@ -140,22 +152,22 @@ def selectCourse(canvas):
             print(f"Error: {e} - exiting")
             sys.exit(1)
 
-    # Prompt user to select between past and current courses
+    # Prompt user to select between current and past courses
     print("\nSelect Course Type:")
-    print("[ 0 ] Past Courses")
     print("[ 1 ] Current Courses")
+    print("[ 2 ] Past Courses")
     selection = prompt_for_index("\nSelect course type (using index in '[ ]'): ", 1)
 
     if selection == 0:
-        print("\nPast Courses:")
-        for i, course in enumerate(past_courses):
-            print(f"[ {i:2d} ] {course.name}")
-        valid_courses = past_courses
-    else:
         print("\nCurrent Courses:")
-        for i, course in enumerate(current_courses):
+        for i, course in enumerate(current_courses, start=1):
             print(f"[ {i:2d} ] {course.name}")
         valid_courses = current_courses
+    else:
+        print("\nPast Courses:")
+        for i, course in enumerate(past_courses, start=1):
+            print(f"[ {i:2d} ] {course.name}")
+        valid_courses = past_courses
 
     if not valid_courses:
         print("No courses found for the selected type.")

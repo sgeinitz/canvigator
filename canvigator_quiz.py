@@ -28,6 +28,8 @@ class CanvigatorQuiz:
         self.verbose = verbose
         self.config = config
         self.quiz_name = self.canvas_quiz.title.lower().replace(" ", "_")
+        # Remove underscore between 'quiz' and number so filenames read 'quizX_' not 'quiz_X_'
+        self.quiz_name = re.sub(r'^quiz_(\d)', r'quiz\1', self.quiz_name)
         self.config.modifyQuizPrefix(self.quiz_name + "_")
 
         self.quiz_df = None
@@ -550,7 +552,7 @@ class CanvigatorQuiz:
             )
 
         print("\nAvailable dates with submission data:")
-        for i, d in enumerate(common_dates):
+        for i, d in enumerate(common_dates, start=1):
             print(f"[ {i} ] {d}")
 
         date_index = prompt_for_index("\nSelect date from above using index: ", len(common_dates) - 1)
