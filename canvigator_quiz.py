@@ -771,6 +771,12 @@ class CanvigatorQuiz:
         if not has_partner and not has_retake:
             raise RuntimeError("detectPartners() and/or detectRetakers() must be called before awardBonusPoints()")
 
+        # Load all_submissions to find each student's best attempt (highest score, latest attempt if tied)
+        subs_df = self._loadAllSubmissions()
+        subs_df = subs_df.sort_values(['id', 'score', 'attempt'], ascending=[True, True, True])
+        best_attempts = subs_df.groupby('id').last()[['attempt']].rename(columns={'attempt': 'best_attempt'})
+        best_attempt_map = best_attempts['best_attempt'].to_dict()
+
         quiz_summary = self.quiz_df[['name', 'id', 'n_correct', 'n_incorrect', 'score']].copy()
 
         # Merge in partner and retake bonuses
@@ -831,6 +837,8 @@ class CanvigatorQuiz:
             bonus_val = row['bonus'].values[0]
             if bonus_val > 0:
 
+                best_attempt = best_attempt_map.get(sub.user_id, sub.attempt)
+
                 if dry_run:
                     student_name = quiz_summary.at[row.index[0], 'name']
                     p_bonus = row['partner_bonus'].values[0]
@@ -841,18 +849,23 @@ class CanvigatorQuiz:
                     if r_bonus > 0:
                         parts.append(f"retake={r_bonus}")
                     detail = ", ".join(parts)
+                    attempt_note = f", attempt={best_attempt}" if best_attempt != sub.attempt else ""
                     print(f"  [DRY RUN] Would award {bonus_val} bonus points to {student_name} "
-                          f"(id: {sub.user_id}, {detail})")
+                          f"(id: {sub.user_id}, {detail}{attempt_note})")
                     logger.info(f"[DRY RUN] Would award {bonus_val} bonus to student {sub.user_id}")
                 else:
                     # Set points before fudge points are added
                     newattributes = {'excused?': True, 'score_before_regrade': sub.score}
                     sub.set_attributes(newattributes)
 
-                    # Now set fudge points (combined partner + retake bonus)
-                    update_obj = [{'attempt': sub.attempt, 'fudge_points': bonus_val}]
+                    # Now set fudge points on the student's best attempt (combined partner + retake bonus)
+                    update_obj = [{'attempt': best_attempt, 'fudge_points': bonus_val}]
                     sub.update_score_and_comments(quiz_submissions=update_obj)
-                    logger.info(f"Awarded {bonus_val} bonus to student {sub.user_id}")
+                    if best_attempt != sub.attempt:
+                        logger.info(f"Awarded {bonus_val} bonus to student {sub.user_id} "
+                                    f"on best attempt {best_attempt} (latest was {sub.attempt})")
+                    else:
+                        logger.info(f"Awarded {bonus_val} bonus to student {sub.user_id}")
 
                 quiz_summary.at[row.index[0], 'score_w_bonus'] = row['score'].values[0] + bonus_val
 
