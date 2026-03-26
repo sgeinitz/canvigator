@@ -95,7 +95,7 @@ def selectFromList(paginated_list, item_type="item"):
     A general function that takes a canvasapi paginated_list object
     and lists each item in it, then prompts user to select one item.
     """
-    print(f"\nOptions:")
+    print("\nOptions:")
     subobject_list = []
     for i, so in enumerate(paginated_list, start=1):
         print(f"[ {i:2d} ] {so}")
@@ -128,7 +128,6 @@ def selectCourse(canvas):
     """
     Given a canvas instance object, display a list of courses and prompt
     the user to select a course. The selected course is returned.
-
     1. First prompt the user to choose between past or current courses.
     2. List the selected type of courses (past or current).
     """
