@@ -125,12 +125,9 @@ def selectCourseByCRN(canvas, crn):
 
 
 def selectCourse(canvas):
-    """
-    Given a canvas instance object, display a list of courses and prompt
-    the user to select a course. The selected course is returned.
+    """Given a canvas instance object, display a list of courses and prompt the user to select a course.
     1. First prompt the user to choose between past or current courses.
-    2. List the selected type of courses (past or current).
-    """
+    2. List the selected type of courses (past or current)."""
 
     past_courses = []
     current_courses = []
