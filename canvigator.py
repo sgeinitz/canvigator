@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys
 
-tasks = ['activity', 'auto-award-bonus', 'award-bonus', 'pair', 're-award-bonus', 'all-subs']
+tasks = ['activity', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', 'pair', 'all-subs']
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -75,7 +75,7 @@ if task == 'activity':
 elif task == 'all-subs':
     course.getAllQuizzesAndSubmissions()
 
-elif task in ['pair', 'auto-award-bonus', 'award-bonus', 're-award-bonus']:
+elif task in ['pair', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
     # Prompt user to select a quiz
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
@@ -94,32 +94,20 @@ elif task in ['pair', 'auto-award-bonus', 'award-bonus', 're-award-bonus']:
         # Generate pairings for today using the median method
         quiz.createStudentPairings(method='med', write_csv=True)
 
-    elif task == 'auto-award-bonus':
-        # Detect partners automatically from submission timestamps and scores
-        quiz.detectPartners()
-
-        # Award bonus points to detected partners
-        quiz.awardBonusPoints(dry_run=dry_run)
-
     elif task == 'award-bonus':
-        quiz.generateDistanceMatrix(only_present=False)
-
-        # Prompt user to find the pairings CSV file
-        quiz.getPastPairingsCSV()
-
-        # Check if paired students have distance of 0
-        quiz.checkForBonusEarned()
-
-        # Award bonus points to students who received it by setting fudge points
+        # Detect partners and retakers, then award both bonus types
+        quiz.detectPartners()
+        quiz.detectRetakers()
         quiz.awardBonusPoints(dry_run=dry_run)
 
-    elif task == 're-award-bonus':
-        quiz.generateDistanceMatrix(only_present=False)
+    elif task == 'award-bonus-partner-only':
+        # Detect partners and award only the partner bonus
+        quiz.detectPartners()
+        quiz.awardBonusPoints(dry_run=dry_run)
 
-        # Prompt user to find the pairings CSV file
-        quiz.getPastBonusCSV()
-
-        # Re-Award bonus points to students who received it by setting fudge points
-        quiz.reAwardBonusPoints(dry_run=dry_run)
+    elif task == 'award-bonus-retake-only':
+        # Detect retakers and award only the retake bonus
+        quiz.detectRetakers()
+        quiz.awardBonusPoints(dry_run=dry_run)
 
 print("\n** Done ***\n")

@@ -88,7 +88,7 @@ The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 activity`.
 
-Available tasks: `activity`, `pair`, `auto-award-bonus`, `award-bonus`, `re-award-bonus`, `all-subs`
+Available tasks: `activity`, `pair`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `all-subs`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -142,17 +142,49 @@ required format (columns: `name`, `id`, `present` where 1 = present).
 
 ---
 
-#### `auto-award-bonus` — Automatically detect partners and award bonus points
+#### `award-bonus` — Award both partner and retake bonus points
 
-Automatically detects student partner groups by comparing first-attempt
-per-question scores and answer timestamps from a prior `all-subs` run. Students
-whose first attempts show a high fraction of matching scores (default ≥ 80%)
-and closely timed answers (default within 10 seconds on ≥ 80% of questions)
-are grouped as partners. Groups larger than 3 are flagged for manual review.
-After detection, bonus fudge points are awarded on their Canvas submissions.
+Detects partner groups and qualifying retakers, then awards both bonus types
+as combined fudge points on their Canvas submissions. Each bonus defaults to
+15% of quiz points; a student earning both receives 30% total.
+
+**Partner bonus:** Students whose first attempts show a high fraction of
+matching scores (default ≥ 80%) and closely timed answers (default within
+10 seconds on ≥ 80% of questions) are grouped as partners. Groups larger than
+3 are flagged for manual review.
+
+**Retake bonus:** Students who retook the quiz at least 3 times with at least
+1 day (24 hours) between qualifying attempts.
 
 **Before running:** the `all-subs` task must have been run first for the same
-quiz so that the events and per-question submission CSVs exist.
+quiz so that the submission CSVs exist.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/<quiz>_<id>_all_subs_and_events_YYYYMMDD.csv` (from `all-subs`) |
+| | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` (from `all-subs`) |
+| | `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv` (from `all-subs`) |
+| **Output** | `data/<course>/<quiz>_<id>_detected_partners_YYYYMMDD.csv` — detected partner groups |
+| | `data/<course>/<quiz>_<id>_retake_qualified_YYYYMMDD.csv` — students qualifying for retake bonus |
+| | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with partner_bonus, retake_bonus, and combined bonus columns |
+| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
+
+Use `--dry-run` to preview which students would receive bonus points without
+modifying anything in Canvas. In dry-run mode the scores CSV is named
+`*_scores_w_bonus_dryrun_*.csv`.
+
+**Typical workflow:**
+1. Run `python canvigator.py all-subs` to export submission data for all quizzes.
+2. Run `python canvigator.py [--dry-run] award-bonus` and select the course, quiz, and date when prompted.
+3. Review the `*_detected_partners_*.csv` and `*_retake_qualified_*.csv` to verify the results.
+
+---
+
+#### `award-bonus-partner-only` — Award only the partner bonus
+
+Same as `award-bonus` but only detects and awards the partner bonus (no retake
+bonus). Useful when you want to reward collaborative work without the retake
+incentive.
 
 | | Files |
 |---|---|
@@ -162,54 +194,19 @@ quiz so that the events and per-question submission CSVs exist.
 | | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with bonus column |
 | **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
 
-Use `--dry-run` to preview which students would receive bonus points without
-modifying anything in Canvas. In dry-run mode the scores CSV is named
-`*_scores_w_bonus_dryrun_*.csv`.
-
-**Typical workflow:**
-1. Run `python canvigator.py all-subs` to export submission data for all quizzes.
-2. Run `python canvigator.py [--dry-run] auto-award-bonus` and select the course, quiz, and date when prompted.
-3. Review the `*_detected_partners_*.csv` to verify the detected groups.
-
 ---
 
-#### `award-bonus` — Award bonus points for collaborative quiz answers
+#### `award-bonus-retake-only` — Award only the retake bonus
 
-After students complete the collaborative quiz, this task checks whether paired
-students answered identically (distance ≤ 0.01) and awards bonus fudge points
-on their Canvas submissions. It reuses the quiz report and distance matrix but
-does not create separate event or histogram exports.
+Same as `award-bonus` but only detects and awards the retake bonus (no partner
+detection). Useful when you want to incentivize retakes independently.
 
 | | Files |
 |---|---|
-| **Input** | `data/<course>/*pairing*.csv` (a pairings CSV from a prior `pair` run, selected via prompt) |
-| **Output** | `data/<course>/<quiz>_<id>_student_analysis_YYYYMMDD.csv` — raw quiz report |
+| **Input** | `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv` (from `all-subs`) |
+| **Output** | `data/<course>/<quiz>_<id>_retake_qualified_YYYYMMDD.csv` — students qualifying for retake bonus |
 | | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with bonus column |
-| **Output — figures** | `figures/<course>/<quiz>_<id>_dist_euclid_YYYYMMDD.png` — distance matrix heatmap |
 | **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
-
-Use `--dry-run` to preview which students would receive bonus points without
-modifying anything in Canvas. In dry-run mode the output CSV is named
-`*_scores_w_bonus_dryrun_*.csv`.
-
----
-
-#### `re-award-bonus` — Re-award bonus points after a quiz retake
-
-If students retake the quiz and score higher than their original attempt, this
-task re-applies the previously earned bonus as fudge points on the new
-submission. Like `award-bonus`, it does not create separate event or histogram
-exports.
-
-| | Files |
-|---|---|
-| **Input** | `data/<course>/*w_bonus*.csv` (a bonus CSV from a prior `award-bonus` run, selected via prompt) |
-| **Output** | `data/<course>/<quiz>_<id>_student_analysis_YYYYMMDD.csv` — raw quiz report |
-| | `data/<course>/<quiz>_<id>_scores_w_bonus_new_YYYYMMDD.csv` — updated scores with bonus |
-| **Output — figures** | `figures/<course>/<quiz>_<id>_dist_euclid_YYYYMMDD.png` — distance matrix heatmap |
-| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
-
-In dry-run mode the output CSV is named `*_scores_w_bonus_new_dryrun_*.csv`.
 
 ---
 
