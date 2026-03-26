@@ -4,7 +4,6 @@ import random
 import logging
 import requests
 import pandas as pd
-import scipy.stats as stats
 import scipy.spatial.distance as distance
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -683,6 +682,7 @@ class CanvigatorQuiz:
         logger.info(f"Detected {len(retake_data)} retake-qualified students, saved to {retake_csv}")
 
     def getAllSubmissionsAndEvents(self):
+        """Collect per-attempt submission history and events into three CSVs."""
         quiz_takers = self.quiz_df[['name', 'id']].copy()
 
         # Lists to collect data before creating DataFrames
@@ -694,18 +694,21 @@ class CanvigatorQuiz:
         for i, sub in enumerate(subs):
             if self.verbose:
                 print(f"Processing submission for student id {sub.user_id}")
-            student_subs = self.canvas_course.canvas_course.get_multiple_submissions(student_ids=[sub.user_id],
-                                                                       assignment_ids=[self.canvas_quiz.assignment_id],
-                                                                       include=['submission_history'])[0]
+            student_subs = self.canvas_course.canvas_course.get_multiple_submissions(
+                student_ids=[sub.user_id],
+                assignment_ids=[self.canvas_quiz.assignment_id],
+                include=['submission_history'])[0]
             n_attempts = len(student_subs.submission_history)
             for i in range(n_attempts):
                 attempt_data = student_subs.submission_history[i]
                 attempt_num = attempt_data['attempt']
 
-                new_row = {'id': sub.user_id,
-                        'attempt': attempt_num,
-                        'score': attempt_data['score'],
-                        'timestamp': attempt_data['submitted_at']}
+                new_row = {
+                    'id': sub.user_id,
+                    'attempt': attempt_num,
+                    'score': attempt_data['score'],
+                    'timestamp': attempt_data['submitted_at']
+                }
                 submissions_data.append(new_row)
 
                 # check that this an attempt/submission exists before trying to get all of the events for it
@@ -719,19 +722,19 @@ class CanvigatorQuiz:
                 for q, qdata in enumerate(attempt_data['submission_data']):
                     new_q_row = {'id': sub.user_id,
                                  'attempt': attempt_num,
-                                 'question': q+1,
+                                 'question': q + 1,
                                  'points': qdata['points'],
                                  'correct': qdata['correct']}
                     subs_by_question_data.append(new_q_row)
 
                 # see scratch_work.py for getting all events for this submission
-                this_submission_events = sub.get_submission_events(attempt=i+1)  # get sub. events for this attempt
+                this_submission_events = sub.get_submission_events(attempt=i + 1)  # get sub. events for this attempt
 
                 try:
                     for event in this_submission_events:
                         subs_and_events_data.append({
                             'id': sub.user_id,
-                            'attempt': i+1,
+                            'attempt': i + 1,
                             'event': event.event_type,
                             'timestamp': event.created_at
                         })
@@ -804,8 +807,13 @@ class CanvigatorQuiz:
             # Get row from quiz_summary where column 'id' matches sub.user_id
             row = quiz_summary[quiz_summary['id'] == sub.user_id]
 
-            # Confirm that the sub.score matches row['score'] using an assert statement
-            assert abs(sub.score - row['score'].values[0]) < 0.001
+            # Canvas may return a higher score than the student_analysis report if the
+            # student retook the quiz and improved; log a note when they differ.
+            report_score = row['score'].values[0]
+            if abs(sub.score - report_score) >= 0.001:
+                student_name = quiz_summary.at[row.index[0], 'name']
+                logger.info(f"Score differs for {student_name} (id: {sub.user_id}): "
+                            f"Canvas={sub.score}, report={report_score} (likely a retake improvement)")
 
             # Use first-attempt timestamps if available (set by detectPartners), otherwise use latest
             first_times = getattr(self, 'first_attempt_times', {})
