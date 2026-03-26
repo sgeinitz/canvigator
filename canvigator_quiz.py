@@ -764,12 +764,31 @@ class CanvigatorQuiz:
         all_sub_and_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_and_events_{today_str()}.csv"
         all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)
 
+    def _populateTimestamps(self, quiz_summary, row_index, sub):
+        """Fill in start/finish/minutes for a student row using first-attempt times if available."""
+        first_times = getattr(self, 'first_attempt_times', {})
+        if sub.user_id in first_times:
+            fa = first_times[sub.user_id]
+            quiz_summary.at[row_index, 'start'] = fa.get('start', 'n/a')
+            quiz_summary.at[row_index, 'finish'] = fa.get('finish', 'n/a')
+            quiz_summary.at[row_index, 'minutes'] = fa.get('minutes', 0.0)
+        else:
+            quiz_summary.at[row_index, 'start'] = sub.started_at
+            quiz_summary.at[row_index, 'finish'] = sub.finished_at
+            quiz_summary.at[row_index, 'minutes'] = sub.time_spent / 60.0
+
     def awardBonusPoints(self, dry_run=False):
         """Award bonus points to students by setting fudge points (partner bonus, retake bonus, or both)."""
         has_partner = getattr(self, 'df_paired_students', None) is not None and not self.df_paired_students.empty
         has_retake = getattr(self, 'df_retake_students', None) is not None and not self.df_retake_students.empty
         if not has_partner and not has_retake:
             raise RuntimeError("detectPartners() and/or detectRetakers() must be called before awardBonusPoints()")
+
+        # Load all_submissions to find each student's best attempt (highest score, latest attempt if tied)
+        subs_df = self._loadAllSubmissions()
+        subs_df = subs_df.sort_values(['id', 'score', 'attempt'], ascending=[True, True, True])
+        best_attempts = subs_df.groupby('id').last()[['attempt']].rename(columns={'attempt': 'best_attempt'})
+        best_attempt_map = best_attempts['best_attempt'].to_dict()
 
         quiz_summary = self.quiz_df[['name', 'id', 'n_correct', 'n_incorrect', 'score']].copy()
 
@@ -799,6 +818,9 @@ class CanvigatorQuiz:
         quiz_summary.drop(columns='lastname', inplace=True)
         quiz_summary.reset_index(drop=True, inplace=True)
 
+        # Get the Canvas Assignment corresponding to this quiz (needed for leaving submission comments)
+        assignment = self.canvas_course.canvas_course.get_assignment(self.canvas_quiz.assignment_id)
+
         if dry_run:
             print("\n=== DRY RUN MODE - No changes will be made to Canvas ===\n")
 
@@ -815,44 +837,55 @@ class CanvigatorQuiz:
                 logger.info(f"Score differs for {student_name} (id: {sub.user_id}): "
                             f"Canvas={sub.score}, report={report_score} (likely a retake improvement)")
 
-            # Use first-attempt timestamps if available (set by detectPartners), otherwise use latest
-            first_times = getattr(self, 'first_attempt_times', {})
-            if sub.user_id in first_times:
-                fa = first_times[sub.user_id]
-                quiz_summary.at[row.index[0], 'start'] = fa.get('start', 'n/a')
-                quiz_summary.at[row.index[0], 'finish'] = fa.get('finish', 'n/a')
-                quiz_summary.at[row.index[0], 'minutes'] = fa.get('minutes', 0.0)
-            else:
-                quiz_summary.at[row.index[0], 'start'] = sub.started_at
-                quiz_summary.at[row.index[0], 'finish'] = sub.finished_at
-                quiz_summary.at[row.index[0], 'minutes'] = sub.time_spent / 60.0
+            self._populateTimestamps(quiz_summary, row.index[0], sub)
 
             # Check if bonus needs to be added
             bonus_val = row['bonus'].values[0]
             if bonus_val > 0:
 
+                best_attempt = best_attempt_map.get(sub.user_id, sub.attempt)
+
+                # Build a comment describing the bonus breakdown
+                p_bonus = row['partner_bonus'].values[0]
+                r_bonus = row['retake_bonus'].values[0]
+                comment_parts = []
+                if p_bonus > 0:
+                    comment_parts.append(f"Partner bonus: +{p_bonus} points")
+                if r_bonus > 0:
+                    comment_parts.append(f"Retake bonus: +{r_bonus} points")
+                comment_text = "Bonus points awarded: " + ", ".join(comment_parts) + f" (total: +{bonus_val})"
+
                 if dry_run:
                     student_name = quiz_summary.at[row.index[0], 'name']
-                    p_bonus = row['partner_bonus'].values[0]
-                    r_bonus = row['retake_bonus'].values[0]
                     parts = []
                     if p_bonus > 0:
                         parts.append(f"partner={p_bonus}")
                     if r_bonus > 0:
                         parts.append(f"retake={r_bonus}")
                     detail = ", ".join(parts)
+                    attempt_note = f", attempt={best_attempt}" if best_attempt != sub.attempt else ""
                     print(f"  [DRY RUN] Would award {bonus_val} bonus points to {student_name} "
-                          f"(id: {sub.user_id}, {detail})")
+                          f"(id: {sub.user_id}, {detail}{attempt_note})")
+                    print(f"            Comment: \"{comment_text}\"")
                     logger.info(f"[DRY RUN] Would award {bonus_val} bonus to student {sub.user_id}")
                 else:
                     # Set points before fudge points are added
                     newattributes = {'excused?': True, 'score_before_regrade': sub.score}
                     sub.set_attributes(newattributes)
 
-                    # Now set fudge points (combined partner + retake bonus)
-                    update_obj = [{'attempt': sub.attempt, 'fudge_points': bonus_val}]
+                    # Now set fudge points on the student's best attempt (combined partner + retake bonus)
+                    update_obj = [{'attempt': best_attempt, 'fudge_points': bonus_val}]
                     sub.update_score_and_comments(quiz_submissions=update_obj)
-                    logger.info(f"Awarded {bonus_val} bonus to student {sub.user_id}")
+
+                    # Leave a comment on the assignment submission describing the bonus
+                    assgn_sub = assignment.get_submission(sub.user_id)
+                    assgn_sub.edit(comment={'text_comment': comment_text})
+
+                    if best_attempt != sub.attempt:
+                        logger.info(f"Awarded {bonus_val} bonus to student {sub.user_id} "
+                                    f"on best attempt {best_attempt} (latest was {sub.attempt})")
+                    else:
+                        logger.info(f"Awarded {bonus_val} bonus to student {sub.user_id}")
 
                 quiz_summary.at[row.index[0], 'score_w_bonus'] = row['score'].values[0] + bonus_val
 
