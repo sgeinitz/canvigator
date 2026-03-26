@@ -43,16 +43,14 @@ in just one place on your local system, or separately for each course that it wi
 This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 
 3. **Verify Setup**:
-
-Once this is complete, double check that the configuration script, _set_env.sh_ has been created, that it has the correct values for your URL and token, and that the
-subdirectories have been created. 
-  ```bash
-   set_env.sh
-   ```
-   ```bash
-   env
-   ```
-   This command will list all environment variables, allowing you to confirm that the necessary variables have been set correctly.
+    Once this is complete, double check that the configuration script, _set_env.sh_ has been created, that it has the correct values for your URL and token, and that the subdirectories have been created. 
+    ```bash
+    set_env.sh
+    ```
+    ```bash
+    env
+    ```
+    This command will list all environment variables, allowing you to confirm that the necessary variables have been set correctly.
 
 4. **Verify Python Libraries**:
     Before running the project, ensure that all required Python libraries are installed:
