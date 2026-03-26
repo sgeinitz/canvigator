@@ -47,7 +47,7 @@ This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 Once this is complete, double check that the configuration script, _set_env.sh_ has been created, that it has the correct values for your URL and token, and that the
 subdirectories have been created. 
   ```bash
-   _set_env.sh_
+   set_env.sh
    ```
    ```bash
    env
@@ -68,7 +68,7 @@ subdirectories have been created.
         * ![matplotlib](https://img.shields.io/badge/matplotlib-3.3.4-brightgreen)
         * ![numpy](https://img.shields.io/badge/numpy-1.22.0-yellow)
         * ![pandas](https://img.shields.io/badge/pandas-1.3.4-orange)
-        * ![requests](https://img.shields.io/badge/requests-2.32.0-red)
+        * ![requests](https://img.shields.io/badge/requests-2.33.0-red)
         * ![scipy](https://img.shields.io/badge/scipy-1.10.0-lightgrey)
         * ![seaborn](https://img.shields.io/badge/seaborn-0.11.2-blueviolet)
 
