@@ -125,10 +125,12 @@ def selectCourseByCRN(canvas, crn):
 
 
 def selectCourse(canvas):
-    """Given a canvas instance object, display a list of courses and prompt the user to select a course.
+    """
+    Given a canvas instance object, display a list of courses and prompt the user to select a course.
     1. First prompt the user to choose between past or current courses.
-    2. List the selected type of courses (past or current)."""
-
+    2. List the selected type of courses (past or current).
+    3. Selected course is returned as a canvas course object.
+    """
     past_courses = []
     current_courses = []
     current_date = datetime.now()
