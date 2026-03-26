@@ -350,7 +350,7 @@ class CanvigatorQuiz:
                 name3.append(df.name[df.id == pair[2]].to_string(index=False))
                 person3.append(pair[2])
                 if self.verbose:
-                    print(f"    3-tuple {i+1:2.0f}: {df.name[df.id == pair[0]].to_string(index=False)}, \
+                    print(f"    3-tuple {i + 1:2.0f}: {df.name[df.id == pair[0]].to_string(index=False)}, \
                           {df.name[df.id == pair[1]].to_string(index=False)}, {df.name[df.id == pair[2]].to_string(index=False)}")
                 if self.verbose:
                     print(f"p1, p2, dist = {(pair[0], pair[1], self.dist_matrix.loc[pair[0], pair[1]])}")
@@ -589,7 +589,7 @@ class CanvigatorQuiz:
 
         # Calculate bonus amount
         if bonus_amount < 1.0:
-            bonus = round(bonus_amount * self.canvas_quiz.points_possible)
+            bonus = round(bonus_amount * self.canvas_quiz.points_possible, 2)
         else:
             bonus = bonus_amount
 
@@ -642,7 +642,7 @@ class CanvigatorQuiz:
         name_map = dict(zip(self.quiz_df['id'], self.quiz_df['name']))
 
         if bonus_amount < 1.0:
-            bonus = round(bonus_amount * self.canvas_quiz.points_possible)
+            bonus = round(bonus_amount * self.canvas_quiz.points_possible, 2)
         else:
             bonus = bonus_amount
 
@@ -739,7 +739,7 @@ class CanvigatorQuiz:
                             'timestamp': event.created_at
                         })
                 except Exception:
-                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {i+1}")
+                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {i + 1}")
                     continue
 
         # Create DataFrames from the collected lists
