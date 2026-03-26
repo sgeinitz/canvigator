@@ -8,15 +8,29 @@ dry_run = '--dry-run' in args
 if dry_run:
     args.remove('--dry-run')
 
+crn = None
+if '--crn' in args:
+    crn_idx = args.index('--crn')
+    if crn_idx + 1 >= len(args):
+        print("Error: --crn requires a 5-digit CRN value")
+        sys.exit(1)
+    crn = args[crn_idx + 1]
+    if not crn.isdigit() or len(crn) != 5:
+        print(f"Error: CRN must be exactly 5 digits, got '{crn}'")
+        sys.exit(1)
+    args.pop(crn_idx)  # remove '--crn'
+    args.pop(crn_idx)  # remove the CRN value
+
 if len(args) < 1:
-    print(f"Usage: canvigator.py [--dry-run] {' | '.join(tasks)}")
+    print(f"Usage: canvigator.py [--dry-run] [--crn <CRN>] {' | '.join(tasks)}")
     sys.exit(1)
 
 task = args[0]
 
 if task in ("help", "--help"):
-    print(f"Usage: canvigator.py [--dry-run] {' | '.join(tasks)}")
-    print("  --dry-run    Preview bonus changes without modifying Canvas")
+    print(f"Usage: canvigator.py [--dry-run] [--crn <CRN>] {' | '.join(tasks)}")
+    print("  --dry-run      Preview bonus changes without modifying Canvas")
+    print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
     sys.exit(0)
 
 if task not in tasks:
@@ -45,8 +59,11 @@ canv_config = cu.CanvigatorConfig()
 # Initialize a new Canvas object
 canvas = canvasapi.Canvas(API_URL, API_KEY)
 
-# Prompt user to select a course
-course_choice = cu.selectCourse(canvas)
+# Select course by CRN if provided, otherwise prompt user interactively
+if crn:
+    course_choice = cu.selectCourseByCRN(canvas, crn)
+else:
+    course_choice = cu.selectCourse(canvas)
 
 print(f"\nSelected course: {course_choice.name}")
 
