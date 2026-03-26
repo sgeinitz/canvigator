@@ -807,8 +807,8 @@ class CanvigatorQuiz:
             # Get row from quiz_summary where column 'id' matches sub.user_id
             row = quiz_summary[quiz_summary['id'] == sub.user_id]
 
-            # Canvas may return a higher score than the student_analysis report if the
-            # student retook the quiz and improved; log a note when they differ.
+            # Canvas may return a lower score than the student_analysis report if the
+            # student retook the quiz and did worse than on their best attempt(s); log a note when they differ.
             report_score = row['score'].values[0]
             if abs(sub.score - report_score) >= 0.001:
                 student_name = quiz_summary.at[row.index[0], 'name']
