@@ -548,7 +548,7 @@ class CanvigatorQuiz:
 
         return first_attempt_times
 
-    def detectPartners(self, score_threshold=0.8, time_threshold_secs=10, time_overlap_threshold=0.8, bonus_amount=0.15):
+    def detectPartners(self, score_threshold=0.8, time_threshold_secs=5, time_overlap_threshold=0.8, bonus_amount=0.15):
         """Detect student partners by comparing first-attempt per-question scores and answer timestamps.
 
         Finds pairs (or triples) of students whose first-attempt data shows:
