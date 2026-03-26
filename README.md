@@ -165,7 +165,7 @@ quiz so that the submission CSVs exist.
 | **Output** | `data/<course>/<quiz>_<id>_detected_partners_YYYYMMDD.csv` — detected partner groups |
 | | `data/<course>/<quiz>_<id>_retake_qualified_YYYYMMDD.csv` — students qualifying for retake bonus |
 | | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with partner_bonus, retake_bonus, and combined bonus columns |
-| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
+| **Canvas side-effect** | Sets `fudge_points` on the student's highest-scoring attempt and leaves a submission comment describing the bonus breakdown (skipped in `--dry-run` mode) |
 
 Use `--dry-run` to preview which students would receive bonus points without
 modifying anything in Canvas. In dry-run mode the scores CSV is named
@@ -190,7 +190,7 @@ incentive.
 | | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` (from `all-subs`) |
 | **Output** | `data/<course>/<quiz>_<id>_detected_partners_YYYYMMDD.csv` — detected partner groups |
 | | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with bonus column |
-| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
+| **Canvas side-effect** | Sets `fudge_points` on the student's highest-scoring attempt and leaves a submission comment (skipped in `--dry-run` mode) |
 
 ---
 
@@ -204,7 +204,7 @@ detection). Useful when you want to incentivize retakes independently.
 | **Input** | `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv` (from `all-subs`) |
 | **Output** | `data/<course>/<quiz>_<id>_retake_qualified_YYYYMMDD.csv` — students qualifying for retake bonus |
 | | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with bonus column |
-| **Canvas side-effect** | Sets `fudge_points` on qualifying quiz submissions (skipped in `--dry-run` mode) |
+| **Canvas side-effect** | Sets `fudge_points` on the student's highest-scoring attempt and leaves a submission comment (skipped in `--dry-run` mode) |
 
 ---
 
