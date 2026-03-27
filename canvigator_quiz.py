@@ -703,10 +703,19 @@ class CanvigatorQuiz:
                 attempt_data = student_subs.submission_history[i]
                 attempt_num = attempt_data['attempt']
 
+                # Compute raw score from per-question points to exclude any fudge points
+                # that may have been added by a prior award-bonus run
+                submission_data = attempt_data.get('submission_data', [])
+                raw_score = sum(qdata['points'] for qdata in submission_data) if submission_data else attempt_data['score']
+
+                if submission_data and abs(attempt_data['score'] - raw_score) >= 0.001:
+                    logger.info(f"Student {sub.user_id} attempt {attempt_num}: Canvas score={attempt_data['score']}, "
+                                f"raw score={raw_score} (fudge points excluded)")
+
                 new_row = {
                     'id': sub.user_id,
                     'attempt': attempt_num,
-                    'score': attempt_data['score'],
+                    'score': raw_score,
                     'timestamp': attempt_data['submitted_at']
                 }
                 submissions_data.append(new_row)
