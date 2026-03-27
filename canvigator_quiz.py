@@ -703,10 +703,19 @@ class CanvigatorQuiz:
                 attempt_data = student_subs.submission_history[i]
                 attempt_num = attempt_data['attempt']
 
+                # Compute raw score from per-question points to exclude any fudge points
+                # that may have been added by a prior award-bonus run
+                submission_data = attempt_data.get('submission_data', [])
+                raw_score = sum(qdata['points'] for qdata in submission_data) if submission_data else attempt_data['score']
+
+                if submission_data and abs(attempt_data['score'] - raw_score) >= 0.001:
+                    logger.info(f"Student {sub.user_id} attempt {attempt_num}: Canvas score={attempt_data['score']}, "
+                                f"raw score={raw_score} (fudge points excluded)")
+
                 new_row = {
                     'id': sub.user_id,
                     'attempt': attempt_num,
-                    'score': attempt_data['score'],
+                    'score': raw_score,
                     'timestamp': attempt_data['submitted_at']
                 }
                 submissions_data.append(new_row)
@@ -850,10 +859,10 @@ class CanvigatorQuiz:
                 r_bonus = row['retake_bonus'].values[0]
                 comment_parts = []
                 if p_bonus > 0:
-                    comment_parts.append(f"Partner bonus: +{p_bonus} points")
+                    comment_parts.append(f"partner bonus = {p_bonus}")
                 if r_bonus > 0:
-                    comment_parts.append(f"Retake bonus: +{r_bonus} points")
-                comment_text = "Bonus points awarded: " + ", ".join(comment_parts) + f" (total: +{bonus_val})"
+                    comment_parts.append(f"retake bonus = {r_bonus}")
+                comment_text = "Bonus points: " + ", ".join(comment_parts) + f" (total = {bonus_val})"
 
                 if dry_run:
                     student_name = quiz_summary.at[row.index[0], 'name']
