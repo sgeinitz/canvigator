@@ -859,10 +859,10 @@ class CanvigatorQuiz:
                 r_bonus = row['retake_bonus'].values[0]
                 comment_parts = []
                 if p_bonus > 0:
-                    comment_parts.append(f"Partner bonus: +{p_bonus} points")
+                    comment_parts.append(f"partner bonus = {p_bonus}")
                 if r_bonus > 0:
-                    comment_parts.append(f"Retake bonus: +{r_bonus} points")
-                comment_text = "Bonus points awarded: " + ", ".join(comment_parts) + f" (total: +{bonus_val})"
+                    comment_parts.append(f"retake bonus = {r_bonus}")
+                comment_text = "Bonus points: " + ", ".join(comment_parts) + f" (total = {bonus_val})"
 
                 if dry_run:
                     student_name = quiz_summary.at[row.index[0], 'name']
