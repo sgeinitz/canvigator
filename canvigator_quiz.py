@@ -10,6 +10,7 @@ import matplotlib as mpl
 import seaborn as sbn
 import os
 import re
+import json
 from canvigator_utils import today_str, selectCSVFromList, prompt_for_index
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class CanvigatorQuiz:
     """A class for one quiz and associated attributes/data."""
 
-    def __init__(self, canvas, canvas_course, canvas_quiz, config, verbose=False):
+    def __init__(self, canvas, canvas_course, canvas_quiz, config, verbose=False, skip_student_data=False):
         """Initialize quiz object by getting all quiz data from Canvas."""
         self.canvas = canvas
         self.canvas_course = canvas_course
@@ -45,7 +46,7 @@ class CanvigatorQuiz:
             if verbose:
                 print(f"Question {i}: {quest}")
         self.quiz_question_ids = [str(c.id) for c in self.quiz_questions]
-        if self.published:
+        if self.published and not skip_student_data:
             self.getQuizData()
 
     def getQuizData(self):
@@ -109,6 +110,21 @@ class CanvigatorQuiz:
         if self.verbose:
             for key, val in self.question_stats.items():
                 print("key =", key, "->", val)
+
+    def getQuizQuestions(self):
+        """Save quiz questions to a CSV file."""
+        fields = ['id', 'position', 'question_name', 'question_type', 'question_text', 'points_possible']
+        rows = []
+        for q in self.quiz_questions:
+            row = {f: getattr(q, f, None) for f in fields}
+            row['answers'] = json.dumps(getattr(q, 'answers', []))
+            rows.append(row)
+
+        df = pd.DataFrame(rows, columns=fields + ['answers'])
+        csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_questions_{today_str()}.csv"
+        df.to_csv(csv_name, index=False)
+        print(f"Saved {len(rows)} questions to {csv_name}")
+        logger.info(f"Quiz questions saved: {csv_name}")
 
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""
