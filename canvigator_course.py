@@ -50,6 +50,44 @@ class CanvigatorCourse:
                 quiz.generateQuestionHistograms()
                 quiz.getAllSubmissionsAndEvents()
 
+    def createQuiz(self):
+        """Create a new placeholder quiz with stub questions on Canvas."""
+        title = input("Enter quiz title: ").strip()
+        if not title:
+            print("Quiz title cannot be empty.")
+            return
+
+        quiz = self.canvas_course.create_quiz({
+            'title': title,
+            'quiz_type': 'assignment',
+            'time_limit': 20,
+            'published': False,
+            'allowed_attempts': 1,
+        })
+        print(f"\nCreated quiz: '{quiz.title}' (id={quiz.id}, unpublished)")
+        logger.info(f"Created quiz: '{quiz.title}' (id={quiz.id})")
+
+        position = 1
+        print("\nAdd placeholder questions (press Enter on an empty line to finish):")
+        while True:
+            description = input(f"  Q{position} description: ").strip()
+            if not description:
+                break
+            quiz.create_question(question={
+                'question_name': f"Question {position}",
+                'question_text': description,
+                'question_type': 'multiple_choice_question',
+                'points_possible': 1,
+                'position': position,
+            })
+            print(f"    Added Q{position}: {description}")
+            logger.info(f"  Added question {position}: {description}")
+            position += 1
+
+        n_questions = position - 1
+        print(f"\nQuiz '{title}' created with {n_questions} placeholder question{'s' if n_questions != 1 else ''}.")
+        logger.info(f"Quiz '{title}' complete: {n_questions} questions")
+
     def saveStudentActivity(self, data_path):
         """Get student activity from two sources and save to csv files."""
         student_summary_data = self.canvas_course.get_course_level_student_summary_data()
