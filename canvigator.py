@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import sys
 
-tasks = ['activity', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', 'pair', 'all-subs']
+tasks = ['activity', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', 'pair', 'all-subs',
+         'get-quiz-questions', 'create-quiz']
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -74,6 +75,15 @@ if task == 'activity':
 
 elif task == 'all-subs':
     course.getAllQuizzesAndSubmissions()
+
+elif task == 'get-quiz-questions':
+    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
+    print(f"\nSelected quiz: {quiz_choice.title}")
+    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
+    quiz.getQuizQuestions()
+
+elif task == 'create-quiz':
+    course.createQuiz()
 
 elif task in ['pair', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
     # Prompt user to select a quiz
