@@ -2,7 +2,7 @@
 import sys
 
 tasks = ['activity', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', 'pair', 'all-subs',
-         'get-quiz-questions', 'create-quiz', 'export-anon-data', 'export-gradebook']
+         'get-quiz-questions', 'create-quiz', 'export-anon-data', 'export-gradebook', 'quiz-reminder']
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -30,7 +30,7 @@ task = args[0]
 
 if task in ("help", "--help"):
     print(f"Usage: canvigator.py [--dry-run] [--crn <CRN>] {' | '.join(tasks)}")
-    print("  --dry-run      Preview bonus changes without modifying Canvas")
+    print("  --dry-run      Preview changes without modifying Canvas (bonus and reminder tasks)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
     sys.exit(0)
 
@@ -125,6 +125,12 @@ elif task == 'create-quiz':
 
 elif task == 'export-gradebook':
     course.exportGradebook(canv_config.data_path)
+
+elif task == 'quiz-reminder':
+    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
+    print(f"\nSelected quiz: {quiz_choice.title}")
+    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
+    quiz.sendQuizReminders(dry_run=dry_run)
 
 elif task in ['pair', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
     # Prompt user to select a quiz

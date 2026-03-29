@@ -131,6 +131,87 @@ class CanvigatorQuiz:
         print(f"Saved {len(rows)} questions to {csv_name}")
         logger.info(f"Quiz data and content saved: {csv_name}")
 
+    def sendQuizReminders(self, dry_run=False):
+        """Send reminder messages to students who haven't taken the quiz or haven't achieved a perfect score."""
+        quiz_name = self.canvas_quiz.title
+        points_possible = self.canvas_quiz.points_possible
+
+        # Build set of student IDs and scores from the student_analysis report
+        quiz_scores = {}
+        if self.quiz_df is not None and self.n_students is not None and self.n_students > 0:
+            for _, row in self.quiz_df.iterrows():
+                student_id = row['id']
+                score = row['score']
+                if pd.notna(score):
+                    quiz_scores[student_id] = score
+
+        # All enrolled students from the course
+        enrolled = self.canvas_course.students
+
+        no_attempt_template = (
+            "You have not yet attempted {quiz_name}. Be sure to make an attempt soon "
+            "to help stay on top of the content in this course. And remember, the best "
+            "way to use the quiz as a learning tool is to try to answer the questions "
+            "without going to outside references or AI tools. Trying to answer on your "
+            "own, even if it feels like a struggle, is the best way to help learn this "
+            "material. Good luck!"
+        )
+
+        imperfect_template = (
+            "Nice work on attempting {quiz_name}, but you don't yet have a perfect "
+            "score. Be sure to try it again soon to earn a perfect score. And remember, "
+            "quizzes are most effective as learning tools when you try to answer the "
+            "questions on your own without using any other resources. Quizzes work best "
+            "when it feels like a struggle to recall the concepts and ideas in your mind, "
+            "so embrace the struggle. Good luck!"
+        )
+
+        subject_str = f"Quiz Reminder - {quiz_name}"
+        messages = []
+
+        for student in enrolled:
+            student_id = student['id']
+            student_name = student['name']
+            first_name = student_name.split()[0]
+
+            if student_id not in quiz_scores:
+                reminder = no_attempt_template.format(quiz_name=quiz_name)
+                reason = "no attempt"
+            elif quiz_scores[student_id] < points_possible:
+                score = quiz_scores[student_id]
+                reminder = imperfect_template.format(quiz_name=quiz_name)
+                reason = f"score {score}/{points_possible}"
+            else:
+                continue
+
+            message_str = f"Hello {first_name}, {reminder}"
+            messages.append((student_id, student_name, message_str, reason))
+
+        if not messages:
+            print("No reminders to send — all students have perfect scores!")
+            return
+
+        if dry_run:
+            print("\n=== DRY RUN MODE - No messages will be sent on Canvas ===\n")
+
+        print(f"Quiz: {quiz_name} ({points_possible} points possible)")
+        print(f"Reminders to send: {len(messages)}\n")
+
+        for student_id, student_name, message_str, reason in messages:
+            if dry_run:
+                print(f"  [DRY RUN] To: {student_name} (id: {student_id}, {reason})")
+                print(f"            Subject: {subject_str}")
+                print(f"            Message: {message_str}\n")
+            else:
+                self.canvas.create_conversation(
+                    [str(student_id)], message_str, subject=subject_str
+                )
+                print(f"  Sent to: {student_name} (id: {student_id}, {reason})")
+
+        action = "would be sent" if dry_run else "sent"
+        print(f"\n{len(messages)} reminder(s) {action}.")
+        logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
+
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""
         return self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{figure_name}_{today_str()}.png"

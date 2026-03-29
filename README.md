@@ -79,14 +79,14 @@ This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 source set_env.sh                            # set Canvas environment variables (once per terminal session)
 python canvigator.py <task>                  # run a task (prompts for course selection)
 python canvigator.py --crn <CRN> <task>      # select course by CRN (last 5 digits of course code)
-python canvigator.py --dry-run <task>        # preview bonus changes without modifying Canvas
+python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus and reminder tasks)
 ```
 
 The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 activity`.
 
-Available tasks: `activity`, `pair`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `all-subs`
+Available tasks: `activity`, `pair`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `all-subs`, `get-quiz-questions`, `create-quiz`, `export-anon-data`, `export-gradebook`, `quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -222,3 +222,87 @@ event history and per-question histogram figures.
 | | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` — per-question results for each attempt |
 | | `data/<course>/<quiz>_<id>_all_subs_and_events_YYYYMMDD.csv` — timestamped submission events |
 | **Output — figures** | `figures/<course>/<quiz>_<id>_histograms_YYYYMMDD.png` — per-question score histograms |
+
+---
+
+#### `get-quiz-questions` — Export quiz question content
+
+Exports quiz metadata and question content to a CSV file. Skips downloading
+student submission data, so this is a quick way to get a snapshot of the quiz
+structure.
+
+| | Files |
+|---|---|
+| **Input** | _(none — data comes from the Canvas API)_ |
+| **Output** | `data/<course>/<quiz>_<id>_data_and_content_YYYYMMDD.csv` |
+
+The output CSV contains columns: `quiz_id`, `assignment_id`, `id`, `position`,
+`question_name`, `question_type`, `question_text`, `points_possible`, `answers`
+(JSON-encoded). The `assignment_id` enables joining quiz data with
+gradebook/assignment exports.
+
+---
+
+#### `create-quiz` — Create an unpublished placeholder quiz on Canvas
+
+Interactively creates a new unpublished quiz on Canvas. Prompts the user for a
+quiz title, then iteratively prompts for question descriptions. Each question is
+added as a multiple-choice placeholder with 1 point possible. The quiz is
+created with default settings: `quiz_type='assignment'`, `time_limit=30`,
+`one_question_at_a_time=True`, `cant_go_back=True`, `shuffle_answers=True`.
+
+| | Files |
+|---|---|
+| **Input** | _(none — interactive prompts only)_ |
+| **Output** | _(none — quiz is created directly on Canvas, unpublished)_ |
+
+---
+
+#### `export-anon-data` — Export anonymized course data
+
+Anonymizes all CSV files in a course data directory by replacing student IDs
+with hashed anonymous IDs (SHA-256 mod 10^10) and removing identifying columns
+(`name`, `sis_id`). This task works entirely with local files and does not
+require Canvas API credentials. Course selection is done from existing `data/`
+subdirectories (by `--crn` or interactively).
+
+| | Files |
+|---|---|
+| **Input** | All CSV files in `data/<course>/` |
+| **Output** | `data/<course>/anon_mapping_YYYYMMDD.csv` — mapping of original IDs to anonymous IDs |
+| | `data/<course>/anonymized/` — directory containing anonymized copies of all CSVs |
+| | `data/<course>/anonymized_YYYYMMDD.zip` — zip archive of the anonymized directory |
+
+---
+
+#### `export-gradebook` — Export course gradebook
+
+Fetches all published assignments and their submissions from Canvas, joins with
+enrolled student data, and exports a comprehensive gradebook CSV. One row per
+student per assignment.
+
+| | Files |
+|---|---|
+| **Input** | _(none — data comes from the Canvas API)_ |
+| **Output** | `data/<course>/gradebook_YYYYMMDD.csv` |
+
+The output CSV contains columns: `name`, `sortable_name`, `user_id`,
+`assignment_name`, `assignment_id`, `points_possible`, `grade`, `score`.
+
+---
+
+#### `quiz-reminder` — Send quiz reminder messages to students
+
+Sends personalized Canvas messages to students based on their quiz performance.
+Students who have not yet attempted the quiz receive a reminder to make an
+attempt. Students who attempted but scored below perfect receive encouragement
+to retake. Students with perfect scores are skipped.
+
+| | Files |
+|---|---|
+| **Input** | _(none — uses the student_analysis report downloaded from Canvas and enrolled student list)_ |
+| **Output** | _(none — messages are sent as Canvas conversations)_ |
+| **Canvas side-effect** | Sends a Canvas conversation message to each student who hasn't attempted or hasn't achieved a perfect score (skipped in `--dry-run` mode) |
+
+Use `--dry-run` to preview all messages (recipient, subject, body, and reason)
+without sending anything to Canvas.
