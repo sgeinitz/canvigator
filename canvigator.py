@@ -2,7 +2,7 @@
 import sys
 
 tasks = ['activity', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', 'pair', 'all-subs',
-         'get-quiz-questions', 'create-quiz', 'export-anon-data']
+         'get-quiz-questions', 'create-quiz', 'export-anon-data', 'export-gradebook']
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -122,6 +122,9 @@ elif task == 'get-quiz-questions':
 
 elif task == 'create-quiz':
     course.createQuiz()
+
+elif task == 'export-gradebook':
+    course.exportGradebook(canv_config.data_path)
 
 elif task in ['pair', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
     # Prompt user to select a quiz
