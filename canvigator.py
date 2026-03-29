@@ -2,7 +2,7 @@
 import sys
 
 tasks = ['activity', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', 'pair', 'all-subs',
-         'get-quiz-questions', 'create-quiz']
+         'get-quiz-questions', 'create-quiz', 'export-anon-data']
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -37,6 +37,44 @@ if task in ("help", "--help"):
 if task not in tasks:
     print(f"Invalid task: '{task}'. Valid tasks: {', '.join(tasks)}")
     sys.exit(1)
+
+# export-anon-data works with local files only — no Canvas API needed
+if task == 'export-anon-data':
+    import logging
+    from pathlib import Path
+    import canvigator_utils as cu
+    import canvigator_course as cc
+
+    cu.setup_logging()
+    logger = logging.getLogger(__name__)
+
+    data_base = Path.cwd() / "data"
+    if not data_base.exists():
+        print("No data directory found.")
+        sys.exit(1)
+
+    course_dirs = sorted([d for d in data_base.iterdir() if d.is_dir() and not d.name.startswith('.')])
+
+    if crn:
+        matches = [d for d in course_dirs if d.name.endswith(f"_{crn}")]
+        if not matches:
+            print(f"Error: No data directory found for CRN '{crn}'")
+            sys.exit(1)
+        course_data_path = matches[0]
+    else:
+        if not course_dirs:
+            print("No course data directories found.")
+            sys.exit(1)
+        print("\nCourse data directories:")
+        for i, d in enumerate(course_dirs, start=1):
+            print(f"[ {i:2d} ] {d.name}")
+        idx = cu.prompt_for_index("\nSelect course data directory: ", len(course_dirs) - 1)
+        course_data_path = course_dirs[idx]
+
+    print(f"\nSelected: {course_data_path.name}")
+    cc.exportAnonymizedData(course_data_path)
+    print("\n** Done ***\n")
+    sys.exit(0)
 
 import os
 import logging
