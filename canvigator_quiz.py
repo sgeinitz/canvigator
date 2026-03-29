@@ -112,19 +112,24 @@ class CanvigatorQuiz:
                 print("key =", key, "->", val)
 
     def getQuizQuestions(self):
-        """Save quiz questions to a CSV file."""
+        """Save quiz metadata and questions to a CSV file."""
+        quiz_id = self.canvas_quiz.id
+        assignment_id = getattr(self.canvas_quiz, 'assignment_id', None)
+
         fields = ['id', 'position', 'question_name', 'question_type', 'question_text', 'points_possible']
         rows = []
         for q in self.quiz_questions:
-            row = {f: getattr(q, f, None) for f in fields}
+            row = {'quiz_id': quiz_id, 'assignment_id': assignment_id}
+            row.update({f: getattr(q, f, None) for f in fields})
             row['answers'] = json.dumps(getattr(q, 'answers', []))
             rows.append(row)
 
-        df = pd.DataFrame(rows, columns=fields + ['answers'])
-        csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_questions_{today_str()}.csv"
+        columns = ['quiz_id', 'assignment_id'] + fields + ['answers']
+        df = pd.DataFrame(rows, columns=columns)
+        csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_data_and_content_{today_str()}.csv"
         df.to_csv(csv_name, index=False)
         print(f"Saved {len(rows)} questions to {csv_name}")
-        logger.info(f"Quiz questions saved: {csv_name}")
+        logger.info(f"Quiz data and content saved: {csv_name}")
 
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""

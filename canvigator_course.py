@@ -94,6 +94,59 @@ class CanvigatorCourse:
         print(f"\nQuiz '{title}' created with {n_questions} placeholder question{'s' if n_questions != 1 else ''}.")
         logger.info(f"Quiz '{title}' complete: {n_questions} questions")
 
+    def exportGradebook(self, data_path):
+        """Export the current gradebook for all graded assignments to a CSV file.
+
+        Fetches all published assignments and their submissions, then joins
+        with student enrollment data to produce a gradebook export.
+        """
+        print("Fetching assignments...")
+        assignments = list(self.canvas_course.get_assignments())
+        published = [a for a in assignments if a.published]
+        print(f"Found {len(published)} published assignments.")
+
+        if not published:
+            print("No published assignments found.")
+            return
+
+        # Build student lookup from enrolled students
+        student_lookup = {}
+        for s in self.students:
+            student_lookup[s['id']] = {
+                'name': s['name'],
+                'sortable_name': s.get('sortable_name', ''),
+            }
+
+        gradebook_rows = []
+        for i, assignment in enumerate(published):
+            print(f"  [{i + 1}/{len(published)}] {assignment.name}")
+            logger.info(f"Fetching submissions for assignment: {assignment.name} (id={assignment.id})")
+            for sub in assignment.get_submissions():
+                user_id = sub.user_id
+                student = student_lookup.get(user_id)
+                if student is None:
+                    continue
+                gradebook_rows.append({
+                    'name': student['name'],
+                    'sortable_name': student['sortable_name'],
+                    'user_id': user_id,
+                    'assignment_name': assignment.name,
+                    'assignment_id': assignment.id,
+                    'points_possible': assignment.points_possible,
+                    'grade': sub.grade,
+                    'score': sub.score,
+                })
+
+        gradebook_df = pd.DataFrame(gradebook_rows, columns=[
+            'name', 'sortable_name', 'user_id', 'assignment_name',
+            'assignment_id', 'points_possible', 'grade', 'score'
+        ])
+
+        csv_path = data_path / f"gradebook_{today_str()}.csv"
+        gradebook_df.to_csv(csv_path, index=False)
+        print(f"\nExported gradebook with {len(gradebook_df)} entries to {csv_path.name}")
+        logger.info(f"Saved gradebook to {csv_path}")
+
     def saveStudentActivity(self, data_path):
         """Get student activity from two sources and save to csv files."""
         student_summary_data = self.canvas_course.get_course_level_student_summary_data()
