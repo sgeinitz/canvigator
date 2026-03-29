@@ -60,9 +60,13 @@ class CanvigatorCourse:
         quiz = self.canvas_course.create_quiz({
             'title': title,
             'quiz_type': 'assignment',
-            'time_limit': 20,
+            'time_limit': 30,
             'published': False,
             'allowed_attempts': 1,
+            'scoring_policy': 'keep_highest',
+            'one_question_at_a_time': True,
+            'cant_go_back': True,
+            'shuffle_answers': True
         })
         print(f"\nCreated quiz: '{quiz.title}' (id={quiz.id}, unpublished)")
         logger.info(f"Created quiz: '{quiz.title}' (id={quiz.id})")
