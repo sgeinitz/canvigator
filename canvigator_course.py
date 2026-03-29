@@ -1,4 +1,6 @@
+import hashlib
 import logging
+import shutil
 import pandas as pd
 import canvigator_quiz as cq
 from canvigator_utils import today_str
@@ -122,3 +124,133 @@ class CanvigatorCourse:
         merged_acts_csv = data_path / f"course_activity_{today_str()}.csv"
         merged_acts.to_csv(merged_acts_csv, index=False)
         logger.info(f"Saved student activity to {merged_acts_csv}")
+
+
+def _make_anon_id(student_id):
+    """Hash a student ID to a numeric identifier with at most 10 digits."""
+    hash_hex = hashlib.sha256(str(student_id).encode()).hexdigest()
+    return int(hash_hex, 16) % 10_000_000_000
+
+
+def _collectStudentIds(csv_files):
+    """Scan CSV files and collect unique student IDs with associated name and sis_id."""
+    id_to_info = {}
+    for csv_file in csv_files:
+        df = pd.read_csv(csv_file)
+        cols = set(df.columns)
+
+        # Standard files with name + id columns (student data)
+        if 'name' in cols and 'id' in cols:
+            for _, row in df.iterrows():
+                sid = row['id']
+                if pd.notna(sid):
+                    sid = int(float(sid))
+                    if sid not in id_to_info:
+                        id_to_info[sid] = {'name': row['name'] if pd.notna(row['name']) else '', 'sis_id': ''}
+                    if 'sis_id' in cols and pd.notna(row.get('sis_id')):
+                        id_to_info[sid]['sis_id'] = row['sis_id']
+
+        # Pairing-style files with person1/id1, person2/id2, person3/id3
+        for suffix in ['1', '2', '3']:
+            id_col, name_col = f'id{suffix}', f'person{suffix}'
+            if id_col in cols and name_col in cols:
+                for _, row in df.iterrows():
+                    sid = row[id_col]
+                    if pd.notna(sid) and int(float(sid)) != -1:
+                        sid = int(float(sid))
+                        if sid not in id_to_info:
+                            id_to_info[sid] = {'name': row[name_col] if pd.notna(row[name_col]) else '', 'sis_id': ''}
+    return id_to_info
+
+
+def _anonymizeCsvFile(csv_file, anon_dir, id_to_anon):
+    """Create an anonymized copy of a single CSV file. Returns True if the file was modified."""
+    def map_student_id(x):
+        """Map a student ID to its anon_id, returning empty string for missing/invalid."""
+        if pd.isna(x):
+            return ''
+        x_int = int(float(x))
+        if x_int == -1:
+            return ''
+        return id_to_anon.get(x_int, '')
+
+    df = pd.read_csv(csv_file)
+    cols = set(df.columns)
+    modified = False
+
+    # Standard files: replace id with anon_id, drop name and sis_id
+    if 'name' in cols and 'id' in cols:
+        df['anon_id'] = df['id'].apply(map_student_id)
+        drop_cols = [c for c in ['name', 'id', 'sis_id'] if c in cols]
+        df = df.drop(columns=drop_cols)
+        remaining = [c for c in df.columns if c != 'anon_id']
+        df = df[['anon_id'] + remaining]
+        modified = True
+
+    # Pairing-style files: person1/id1 -> anon_id1, etc.
+    for suffix in ['1', '2', '3']:
+        id_col, name_col, anon_col = f'id{suffix}', f'person{suffix}', f'anon_id{suffix}'
+        if id_col in cols:
+            df[anon_col] = df[id_col].apply(map_student_id)
+            df = df.drop(columns=[id_col])
+            cols = set(df.columns)
+            modified = True
+        if name_col in cols:
+            df = df.drop(columns=[name_col])
+            cols = set(df.columns)
+            modified = True
+
+    df.to_csv(anon_dir / csv_file.name, index=False)
+    return modified
+
+
+def exportAnonymizedData(data_path):
+    """Export anonymized copies of all course data CSV files.
+
+    Creates an anonymized/ subdirectory with all CSVs stripped of identifying
+    columns (name, id, sis_id), replaced by a hashed anon_id. A mapping file
+    is saved in the original data directory. The anonymized directory is also
+    zipped for easy export.
+    """
+    from pathlib import Path
+    data_path = Path(data_path)
+
+    csv_files = sorted(f for f in data_path.glob("*.csv") if not f.name.startswith("anon_mapping_"))
+    if not csv_files:
+        print(f"No CSV files found in {data_path}")
+        return
+
+    anon_dir = data_path / "anonymized"
+    anon_dir.mkdir(exist_ok=True)
+
+    # Collect all unique student IDs from all CSV files
+    id_to_info = _collectStudentIds(csv_files)
+    if not id_to_info:
+        print("No student data found in CSV files.")
+        shutil.rmtree(anon_dir)
+        return
+
+    # Generate privacy-safe anon_ids (SHA-256 hash truncated to max 10 digits)
+    id_to_anon = {sid: _make_anon_id(sid) for sid in id_to_info}
+
+    # Save mapping file in original data directory
+    mapping_rows = []
+    for sid in sorted(id_to_info, key=lambda s: str(id_to_info[s]['name'])):
+        mapping_rows.append({'name': id_to_info[sid]['name'], 'id': sid, 'sis_id': id_to_info[sid]['sis_id'], 'anon_id': id_to_anon[sid]})
+    mapping_df = pd.DataFrame(mapping_rows, columns=['name', 'id', 'sis_id', 'anon_id'])
+    mapping_file = data_path / f"anon_mapping_{today_str()}.csv"
+    mapping_df.to_csv(mapping_file, index=False)
+    print(f"Saved mapping: {mapping_file.name}")
+    logger.info(f"Saved anonymization mapping to {mapping_file}")
+
+    # Create anonymized copies of each CSV
+    n_anonymized = sum(1 for f in csv_files if _anonymizeCsvFile(f, anon_dir, id_to_anon))
+
+    # Zip the anonymized directory
+    zip_path = data_path / f"anonymized_{today_str()}"
+    shutil.make_archive(str(zip_path), 'zip', data_path, 'anonymized')
+    print(f"Created: {zip_path.name}.zip")
+
+    n_total = len(csv_files)
+    print(f"Exported {n_total} file{'s' if n_total != 1 else ''} ({n_anonymized} anonymized) to {anon_dir.name}/")
+    logger.info(f"Exported {n_total} anonymized files to {zip_path}.zip")
