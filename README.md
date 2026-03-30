@@ -1,7 +1,7 @@
 
 
 ![Canvigator](images/canvigator2.png) 
-## Canvigator: Helping educators enhance their teaching by applying tried-and-true pedagogical techniques via the Canvas LMS
+## Helping educators enhance and experiment with their pedagogy via the Canvas LMS
 
 ### Overview 
 
