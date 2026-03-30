@@ -38,7 +38,7 @@ in just one place on your local system, or separately for each course that it wi
    ```
    You will be prompted to enter:
    - Your institution's Canvas LMS base URL (you can find this on your Canvas home page).
-   - Your Canvas token, which can be created by navigating to _'Account'_, then _'Settings'_. Towards the bottom of this window in Canvas you will see a blue button, _'+ New Access Token_'. Click on this button to copy/download the token to your local system. DO NOT TO SHARE YOUR CANVAS TOKEN w/ ANYONE (e.g. do not save it a shared directory). 
+   - Your Canvas token, which can be created by navigating to _'Account'_, then _'Settings'_. Towards the bottom of this window in Canvas you will see a blue button, _'+ New Access Token_'. Click on this button to copy/download the token to your local system. DO NOT TO SHARE YOUR CANVAS TOKEN w/ ANYONE (e.g. do not save it in a shared directory).
  
 This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 
