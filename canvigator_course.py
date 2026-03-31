@@ -185,6 +185,15 @@ def _make_anon_id(student_id):
     return int(hash_hex, 16) % 10_000_000_000
 
 
+def _addStudentId(id_to_info, sid, name):
+    """Add a student ID and name to the id_to_info dict if not already present."""
+    if pd.notna(sid):
+        sid = int(float(sid))
+        if sid not in id_to_info:
+            id_to_info[sid] = {'name': name if pd.notna(name) else '', 'sis_id': ''}
+    return sid
+
+
 def _collectStudentIds(csv_files):
     """Scan CSV files and collect unique student IDs with associated name and sis_id."""
     id_to_info = {}
@@ -195,24 +204,22 @@ def _collectStudentIds(csv_files):
         # Standard files with name + id columns (student data)
         if 'name' in cols and 'id' in cols:
             for _, row in df.iterrows():
-                sid = row['id']
-                if pd.notna(sid):
-                    sid = int(float(sid))
-                    if sid not in id_to_info:
-                        id_to_info[sid] = {'name': row['name'] if pd.notna(row['name']) else '', 'sis_id': ''}
-                    if 'sis_id' in cols and pd.notna(row.get('sis_id')):
-                        id_to_info[sid]['sis_id'] = row['sis_id']
+                sid = _addStudentId(id_to_info, row['id'], row['name'])
+                if 'sis_id' in cols and pd.notna(row.get('sis_id')) and sid in id_to_info:
+                    id_to_info[sid]['sis_id'] = row['sis_id']
+
+        # Gradebook files with name + user_id columns
+        if 'name' in cols and 'user_id' in cols:
+            for _, row in df.iterrows():
+                _addStudentId(id_to_info, row['user_id'], row['name'])
 
         # Pairing-style files with person1/id1, person2/id2, person3/id3
         for suffix in ['1', '2', '3']:
             id_col, name_col = f'id{suffix}', f'person{suffix}'
             if id_col in cols and name_col in cols:
                 for _, row in df.iterrows():
-                    sid = row[id_col]
-                    if pd.notna(sid) and int(float(sid)) != -1:
-                        sid = int(float(sid))
-                        if sid not in id_to_info:
-                            id_to_info[sid] = {'name': row[name_col] if pd.notna(row[name_col]) else '', 'sis_id': ''}
+                    if pd.notna(row[id_col]) and int(float(row[id_col])) != -1:
+                        _addStudentId(id_to_info, row[id_col], row[name_col])
     return id_to_info
 
 
@@ -235,6 +242,15 @@ def _anonymizeCsvFile(csv_file, anon_dir, id_to_anon):
     if 'name' in cols and 'id' in cols:
         df['anon_id'] = df['id'].apply(map_student_id)
         drop_cols = [c for c in ['name', 'id', 'sis_id'] if c in cols]
+        df = df.drop(columns=drop_cols)
+        remaining = [c for c in df.columns if c != 'anon_id']
+        df = df[['anon_id'] + remaining]
+        modified = True
+
+    # Gradebook files: replace user_id with anon_id, drop name and sortable_name
+    if 'name' in cols and 'user_id' in cols:
+        df['anon_id'] = df['user_id'].apply(map_student_id)
+        drop_cols = [c for c in ['name', 'sortable_name', 'user_id'] if c in cols]
         df = df.drop(columns=drop_cols)
         remaining = [c for c in df.columns if c != 'anon_id']
         df = df[['anon_id'] + remaining]
