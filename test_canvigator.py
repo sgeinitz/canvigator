@@ -189,6 +189,24 @@ class TestCollectStudentIds:
         result = _collectStudentIds([f1, f2])
         assert len(result) == 1
 
+    def test_gradebook_csv(self, tmp_path):
+        """Collects IDs from gradebook-style name/user_id columns."""
+        from canvigator_course import _collectStudentIds
+        csv_file = tmp_path / "gradebook.csv"
+        df = pd.DataFrame({
+            'name': ['Alice', 'Bob'],
+            'sortable_name': ['Smith, Alice', 'Jones, Bob'],
+            'user_id': [100, 200],
+            'assignment_name': ['Quiz 1', 'Quiz 1'],
+            'score': [95, 87],
+        })
+        df.to_csv(csv_file, index=False)
+
+        result = _collectStudentIds([csv_file])
+        assert 100 in result
+        assert 200 in result
+        assert result[100]['name'] == 'Alice'
+
 
 class TestAnonymizeCsvFile:
     """Tests for _anonymizeCsvFile anonymization logic."""
@@ -237,6 +255,37 @@ class TestAnonymizeCsvFile:
         assert 'id1' not in result.columns
         assert 'anon_id1' in result.columns
         assert 'anon_id2' in result.columns
+
+    def test_gradebook_file(self, tmp_path):
+        """Gradebook CSV: name/sortable_name/user_id replaced with anon_id."""
+        from canvigator_course import _anonymizeCsvFile
+        csv_file = tmp_path / "gradebook_20240101.csv"
+        anon_dir = tmp_path / "anon"
+        anon_dir.mkdir()
+
+        df = pd.DataFrame({
+            'name': ['Alice', 'Bob'],
+            'sortable_name': ['Smith, Alice', 'Jones, Bob'],
+            'user_id': [100, 200],
+            'assignment_name': ['Quiz 1', 'Quiz 1'],
+            'assignment_id': [10, 10],
+            'points_possible': [100, 100],
+            'grade': ['95', '87'],
+            'score': [95, 87],
+        })
+        df.to_csv(csv_file, index=False)
+
+        id_to_anon = {100: 1111111111, 200: 2222222222}
+        modified = _anonymizeCsvFile(csv_file, anon_dir, id_to_anon)
+
+        assert modified is True
+        result = pd.read_csv(anon_dir / "gradebook_20240101.csv")
+        assert 'name' not in result.columns
+        assert 'sortable_name' not in result.columns
+        assert 'user_id' not in result.columns
+        assert 'anon_id' in result.columns
+        assert list(result['anon_id']) == [1111111111, 2222222222]
+        assert list(result['score']) == [95, 87]
 
     def test_unrelated_file_not_modified(self, tmp_path):
         """CSV without name/id or pairing columns passes through unmodified."""
