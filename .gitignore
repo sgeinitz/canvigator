@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 .vscode/launch.json
 GEMINI.md
-CLAUDE.md
 
 visualize_events.ipynb
 check4_3subs_cs3120.ipynb
