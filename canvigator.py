@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import sys
 
-tasks = ['award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', ' \n  ', 
-         'create-pairs', 'create-quiz', 'export-anon-data', ' \n  ', 
+tasks = ['award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', ' \n  ',
+         'create-pairs', 'create-quiz', 'export-anon-data', ' \n  ',
          'get-activity', 'get-all-subs', 'get-gradebook', 'get-quiz-questions', ' \n  ',
          'send-quiz-reminder']
 
