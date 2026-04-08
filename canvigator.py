@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import sys
 
-tasks = ['activity', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', 'pair', 'all-subs',
-         'get-quiz-questions', 'create-quiz', 'export-anon-data', 'export-gradebook', 'quiz-reminder']
+tasks = ['award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', ' \n  ', 
+         'create-pairs', 'create-quiz', 'export-anon-data', ' \n  ', 
+         'get-activity', 'get-all-subs', 'get-gradebook', 'get-quiz-questions', ' \n  ',
+         'send-quiz-reminder']
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -108,10 +110,10 @@ print(f"\nSelected course: {course_choice.name}")
 
 course = cc.CanvigatorCourse(canvas, course_choice, canv_config, verbose=False)
 
-if task == 'activity':
+if task == 'get-activity':
     course.saveStudentActivity(canv_config.data_path)
 
-elif task == 'all-subs':
+elif task == 'get-all-subs':
     course.getAllQuizzesAndSubmissions()
 
 elif task == 'get-quiz-questions':
@@ -123,16 +125,16 @@ elif task == 'get-quiz-questions':
 elif task == 'create-quiz':
     course.createQuiz()
 
-elif task == 'export-gradebook':
+elif task == 'get-gradebook':
     course.exportGradebook(canv_config.data_path)
 
-elif task == 'quiz-reminder':
+elif task == 'send-quiz-reminder':
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
     quiz.sendQuizReminders(dry_run=dry_run)
 
-elif task in ['pair', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
+elif task in ['create-pairs', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
     # Prompt user to select a quiz
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
@@ -140,7 +142,7 @@ elif task in ['pair', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-re
     # Obtain quiz data for the selected task.
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
 
-    if task == 'pair':
+    if task == 'create-pairs':
         # Open the CSV file with student data for who is present today and recalculate distance matrix.
         quiz.openPresentCSV()
         quiz.generateDistanceMatrix(only_present=True)

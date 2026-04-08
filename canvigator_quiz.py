@@ -544,7 +544,7 @@ class CanvigatorQuiz:
         return groups
 
     def _selectSubmissionDate(self):
-        """Prompt user to select a date with all-subs data, or reuse a previously selected date."""
+        """Prompt user to select a date with get-all-subs data, or reuse a previously selected date."""
         if hasattr(self, '_selected_submission_date') and self._selected_submission_date:
             print(f"\nReusing previously selected date: {self._selected_submission_date}")
             return self._selected_submission_date
@@ -563,7 +563,7 @@ class CanvigatorQuiz:
         if not available_dates:
             raise FileNotFoundError(
                 f"No all_submissions CSV found for quiz '{self.quiz_name}'. "
-                "Run the 'all-subs' task first to generate these files."
+                "Run the 'get-all-subs' task first to generate these files."
             )
 
         print("\nAvailable dates with submission data:")
@@ -588,7 +588,7 @@ class CanvigatorQuiz:
         if not events_csv.exists() or not subs_by_q_csv.exists():
             raise FileNotFoundError(
                 f"No matching all_subs_and_events / subs_by_question CSV pair found for date {selected_date}. "
-                "Run the 'all-subs' task first to generate these files."
+                "Run the 'get-all-subs' task first to generate these files."
             )
 
         print(f"\nUsing files from {selected_date}")
@@ -623,7 +623,7 @@ class CanvigatorQuiz:
 
         if not subs_csv.exists():
             raise FileNotFoundError(
-                f"Submissions file not found: {subs_csv}. Run the 'all-subs' task first."
+                f"Submissions file not found: {subs_csv}. Run the 'get-all-subs' task first."
             )
 
         return pd.read_csv(subs_csv)
