@@ -237,8 +237,10 @@ class CanvigatorQuiz:
             axis[i].set_title('question: ' + q.split('_')[0])
         axis[0].set_ylabel('# of people')
         plt.tight_layout()  # Or try plt.subplots_adjust(left=0.05, right=0.98, bottom=0.15, top=0.9)
-        figure.savefig(self.figurePath("histograms"), dpi=200)
+        fig_path = self.figurePath("histograms")
+        figure.savefig(fig_path, dpi=200)
         plt.close('all')
+        print(f"  Saved: {fig_path.name}")
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
         """Calculate vector distance between all possible student pairs."""
@@ -282,8 +284,10 @@ class CanvigatorQuiz:
         )
         plt.tight_layout()
         plt.rc('font', size=9)
-        plt.savefig(self.figurePath(f"dist_{distance_type}"), dpi=200)
+        fig_path = self.figurePath(f"dist_{distance_type}")
+        plt.savefig(fig_path, dpi=200)
         plt.close()
+        print(f"Saved distance matrix heatmap to {fig_path.name}")
 
     def openPresentCSV(self, csv_path=None):
         """Prompt user for a local CSV file and return a pandas dataframe."""
@@ -413,8 +417,10 @@ class CanvigatorQuiz:
         axes[3].set_ylim(0, 9)
         axes[0].set_ylabel('# of Student Pairs')
         plt.tight_layout()
-        plt.savefig(self.figurePath("compare_pairing_methods"), dpi=200)
+        fig_path = self.figurePath("compare_pairing_methods")
+        plt.savefig(fig_path, dpi=200)
         plt.close()
+        print(f"Saved pairing method comparison to {fig_path.name}")
 
     def writePairingsCSV(self, method, pairs):
         """Create an output csv file in data/ with the given student pairings."""
@@ -463,6 +469,7 @@ class CanvigatorQuiz:
                                  'person3': name3, 'id3': person3, 'distance': [x[-1] for x in pairs]})
         pairs_csv = self.config.data_path / f"pairings_based_on_{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}.csv"
         df_pairs.to_csv(pairs_csv, index=False)
+        print(f"Saved pairings to {pairs_csv.name}")
 
     def _findMatchingPairs(self, student_ids, student_scores, student_timestamps, n_questions,
                            score_threshold, time_threshold_secs, time_overlap_threshold):
@@ -874,6 +881,10 @@ class CanvigatorQuiz:
 
         all_sub_and_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_and_events_{today_str()}.csv"
         all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)
+
+        print(f"  Saved: {all_submissions_csv.name}")
+        print(f"  Saved: {all_subs_by_question_csv.name}")
+        print(f"  Saved: {all_sub_and_events_csv.name}")
 
     def _populateTimestamps(self, quiz_summary, row_index, sub):
         """Fill in start/finish/minutes for a student row using first-attempt times if available."""

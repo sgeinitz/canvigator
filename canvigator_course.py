@@ -180,6 +180,7 @@ class CanvigatorCourse:
         merged_acts = merged_acts[['name', 'id', 'page_views', 'missing', 'late', 'total_activity_mins', 'last_activity_at']]
         merged_acts_csv = data_path / f"course_activity_{today_str()}.csv"
         merged_acts.to_csv(merged_acts_csv, index=False)
+        print(f"Saved student activity to {merged_acts_csv.name}")
         logger.info(f"Saved student activity to {merged_acts_csv}")
 
 
