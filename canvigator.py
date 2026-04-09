@@ -1,10 +1,33 @@
 #!/usr/bin/env python3
 import sys
 
-tasks = ['award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only', ' \n  ',
-         'create-pairs', 'create-quiz', 'export-anon-data', ' \n  ',
-         'get-activity', 'get-all-subs', 'get-gradebook', 'get-quiz-questions', ' \n  ',
-         'send-quiz-reminder']
+task_descriptions = {
+    'award-bonus': 'Award partner + retake bonus points for a quiz',
+    'award-bonus-partner-only': 'Award only the partner bonus points',
+    'award-bonus-retake-only': 'Award only the retake bonus points',
+    'create-pairs': 'Create student pairings from quiz scores',
+    'create-quiz': 'Create an unpublished placeholder quiz on Canvas',
+    'export-anon-data': 'Export anonymized course data (no Canvas API needed)',
+    'get-activity': 'Export student activity data',
+    'get-all-subs': 'Export all quiz submissions and events',
+    'get-gradebook': 'Export course gradebook',
+    'get-quiz-questions': 'Export quiz question content',
+    'send-quiz-reminder': 'Send quiz reminder messages to students',
+}
+tasks = list(task_descriptions.keys())
+
+
+def print_help():
+    """Print usage information with task descriptions."""
+    print("Usage: canvigator.py [--dry-run] [--crn <CRN>] <task>\n")
+    print("Options:")
+    print("  --dry-run      Preview changes without modifying Canvas (bonus and reminder tasks)")
+    print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)\n")
+    print("Tasks:")
+    max_name = max(len(t) for t in tasks)
+    for name, desc in task_descriptions.items():
+        print(f"  {name:<{max_name}}  {desc}")
+
 
 args = sys.argv[1:]
 dry_run = '--dry-run' in args
@@ -25,19 +48,17 @@ if '--crn' in args:
     args.pop(crn_idx)  # remove the CRN value
 
 if len(args) < 1:
-    print(f"Usage: canvigator.py [--dry-run] [--crn <CRN>] {' | '.join(tasks)}")
+    print_help()
     sys.exit(1)
 
 task = args[0]
 
 if task in ("help", "--help"):
-    print(f"Usage: canvigator.py [--dry-run] [--crn <CRN>] {' | '.join(tasks)}")
-    print("  --dry-run      Preview changes without modifying Canvas (bonus and reminder tasks)")
-    print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
+    print_help()
     sys.exit(0)
 
 if task not in tasks:
-    print(f"Invalid task: '{task}'. Valid tasks: {', '.join(tasks)}")
+    print(f"Invalid task: '{task}'. Run with --help to see available tasks.")
     sys.exit(1)
 
 # export-anon-data works with local files only — no Canvas API needed
