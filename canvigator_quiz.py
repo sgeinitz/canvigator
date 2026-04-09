@@ -472,8 +472,13 @@ class CanvigatorQuiz:
                     print(f"p1, p3, dist = {(pair[0], pair[2], self.dist_matrix.loc[pair[0], pair[2]])}")
                     print(f"p2, p3, dist = {(pair[1], pair[2], self.dist_matrix.loc[pair[1], pair[2]])}")
 
-        df_pairs = pd.DataFrame({'person1': name1, 'id1': person1, 'person2': name2, 'id2': person2,
-                                 'person3': name3, 'id3': person3, 'distance': [x[-1] for x in pairs]})
+        data = {'person1': name1, 'id1': person1, 'person2': name2, 'id2': person2}
+        has_triples = any(v is not None for v in name3)
+        if has_triples:
+            data['person3'] = name3
+            data['id3'] = person3
+        data['distance'] = [x[-1] for x in pairs]
+        df_pairs = pd.DataFrame(data)
         pairs_csv = self.config.data_path / f"pairings_based_on_{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}.csv"
         df_pairs.to_csv(pairs_csv, index=False)
         print(f"Saved pairings to {pairs_csv.name}")
