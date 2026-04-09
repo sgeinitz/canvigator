@@ -129,14 +129,14 @@ required format (columns: `name`, `id`, `present` where 1 = present).
 |---|---|
 | **Input** | `data/<course>/present_*.csv` (user-created, selected via prompt) |
 | **Output — data** | `data/<course>/<quiz>_<id>_student_analysis_YYYYMMDD.csv` — raw quiz report downloaded from Canvas |
-| | `data/<course>/<quiz>_<id>_pairing_via_med_YYYYMMDD.csv` — student pairings (median method) |
+| | `data/<course>/pairings_based_on_<quiz>_<id>_YYYYMMDD.csv` — student pairings |
 | **Output — figures** | `figures/<course>/<quiz>_<id>_dist_euclid_YYYYMMDD.png` — distance matrix heatmap (present students) |
 | | `figures/<course>/<quiz>_<id>_compare_pairing_methods_YYYYMMDD.png` — comparison of all four pairing methods |
 
 **Typical workflow:**
 1. Mark which students are present in your `present_*.csv` file.
 2. Run `python canvigator.py pair` and select the course, quiz, and presence CSV when prompted.
-3. Open the generated `*_pairing_via_med_*.csv` and share pairings with the class.
+3. Open the generated `pairings_based_on_*.csv` and share pairings with the class.
 
 ---
 

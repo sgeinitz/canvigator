@@ -461,7 +461,7 @@ class CanvigatorQuiz:
 
         df_pairs = pd.DataFrame({'person1': name1, 'id1': person1, 'person2': name2, 'id2': person2,
                                  'person3': name3, 'id3': person3, 'distance': [x[-1] for x in pairs]})
-        pairs_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_pairing_via_{method}_{today_str()}.csv"
+        pairs_csv = self.config.data_path / f"pairings_based_on_{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}.csv"
         df_pairs.to_csv(pairs_csv, index=False)
 
     def _findMatchingPairs(self, student_ids, student_scores, student_timestamps, n_questions,
