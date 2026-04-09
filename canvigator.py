@@ -114,7 +114,8 @@ logger = logging.getLogger(__name__)
 API_URL = os.environ.get("CANVAS_URL")
 API_KEY = os.environ.get("CANVAS_TOKEN")
 if not API_URL or not API_KEY:
-    raise Exception("'CANVAS_' environment variables not set - see installation instructions to resolve this")
+    print("Error: CANVAS_URL and CANVAS_TOKEN must be set. Run 'source set_env.sh' first.")
+    sys.exit(1)
 
 canv_config = cu.CanvigatorConfig()
 
