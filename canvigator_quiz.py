@@ -57,13 +57,18 @@ class CanvigatorQuiz:
             print("type(quiz_report_request) = ", type(quiz_report_request))
             print("quiz_report_request.__dict__ = ", quiz_report_request.__dict__)
 
+        spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        frame = 0
         quiz_report_progress = self.canvas.get_progress(request_id)
         while quiz_report_progress.workflow_state != 'completed':
-            self.progressBar(quiz_report_progress.completion, 100)
+            pct = int(quiz_report_progress.completion)
+            sys.stdout.write(f"\r{spinner_frames[frame]} Downloading {self.quiz_name} report... {pct}%  ")
+            sys.stdout.flush()
+            frame = (frame + 1) % len(spinner_frames)
             time.sleep(0.1)
             quiz_report_progress = self.canvas.get_progress(request_id)
-        self.progressBar(quiz_report_progress.completion, 100)
-        print(f"\n{self.quiz_name} download complete")
+        sys.stdout.write(f"\r✓ {self.quiz_name} download complete                \n")
+        sys.stdout.flush()
         logger.info(f"Quiz report downloaded: {self.quiz_name}")
 
         quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
@@ -222,15 +227,6 @@ class CanvigatorQuiz:
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""
         return self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{figure_name}_{today_str()}.png"
-
-    def progressBar(self, current, total, bar_length=20):
-        """Displays or updates a console progress bar."""
-        progress = current / total
-        arrow = '=' * int(progress * bar_length - 1) + '>' if current < total else '=' * bar_length
-        spaces = ' ' * (bar_length - len(arrow))
-        percent = int(progress * 100)
-        sys.stdout.write(f"\r[{arrow}{spaces}] {percent}%")
-        sys.stdout.flush()
 
     def generateQuestionHistograms(self):
         """Draw a histogram of scores of each question."""
