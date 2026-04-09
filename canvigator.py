@@ -96,7 +96,7 @@ if task == 'export-anon-data':
 
     print(f"\nSelected: {course_data_path.name}")
     cc.exportAnonymizedData(course_data_path)
-    print("\n** Done ***\n")
+    print("\n*** Done ***\n")
     sys.exit(0)
 
 import os
@@ -191,4 +191,4 @@ elif task in ['create-pairs', 'award-bonus', 'award-bonus-partner-only', 'award-
         quiz.detectRetakers()
         quiz.awardBonusPoints(dry_run=dry_run)
 
-print("\n** Done ***\n")
+print("\n*** Done ***\n")
