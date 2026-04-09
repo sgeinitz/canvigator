@@ -208,8 +208,15 @@ class CanvigatorQuiz:
                 )
                 print(f"  Sent to: {student_name} (id: {student_id}, {reason})")
 
+        n_no_attempt = sum(1 for _, _, _, r in messages if r == "no attempt")
+        n_imperfect = len(messages) - n_no_attempt
         action = "would be sent" if dry_run else "sent"
-        print(f"\n{len(messages)} reminder(s) {action}.")
+        summary_parts = []
+        if n_no_attempt:
+            summary_parts.append(f"{n_no_attempt} no-attempt")
+        if n_imperfect:
+            summary_parts.append(f"{n_imperfect} imperfect-score")
+        print(f"\n{len(messages)} reminder(s) {action} ({', '.join(summary_parts)}).")
         logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
 
     def figurePath(self, figure_name):
