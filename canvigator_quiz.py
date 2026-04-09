@@ -57,19 +57,14 @@ class CanvigatorQuiz:
             print("type(quiz_report_request) = ", type(quiz_report_request))
             print("quiz_report_request.__dict__ = ", quiz_report_request.__dict__)
 
-        spinner_frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         frame = 0
         quiz_report_progress = self.canvas.get_progress(request_id)
         while quiz_report_progress.workflow_state != 'completed':
             pct = int(quiz_report_progress.completion)
-            sys.stdout.write(f"\r{spinner_frames[frame]} Downloading {self.quiz_name} report... {pct}%  ")
-            sys.stdout.flush()
-            frame = (frame + 1) % len(spinner_frames)
+            self._spin(frame, f"Downloading {self.quiz_name} report... {pct}%")
+            frame += 1
             time.sleep(0.1)
             quiz_report_progress = self.canvas.get_progress(request_id)
-        sys.stdout.write(f"\r✓ {self.quiz_name} download complete                \n")
-        sys.stdout.flush()
-        logger.info(f"Quiz report downloaded: {self.quiz_name}")
 
         quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
         quiz_csv_url = quiz_report.file['url']
@@ -80,6 +75,9 @@ class CanvigatorQuiz:
             for content in quiz_csv.iter_content(chunk_size=2**20):
                 if content:
                     f.write(content)
+
+        self._spin_done(f"Saved: {csv_name.name}")
+        logger.info(f"Quiz report downloaded: {self.quiz_name}")
 
         self.quiz_df = pd.read_csv(csv_name)
 
@@ -224,6 +222,20 @@ class CanvigatorQuiz:
         print(f"\n{len(messages)} reminder(s) {action} ({', '.join(summary_parts)}).")
         logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
 
+    SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def _spin(self, frame, message, indent=2):
+        """Write a single spinner frame with a message to stdout, overwriting the current line."""
+        pad = ' ' * indent
+        sys.stdout.write(f"\r{pad}{self.SPINNER_FRAMES[frame % len(self.SPINNER_FRAMES)]} {message}  ")
+        sys.stdout.flush()
+
+    def _spin_done(self, message, indent=2):
+        """Clear the spinner line and write a completion message."""
+        pad = ' ' * indent
+        sys.stdout.write(f"\r{pad}✓ {message}                              \n")
+        sys.stdout.flush()
+
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""
         return self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{figure_name}_{today_str()}.png"
@@ -243,7 +255,7 @@ class CanvigatorQuiz:
         fig_path = self.figurePath("histograms")
         figure.savefig(fig_path, dpi=200)
         plt.close('all')
-        print(f"  Saved: {fig_path.name}")
+        print(f"  ✓ Saved: {fig_path.name}")
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
         """Calculate vector distance between all possible student pairs."""
@@ -807,10 +819,12 @@ class CanvigatorQuiz:
         subs_by_question_data = []
         subs_and_events_data = []
 
+        n_total = self.n_students or 0
         subs = self.canvas_quiz.get_submissions(include=['submission_history'])
         for i, sub in enumerate(subs):
+            self._spin(i, f"Fetching submissions... student {i + 1}/{n_total}")
             if self.verbose:
-                print(f"Processing submission for student id {sub.user_id}")
+                print(f"\nProcessing submission for student id {sub.user_id}")
             student_subs = self.canvas_course.canvas_course.get_multiple_submissions(
                 student_ids=[sub.user_id],
                 assignment_ids=[self.canvas_quiz.assignment_id],
@@ -883,16 +897,15 @@ class CanvigatorQuiz:
 
         all_submissions_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_submissions_{today_str()}.csv"
         all_submissions.to_csv(all_submissions_csv, index=False)
+        self._spin_done(f"Saved: {all_submissions_csv.name}")
 
         all_subs_by_question_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_by_question_{today_str()}.csv"
         all_subs_by_question.to_csv(all_subs_by_question_csv, index=False)
+        print(f"  ✓ Saved: {all_subs_by_question_csv.name}")
 
         all_sub_and_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_and_events_{today_str()}.csv"
         all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)
-
-        print(f"  Saved: {all_submissions_csv.name}")
-        print(f"  Saved: {all_subs_by_question_csv.name}")
-        print(f"  Saved: {all_sub_and_events_csv.name}")
+        print(f"  ✓ Saved: {all_sub_and_events_csv.name}")
 
     def _populateTimestamps(self, quiz_summary, row_index, sub):
         """Fill in start/finish/minutes for a student row using first-attempt times if available."""
