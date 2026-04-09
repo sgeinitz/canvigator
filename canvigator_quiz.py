@@ -57,14 +57,14 @@ class CanvigatorQuiz:
             print("type(quiz_report_request) = ", type(quiz_report_request))
             print("quiz_report_request.__dict__ = ", quiz_report_request.__dict__)
 
+        frame = 0
         quiz_report_progress = self.canvas.get_progress(request_id)
         while quiz_report_progress.workflow_state != 'completed':
-            self.progressBar(quiz_report_progress.completion, 100)
+            pct = int(quiz_report_progress.completion)
+            self._spin(frame, f"Downloading {self.quiz_name} report... {pct}%")
+            frame += 1
             time.sleep(0.1)
             quiz_report_progress = self.canvas.get_progress(request_id)
-        self.progressBar(quiz_report_progress.completion, 100)
-        print(f"\n{self.quiz_name} download complete")
-        logger.info(f"Quiz report downloaded: {self.quiz_name}")
 
         quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
         quiz_csv_url = quiz_report.file['url']
@@ -75,6 +75,9 @@ class CanvigatorQuiz:
             for content in quiz_csv.iter_content(chunk_size=2**20):
                 if content:
                     f.write(content)
+
+        self._spin_done(f"Saved: {csv_name.name}")
+        logger.info(f"Quiz report downloaded: {self.quiz_name}")
 
         self.quiz_df = pd.read_csv(csv_name)
 
@@ -208,22 +211,34 @@ class CanvigatorQuiz:
                 )
                 print(f"  Sent to: {student_name} (id: {student_id}, {reason})")
 
+        n_no_attempt = sum(1 for _, _, _, r in messages if r == "no attempt")
+        n_imperfect = len(messages) - n_no_attempt
         action = "would be sent" if dry_run else "sent"
-        print(f"\n{len(messages)} reminder(s) {action}.")
+        summary_parts = []
+        if n_no_attempt:
+            summary_parts.append(f"{n_no_attempt} no-attempt")
+        if n_imperfect:
+            summary_parts.append(f"{n_imperfect} imperfect-score")
+        print(f"\n{len(messages)} reminder(s) {action} ({', '.join(summary_parts)}).")
         logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
+
+    SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def _spin(self, frame, message, indent=2):
+        """Write a single spinner frame with a message to stdout, overwriting the current line."""
+        pad = ' ' * indent
+        sys.stdout.write(f"\r{pad}{self.SPINNER_FRAMES[frame % len(self.SPINNER_FRAMES)]} {message}  ")
+        sys.stdout.flush()
+
+    def _spin_done(self, message, indent=2):
+        """Clear the spinner line and write a completion message."""
+        pad = ' ' * indent
+        sys.stdout.write(f"\r{pad}✓ {message}                              \n")
+        sys.stdout.flush()
 
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""
         return self.config.figures_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{figure_name}_{today_str()}.png"
-
-    def progressBar(self, current, total, bar_length=20):
-        """Displays or updates a console progress bar."""
-        progress = current / total
-        arrow = '=' * int(progress * bar_length - 1) + '>' if current < total else '=' * bar_length
-        spaces = ' ' * (bar_length - len(arrow))
-        percent = int(progress * 100)
-        sys.stdout.write(f"\r[{arrow}{spaces}] {percent}%")
-        sys.stdout.flush()
 
     def generateQuestionHistograms(self):
         """Draw a histogram of scores of each question."""
@@ -237,8 +252,10 @@ class CanvigatorQuiz:
             axis[i].set_title('question: ' + q.split('_')[0])
         axis[0].set_ylabel('# of people')
         plt.tight_layout()  # Or try plt.subplots_adjust(left=0.05, right=0.98, bottom=0.15, top=0.9)
-        figure.savefig(self.figurePath("histograms"), dpi=200)
+        fig_path = self.figurePath("histograms")
+        figure.savefig(fig_path, dpi=200)
         plt.close('all')
+        print(f"  ✓ Saved: {fig_path.name}")
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
         """Calculate vector distance between all possible student pairs."""
@@ -282,8 +299,10 @@ class CanvigatorQuiz:
         )
         plt.tight_layout()
         plt.rc('font', size=9)
-        plt.savefig(self.figurePath(f"dist_{distance_type}"), dpi=200)
+        fig_path = self.figurePath(f"dist_{distance_type}")
+        plt.savefig(fig_path, dpi=200)
         plt.close()
+        print(f"Saved distance matrix heatmap to {fig_path.name}")
 
     def openPresentCSV(self, csv_path=None):
         """Prompt user for a local CSV file and return a pandas dataframe."""
@@ -413,8 +432,10 @@ class CanvigatorQuiz:
         axes[3].set_ylim(0, 9)
         axes[0].set_ylabel('# of Student Pairs')
         plt.tight_layout()
-        plt.savefig(self.figurePath("compare_pairing_methods"), dpi=200)
+        fig_path = self.figurePath("compare_pairing_methods")
+        plt.savefig(fig_path, dpi=200)
         plt.close()
+        print(f"Saved pairing method comparison to {fig_path.name}")
 
     def writePairingsCSV(self, method, pairs):
         """Create an output csv file in data/ with the given student pairings."""
@@ -459,10 +480,16 @@ class CanvigatorQuiz:
                     print(f"p1, p3, dist = {(pair[0], pair[2], self.dist_matrix.loc[pair[0], pair[2]])}")
                     print(f"p2, p3, dist = {(pair[1], pair[2], self.dist_matrix.loc[pair[1], pair[2]])}")
 
-        df_pairs = pd.DataFrame({'person1': name1, 'id1': person1, 'person2': name2, 'id2': person2,
-                                 'person3': name3, 'id3': person3, 'distance': [x[-1] for x in pairs]})
-        pairs_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_pairing_via_{method}_{today_str()}.csv"
+        data = {'person1': name1, 'id1': person1, 'person2': name2, 'id2': person2}
+        has_triples = any(v is not None for v in name3)
+        if has_triples:
+            data['person3'] = name3
+            data['id3'] = person3
+        data['distance'] = [x[-1] for x in pairs]
+        df_pairs = pd.DataFrame(data)
+        pairs_csv = self.config.data_path / f"pairings_based_on_{self.config.quiz_prefix}{self.canvas_quiz.id}_{today_str()}.csv"
         df_pairs.to_csv(pairs_csv, index=False)
+        print(f"Saved pairings to {pairs_csv.name}")
 
     def _findMatchingPairs(self, student_ids, student_scores, student_timestamps, n_questions,
                            score_threshold, time_threshold_secs, time_overlap_threshold):
@@ -792,10 +819,12 @@ class CanvigatorQuiz:
         subs_by_question_data = []
         subs_and_events_data = []
 
+        n_total = self.n_students or 0
         subs = self.canvas_quiz.get_submissions(include=['submission_history'])
         for i, sub in enumerate(subs):
+            self._spin(i, f"Fetching submissions... student {i + 1}/{n_total}")
             if self.verbose:
-                print(f"Processing submission for student id {sub.user_id}")
+                print(f"\nProcessing submission for student id {sub.user_id}")
             student_subs = self.canvas_course.canvas_course.get_multiple_submissions(
                 student_ids=[sub.user_id],
                 assignment_ids=[self.canvas_quiz.assignment_id],
@@ -868,12 +897,15 @@ class CanvigatorQuiz:
 
         all_submissions_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_submissions_{today_str()}.csv"
         all_submissions.to_csv(all_submissions_csv, index=False)
+        self._spin_done(f"Saved: {all_submissions_csv.name}")
 
         all_subs_by_question_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_by_question_{today_str()}.csv"
         all_subs_by_question.to_csv(all_subs_by_question_csv, index=False)
+        print(f"  ✓ Saved: {all_subs_by_question_csv.name}")
 
         all_sub_and_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_and_events_{today_str()}.csv"
         all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)
+        print(f"  ✓ Saved: {all_sub_and_events_csv.name}")
 
     def _populateTimestamps(self, quiz_summary, row_index, sub):
         """Fill in start/finish/minutes for a student row using first-attempt times if available."""

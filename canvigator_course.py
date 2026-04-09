@@ -42,15 +42,19 @@ class CanvigatorCourse:
 
     def getAllQuizzesAndSubmissions(self):
         """Get all quizzes and their submissions for the course."""
-        all_quizzes = self.canvas_course.get_quizzes()
+        all_quizzes = list(self.canvas_course.get_quizzes())
+        print(f"\nFound {len(all_quizzes)} quiz(zes).")
 
-        for i, q in enumerate(all_quizzes):
+        for i, q in enumerate(all_quizzes, start=1):
+            print(f"\n[{i}/{len(all_quizzes)}] Processing: {q.title}")
             # if q is a legit quiz, with at least one submission, then get submissions
             quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
             # check that the dataframe, quiz.quiz_df has at least 2 rows (header + at least one submission)
             if quiz.published and quiz.n_students is not None and quiz.n_students > 1:
                 quiz.generateQuestionHistograms()
                 quiz.getAllSubmissionsAndEvents()
+            else:
+                print("  Skipping (unpublished or insufficient submissions)")
 
     def createQuiz(self):
         """Create a new placeholder quiz with stub questions on Canvas."""
@@ -176,6 +180,7 @@ class CanvigatorCourse:
         merged_acts = merged_acts[['name', 'id', 'page_views', 'missing', 'late', 'total_activity_mins', 'last_activity_at']]
         merged_acts_csv = data_path / f"course_activity_{today_str()}.csv"
         merged_acts.to_csv(merged_acts_csv, index=False)
+        print(f"Saved student activity to {merged_acts_csv.name}")
         logger.info(f"Saved student activity to {merged_acts_csv}")
 
 
