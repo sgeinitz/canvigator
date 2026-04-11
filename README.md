@@ -216,8 +216,8 @@ with hashed anonymous IDs (SHA-256 mod 10^10) and removing identifying columns
 require Canvas API credentials. Course selection is done from existing `data/`
 subdirectories (by `--crn` or interactively).
 
-> **Note:** Anonymization alone does not make this data shareable. Do not 
-> publish/share data without participant consent, IRB approval, and FERPA compliance.
+> **Note:** Anonymization alone does not make data shareable. Do not publish/share
+> data without participant consent, IRB approval, and FERPA compliance.
 
 | | Files |
 |---|---|
