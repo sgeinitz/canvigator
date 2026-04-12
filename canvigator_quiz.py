@@ -244,6 +244,55 @@ class CanvigatorQuiz:
         print(f"Saved {len(rows)} questions to {csv_name}")
         logger.info(f"Quiz questions saved: {csv_name}")
 
+    def generateOpenEndedQuestions(self):
+        """Generate open-ended oral exam questions from the tagged questions CSV.
+
+        Requires that get-quiz-questions --tag has been run first. Reads the
+        tagged questions CSV, sends each question to the LLM, and writes the
+        results to a new CSV for instructor review.
+        """
+        # Reuse _loadQuestionInfo's file-finding logic but we need the full CSV rows
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        tagged_pattern = file_prefix + "questions_w_tags_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and tagged_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_questions_w_tags_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'python canvigator.py --crn <CRN> --tag get-quiz-questions' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using tagged questions from: {latest_file.name}")
+
+        df = pd.read_csv(latest_file)
+        if 'keywords' not in df.columns:
+            raise RuntimeError(
+                f"The file {latest_file.name} has no 'keywords' column. "
+                f"Re-run 'get-quiz-questions --tag' first."
+            )
+
+        rows = df.to_dict('records')
+
+        import canvigator_llm
+        results = canvigator_llm.generate_open_ended_questions(rows)
+
+        out_df = pd.DataFrame(results, columns=[
+            'question_id', 'position', 'question_name', 'keywords',
+            'question_mode', 'original_question_text', 'open_ended_question',
+        ])
+        csv_name = self.config.data_path / f"{file_prefix}open_ended_{today_str()}.csv"
+        out_df.to_csv(csv_name, index=False)
+        print(f"Saved {len(results)} open-ended questions to {csv_name}")
+        logger.info(f"Open-ended questions saved: {csv_name}")
+
     def _buildMissedBulletsForStudent(self, student_id, subs_by_q_df, question_info):
         """Return the missed-questions bullet section for one student, or None to skip."""
         if subs_by_q_df is None or subs_by_q_df.empty:

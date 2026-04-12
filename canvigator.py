@@ -8,6 +8,7 @@ task_descriptions = {
     'create-pairs': 'Create student pairings from quiz scores',
     'create-quiz': 'Create an unpublished placeholder quiz on Canvas',
     'export-anon-data': 'Export anonymized course data (no Canvas API needed)',
+    'generate-open-ended-questions': 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)',
     'get-activity': 'Export student activity data',
     'get-all-subs': 'Export all quiz submissions and events',
     'get-gradebook': 'Export course gradebook',
@@ -28,6 +29,11 @@ def print_help():
     max_name = max(len(t) for t in tasks)
     for name, desc in task_descriptions.items():
         print(f"  {name:<{max_name}}  {desc}")
+    print("\nNotes:")
+    print("  generate-open-ended-questions uses a local LLM (via Ollama) in two steps:")
+    print("    1. Classifies each question as 'explain' (oral) or 'draw' (visual)")
+    print("    2. Generates a mode-appropriate open-ended question for instructor review")
+    print("  Output CSV includes a question_mode column so the instructor can override choices.")
 
 
 args = sys.argv[1:]
@@ -148,6 +154,12 @@ elif task == 'get-quiz-questions':
     print(f"\nSelected quiz: {quiz_choice.title}")
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
     quiz.getQuizQuestions(tag=tag)
+
+elif task == 'generate-open-ended-questions':
+    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
+    print(f"\nSelected quiz: {quiz_choice.title}")
+    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
+    quiz.generateOpenEndedQuestions()
 
 elif task == 'create-quiz':
     course.createQuiz()

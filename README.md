@@ -86,7 +86,7 @@ The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 get-activity`.
 
-Available tasks: `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `get-activity`, `get-all-subs`, `get-gradebook`, `get-quiz-questions`, `send-quiz-reminder`
+Available tasks: `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-open-ended-questions`, `get-activity`, `get-all-subs`, `get-gradebook`, `get-quiz-questions`, `send-quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -225,6 +225,44 @@ subdirectories (by `--crn` or interactively).
 | **Output** | `data/<course>/anon_mapping_YYYYMMDD.csv` — mapping of original IDs to anonymous IDs |
 | | `data/<course>/anonymized/` — directory containing anonymized copies of all CSVs |
 | | `data/<course>/anonymized_YYYYMMDD.zip` — zip archive of the anonymized directory |
+
+---
+
+#### `generate-open-ended-questions` — Generate open-ended questions from a tagged quiz
+
+Reads the tagged questions CSV for a selected quiz and uses a local LLM (via
+Ollama) in two steps to generate one open-ended follow-up question per quiz
+question:
+
+1. **Classify** — For each question, the LLM decides whether an oral
+   explanation ("explain") or a hand-drawn diagram ("draw") would be the better
+   way to assess student understanding. Inherently visual topics (e.g. data
+   structures, memory layouts, process flows) are classified as "draw"; verbal
+   topics (e.g. trade-offs, algorithm logic, definitions) as "explain".
+2. **Generate** — Using the classification, the LLM generates a self-contained
+   open-ended question. "Explain" questions begin with "Explain..." and target
+   a ~1 minute oral response. "Draw" questions begin with "Draw a diagram..." or
+   "Draw a figure..." and target a ~2 minute hand-drawn response.
+
+The output CSV is intended for instructor review — edit the questions and
+override the `question_mode` column as needed before using them with students.
+
+**Prerequisite**: run `get-quiz-questions --tag` for the same quiz first so the
+`*_questions_w_tags_*.csv` is on disk.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
+| **Output** | `data/<course>/<quiz>_<id>_open_ended_YYYYMMDD.csv` |
+
+The output CSV contains columns: `question_id`, `position`, `question_name`,
+`keywords`, `question_mode` (`explain` or `draw`), `original_question_text`,
+`open_ended_question`.
+
+**Typical workflow:**
+1. Run `python canvigator.py --tag get-quiz-questions` and select the quiz.
+2. Run `python canvigator.py generate-open-ended-questions` and select the same quiz.
+3. Open the `*_open_ended_*.csv`, review/edit questions, and adjust any `question_mode` values as desired.
 
 ---
 

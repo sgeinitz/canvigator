@@ -695,3 +695,117 @@ class TestRenderMissedBullets:
         rows = [{'question_id': 101, 'points': 0.6666, 'points_possible': 1.0}]
         result = _render_missed_bullets(rows, self._question_info())
         assert "(0.67 / 1.00 pts)" in result
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm._parse_question_mode tests
+# ---------------------------------------------------------------------------
+
+class TestParseQuestionMode:
+    """Tests for _parse_question_mode classify response parser."""
+
+    def test_returns_explain_for_explain(self):
+        """Recognises 'explain' response."""
+        from canvigator_llm import _parse_question_mode
+        assert _parse_question_mode("explain") == "explain"
+
+    def test_returns_draw_for_draw(self):
+        """Recognises 'draw' response."""
+        from canvigator_llm import _parse_question_mode
+        assert _parse_question_mode("draw") == "draw"
+
+    def test_case_insensitive(self):
+        """Handles uppercase or mixed-case responses."""
+        from canvigator_llm import _parse_question_mode
+        assert _parse_question_mode("DRAW") == "draw"
+        assert _parse_question_mode("Explain") == "explain"
+
+    def test_strips_quotes_and_punctuation(self):
+        """Strips surrounding quotes and trailing punctuation."""
+        from canvigator_llm import _parse_question_mode
+        assert _parse_question_mode('"draw"') == "draw"
+        assert _parse_question_mode("'explain'.") == "explain"
+
+    def test_defaults_to_explain_on_empty(self):
+        """Empty/None defaults to explain."""
+        from canvigator_llm import _parse_question_mode
+        assert _parse_question_mode("") == "explain"
+        assert _parse_question_mode(None) == "explain"
+
+    def test_defaults_to_explain_on_unexpected(self):
+        """Unexpected text defaults to explain."""
+        from canvigator_llm import _parse_question_mode
+        assert _parse_question_mode("I think you should draw it") == "explain"
+
+    def test_uses_first_line_only(self):
+        """Only the first line is considered."""
+        from canvigator_llm import _parse_question_mode
+        assert _parse_question_mode("draw\nBecause it is visual...") == "draw"
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm._build_classify_prompt tests
+# ---------------------------------------------------------------------------
+
+class TestBuildClassifyPrompt:
+    """Tests for _build_classify_prompt construction."""
+
+    def test_includes_keywords(self):
+        """Keywords appear in the prompt."""
+        from canvigator_llm import _build_classify_prompt
+        result = _build_classify_prompt("linked lists", "What is a linked list?", None)
+        assert "Topic keywords: linked lists" in result
+
+    def test_ends_with_classify_cue(self):
+        """The prompt ends with the classification cue."""
+        from canvigator_llm import _build_classify_prompt
+        result = _build_classify_prompt("sorting", "How does quicksort work?", None)
+        assert result.endswith("Best assessment mode (explain or draw):")
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm._build_open_ended_prompt tests
+# ---------------------------------------------------------------------------
+
+class TestBuildOpenEndedPrompt:
+    """Tests for _build_open_ended_prompt prompt construction."""
+
+    def test_includes_keywords(self):
+        """Keywords appear in the prompt under the Topic keywords label."""
+        from canvigator_llm import _build_open_ended_prompt
+        result = _build_open_ended_prompt("recursion, base case", "What is recursion?", None, "explain")
+        assert "Topic keywords: recursion, base case" in result
+
+    def test_includes_question_text(self):
+        """Question text is stripped of HTML and included."""
+        from canvigator_llm import _build_open_ended_prompt
+        result = _build_open_ended_prompt("loops", "<p>What does a <b>for</b> loop do?</p>", None, "explain")
+        assert "What does a for loop do?" in result
+        assert "<p>" not in result
+
+    def test_includes_answer_choices(self):
+        """Answer choices from JSON are included."""
+        import json
+        from canvigator_llm import _build_open_ended_prompt
+        answers = json.dumps([{"text": "O(n)"}, {"text": "O(n^2)"}])
+        result = _build_open_ended_prompt("big-o", "What is the complexity?", answers, "explain")
+        assert "O(n)" in result
+        assert "O(n^2)" in result
+
+    def test_explain_mode_cue(self):
+        """Explain mode ends with the oral explanation cue."""
+        from canvigator_llm import _build_open_ended_prompt
+        result = _build_open_ended_prompt("sorting", "How does quicksort work?", None, "explain")
+        assert result.endswith('Oral explanation question (must start with "Explain"):')
+
+    def test_draw_mode_cue(self):
+        """Draw mode ends with the visual assessment cue."""
+        from canvigator_llm import _build_open_ended_prompt
+        result = _build_open_ended_prompt("trees", "What is a binary tree?", None, "draw")
+        assert result.endswith('Visual assessment question (must start with "Draw a diagram" or "Draw a figure"):')
+
+    def test_handles_empty_inputs(self):
+        """Empty/None inputs produce a minimal prompt with just the cue."""
+        from canvigator_llm import _build_open_ended_prompt
+        result = _build_open_ended_prompt("", "", None, "explain")
+        assert "Oral explanation question" in result
