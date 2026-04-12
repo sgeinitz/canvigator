@@ -2,6 +2,7 @@ import sys
 import time
 import random
 import logging
+import csv
 import requests
 import pandas as pd
 import scipy.spatial.distance as distance
@@ -14,6 +15,66 @@ import json
 from canvigator_utils import today_str, selectCSVFromList, prompt_for_index
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_points_possible_from_student_analysis(csv_path):
+    """Return {question_id: points_possible} parsed from a Canvas student_analysis header.
+
+    Canvas places a numeric points_possible cell immediately after each question-text
+    cell (e.g. "10746018: When training...", "1.5"). Pandas mangles duplicate numeric
+    headers (".1"/".2" suffixes), so we read the raw header with the csv module.
+    """
+    with open(csv_path, newline='') as f:
+        raw_header = next(csv.reader(f))
+
+    points_possible = {}
+    for i, cell in enumerate(raw_header):
+        m = re.match(r'^\s*(\d+)\s*:', cell or '')
+        if not m or i + 1 >= len(raw_header):
+            continue
+        try:
+            points_possible[int(m.group(1))] = float(raw_header[i + 1])
+        except (TypeError, ValueError):
+            continue
+    return points_possible
+
+
+def _render_missed_bullets(missed_rows, question_info):
+    """Render the 'questions you missed' bullet section for one student's most recent attempt.
+
+    `missed_rows` is an iterable of dicts (or a list of DataFrame row dicts) each with
+    keys `question_id`, `points`, `points_possible`. `question_info` maps question_id
+    (int) to a dict with at least `position` and `keywords`. Returns None if there is
+    nothing to render (empty input, or no rows map to known questions).
+    """
+    rendered = []
+    for row in missed_rows:
+        qid = row.get('question_id')
+        try:
+            qid_int = int(qid) if qid is not None else None
+        except (TypeError, ValueError):
+            qid_int = None
+        info = question_info.get(qid_int) if qid_int is not None else None
+        if info is None:
+            logger.warning(f"No question_info for question_id={qid}; skipping in missed-questions bullet")
+            continue
+        rendered.append({
+            'position': info.get('position', 0),
+            'keywords': info.get('keywords') or '',
+            'points': row.get('points', 0.0),
+            'points_possible': row.get('points_possible', 0.0),
+        })
+
+    if not rendered:
+        return None
+
+    rendered.sort(key=lambda r: r['position'])
+    header = "\n\nThe questions that you missed on this most recent attempt covered the concepts/topics:\n"
+    lines = [
+        f"• {r['keywords']} ({r['points']:.2f} / {r['points_possible']:.2f} pts)"
+        for r in rendered
+    ]
+    return header + "\n".join(lines)
 
 
 class CanvigatorQuiz:
@@ -36,6 +97,7 @@ class CanvigatorQuiz:
         self.n_students = None
         self.question_stats = None
         self.dist_matrix = None
+        self.question_points_possible = {}
         self.quiz_questions = []  # Can later get text for kth question using quiz_question[k].question_text
 
         if self.verbose:
@@ -79,6 +141,8 @@ class CanvigatorQuiz:
         self._spin_done(f"Saved: {csv_name.name}")
         logger.info(f"Quiz report downloaded: {self.quiz_name}")
 
+        self.question_points_possible = _parse_points_possible_from_student_analysis(csv_name)
+
         self.quiz_df = pd.read_csv(csv_name)
 
         # rename columns to be shorter, cleaner, and with question_id as a column
@@ -114,30 +178,139 @@ class CanvigatorQuiz:
             for key, val in self.question_stats.items():
                 print("key =", key, "->", val)
 
-    def getQuizQuestions(self):
+    def getQuizQuestions(self, tag=False):
         """Save quiz metadata and questions to a CSV file."""
         quiz_id = self.canvas_quiz.id
         assignment_id = getattr(self.canvas_quiz, 'assignment_id', None)
 
-        fields = ['id', 'position', 'question_name', 'question_type', 'question_text', 'points_possible']
+        fields = ['position', 'question_name', 'question_type', 'question_text', 'points_possible']
         rows = []
         for q in self.quiz_questions:
-            row = {'quiz_id': quiz_id, 'assignment_id': assignment_id}
+            row = {'quiz_id': quiz_id, 'assignment_id': assignment_id, 'question_id': getattr(q, 'id', None)}
             row.update({f: getattr(q, f, None) for f in fields})
             row['answers'] = json.dumps(getattr(q, 'answers', []))
             rows.append(row)
 
-        columns = ['quiz_id', 'assignment_id'] + fields + ['answers']
+        if tag:
+            import canvigator_llm
+            canvigator_llm.tag_questions(rows)
+
+        columns = ['quiz_id', 'assignment_id', 'question_id', 'position', 'question_name', 'question_type']
+        if tag:
+            columns.append('keywords')
+        columns += ['question_text', 'points_possible', 'answers']
         df = pd.DataFrame(rows, columns=columns)
-        csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_data_and_content_{today_str()}.csv"
+        suffix = "questions_w_tags" if tag else "questions"
+        csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_{suffix}_{today_str()}.csv"
         df.to_csv(csv_name, index=False)
         print(f"Saved {len(rows)} questions to {csv_name}")
-        logger.info(f"Quiz data and content saved: {csv_name}")
+        logger.info(f"Quiz questions saved: {csv_name}")
+
+    def _buildMissedBulletsForStudent(self, student_id, subs_by_q_df, question_info):
+        """Return the missed-questions bullet section for one student, or None to skip."""
+        if subs_by_q_df is None or subs_by_q_df.empty:
+            return None
+        student_rows = subs_by_q_df[subs_by_q_df['id'] == student_id]
+        if student_rows.empty:
+            return None
+        latest_attempt = student_rows['attempt'].max()
+        latest_rows = student_rows[student_rows['attempt'] == latest_attempt]
+
+        missed = []
+        for row in latest_rows.to_dict('records'):
+            qid = row.get('question_id')
+            try:
+                qid_int = int(qid) if qid is not None and not pd.isna(qid) else None
+            except (TypeError, ValueError):
+                qid_int = None
+            info = question_info.get(qid_int) if qid_int is not None else None
+
+            # Canvas submission_data doesn't always include points_possible; prefer the
+            # canonical value from the questions CSV when available.
+            pp_row = row.get('points_possible')
+            pp_info = info.get('points_possible') if info else None
+            if pp_info is not None:
+                pp = pp_info
+            elif pp_row is not None and not pd.isna(pp_row):
+                pp = pp_row
+            else:
+                continue
+
+            points = row.get('points')
+            if points is None or pd.isna(points):
+                continue
+
+            try:
+                if float(points) < float(pp):
+                    row['points_possible'] = pp
+                    missed.append(row)
+            except (TypeError, ValueError):
+                continue
+
+        if not missed:
+            return None
+        return _render_missed_bullets(missed, question_info)
+
+    def _loadQuestionInfo(self):
+        """Load the latest *_questions_w_tags_*.csv and build a question_id -> info map.
+
+        Raises FileNotFoundError if no tagged questions CSV exists for the quiz,
+        meaning `get-quiz-questions --tag` has not been run yet.
+        """
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        tagged_pattern = file_prefix + "questions_w_tags_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and tagged_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_questions_w_tags_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'python canvigator.py --crn <CRN> --tag get-quiz-questions' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using question data from: {latest_file.name}")
+        dc_df = pd.read_csv(latest_file)
+
+        if 'keywords' not in dc_df.columns:
+            raise RuntimeError(
+                f"The file {latest_file.name} has no 'keywords' column. "
+                f"Re-run 'get-quiz-questions --tag' first."
+            )
+
+        question_info = {}
+        for _, row in dc_df.iterrows():
+            qid = row.get('question_id')
+            if pd.isna(qid):
+                continue
+            pp = row.get('points_possible')
+            question_info[int(qid)] = {
+                'position': int(row['position']) if pd.notna(row.get('position')) else 0,
+                'keywords': row.get('keywords') if pd.notna(row.get('keywords')) else '',
+                'question_name': row.get('question_name') if pd.notna(row.get('question_name')) else '',
+                'points_possible': float(pp) if pd.notna(pp) else None,
+            }
+        return question_info
 
     def sendQuizReminders(self, dry_run=False):
         """Send reminder messages to students who haven't taken the quiz or haven't achieved a perfect score."""
         quiz_name = self.canvas_quiz.title
         points_possible = self.canvas_quiz.points_possible
+
+        # Prerequisite: a *_questions_w_tags_*.csv must exist for this quiz.
+        # Fail fast with a clear instruction if not.
+        question_info = self._loadQuestionInfo()
+
+        # Refresh submission data — may be minutes old, so always re-fetch.
+        print("\nFetching latest submissions for missed-question details...")
+        self.getAllSubmissionsAndEvents()
+        subs_by_q_df = self.all_subs_by_question
 
         # Build set of student IDs and scores from the student_analysis report
         quiz_scores = {}
@@ -164,9 +337,9 @@ class CanvigatorQuiz:
             "Nice work on attempting {quiz_name}, but you don't yet have a perfect "
             "score. Be sure to try it again soon to earn a perfect score. And remember, "
             "quizzes are most effective as learning tools when you try to answer the "
-            "questions on your own without using any other resources. Quizzes work best "
-            "when it feels like a struggle to recall the concepts and ideas in your mind, "
-            "so embrace the struggle. Good luck!"
+            "questions on your own without using any other resources. Learning happens best "
+            "when it feels challenging to recall concepts and ideas, so embrace the struggle."
+            " Good luck!"
         )
 
         subject_str = f"Quiz Reminder - {quiz_name}"
@@ -184,6 +357,10 @@ class CanvigatorQuiz:
                 score = quiz_scores[student_id]
                 reminder = imperfect_template.format(quiz_name=quiz_name)
                 reason = f"score {score}/{points_possible}"
+
+                bullets = self._buildMissedBulletsForStudent(student_id, subs_by_q_df, question_info)
+                if bullets:
+                    reminder = reminder + bullets
             else:
                 continue
 
@@ -810,6 +987,26 @@ class CanvigatorQuiz:
         print(f"\nSaved retake-qualified students to {retake_csv}")
         logger.info(f"Detected {len(retake_data)} retake-qualified students, saved to {retake_csv}")
 
+    def _buildSubByQuestionRow(self, user_id, attempt_num, q_idx, qdata):
+        """Build one row for the all_subs_by_question CSV from a Canvas submission_data entry.
+
+        Canvas's per-submission submission_data does not reliably include points_possible;
+        prefer the authoritative value parsed from the student_analysis CSV header.
+        """
+        qid = qdata.get('question_id')
+        pp = self.question_points_possible.get(qid) if qid is not None else None
+        if pp is None:
+            pp = qdata.get('points_possible')
+        return {
+            'id': user_id,
+            'attempt': attempt_num,
+            'question': q_idx + 1,
+            'question_id': qid,
+            'points': qdata['points'],
+            'points_possible': pp,
+            'correct': qdata['correct'],
+        }
+
     def getAllSubmissionsAndEvents(self):
         """Collect per-attempt submission history and events into three CSVs."""
         quiz_takers = self.quiz_df[['name', 'id']].copy()
@@ -860,12 +1057,9 @@ class CanvigatorQuiz:
 
                 # now get question-level data for this attempt
                 for q, qdata in enumerate(attempt_data['submission_data']):
-                    new_q_row = {'id': sub.user_id,
-                                 'attempt': attempt_num,
-                                 'question': q + 1,
-                                 'points': qdata['points'],
-                                 'correct': qdata['correct']}
-                    subs_by_question_data.append(new_q_row)
+                    subs_by_question_data.append(
+                        self._buildSubByQuestionRow(sub.user_id, attempt_num, q, qdata)
+                    )
 
                 # see scratch_work.py for getting all events for this submission
                 this_submission_events = sub.get_submission_events(attempt=i + 1)  # get sub. events for this attempt
@@ -902,6 +1096,7 @@ class CanvigatorQuiz:
         all_subs_by_question_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_by_question_{today_str()}.csv"
         all_subs_by_question.to_csv(all_subs_by_question_csv, index=False)
         print(f"  ✓ Saved: {all_subs_by_question_csv.name}")
+        self.all_subs_by_question = all_subs_by_question
 
         all_sub_and_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_and_events_{today_str()}.csv"
         all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)

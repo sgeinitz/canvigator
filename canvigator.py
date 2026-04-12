@@ -19,9 +19,10 @@ tasks = list(task_descriptions.keys())
 
 def print_help():
     """Print usage information with task descriptions."""
-    print("Usage: canvigator.py [--dry-run] [--crn <CRN>] <task>\n")
+    print("Usage: canvigator.py [--dry-run] [--tag] [--crn <CRN>] <task>\n")
     print("Options:")
     print("  --dry-run      Preview changes without modifying Canvas (bonus and reminder tasks)")
+    print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)\n")
     print("Tasks:")
     max_name = max(len(t) for t in tasks)
@@ -33,6 +34,10 @@ args = sys.argv[1:]
 dry_run = '--dry-run' in args
 if dry_run:
     args.remove('--dry-run')
+
+tag = '--tag' in args
+if tag:
+    args.remove('--tag')
 
 crn = None
 if '--crn' in args:
@@ -142,7 +147,7 @@ elif task == 'get-quiz-questions':
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
-    quiz.getQuizQuestions()
+    quiz.getQuizQuestions(tag=tag)
 
 elif task == 'create-quiz':
     course.createQuiz()

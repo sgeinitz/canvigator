@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .vscode/launch.json
+AGENTS.md
 GEMINI.md
 CLAUDE.md
 

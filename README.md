@@ -285,12 +285,22 @@ structure.
 | | Files |
 |---|---|
 | **Input** | _(none — data comes from the Canvas API)_ |
-| **Output** | `data/<course>/<quiz>_<id>_data_and_content_YYYYMMDD.csv` |
+| **Output (default)** | `data/<course>/<quiz>_<id>_questions_YYYYMMDD.csv` |
+| **Output (with `--tag`)** | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` |
 
-The output CSV contains columns: `quiz_id`, `assignment_id`, `id`, `position`,
-`question_name`, `question_type`, `question_text`, `points_possible`, `answers`
-(JSON-encoded). The `assignment_id` enables joining quiz data with
+The output CSV contains columns: `quiz_id`, `assignment_id`, `question_id`,
+`position`, `question_name`, `question_type`, `question_text`, `points_possible`,
+`answers` (JSON-encoded). The `assignment_id` enables joining quiz data with
 gradebook/assignment exports.
+
+Pass `--tag` to add a `keywords` column (inserted before `question_text`) with
+1–3 short topical tags per question, produced by a local LLM via
+[Ollama](https://ollama.com). The output is written to a separate file
+(`*_questions_w_tags_*.csv`) so untagged and tagged exports never overwrite
+each other. This requires the Ollama server to be running and the model to be
+pulled locally. The model defaults to `gemma4:31b` and can be overridden with
+the `OLLAMA_MODEL` env var; the host can be overridden with the standard
+`OLLAMA_HOST` env var.
 
 ---
 
@@ -299,13 +309,30 @@ gradebook/assignment exports.
 Sends personalized Canvas messages to students based on their quiz performance.
 Students who have not yet attempted the quiz receive a reminder to make an
 attempt. Students who attempted but scored below perfect receive encouragement
-to retake. Students with perfect scores are skipped.
+to retake, plus — when their most recent attempt had any missed questions — a
+bulleted list of the concepts/topics those questions covered along with their
+per-question score. Students with perfect scores are skipped.
+
+**Prerequisite**: run `get-quiz-questions --tag` for the same quiz first so the
+`*_questions_w_tags_*.csv` is on disk. The reminder task will not run
+`get-quiz-questions` automatically — quiz content is static, so you should
+generate it once ahead of time. Submissions, on the other hand, change right
+up to the moment the reminder runs, so the task automatically invokes
+`getAllSubmissionsAndEvents()` on every run to pick up the latest data.
 
 | | Files |
 |---|---|
-| **Input** | _(none — uses the student_analysis report downloaded from Canvas and enrolled student list)_ |
-| **Output** | _(none — messages are sent as Canvas conversations)_ |
+| **Input** | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
+| **Output** | Fresh `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv`, `..._all_subs_by_question_YYYYMMDD.csv`, and `..._all_subs_and_events_YYYYMMDD.csv` (written automatically via `getAllSubmissionsAndEvents()`) |
 | **Canvas side-effect** | Sends a Canvas conversation message to each student who hasn't attempted or hasn't achieved a perfect score (skipped in `--dry-run` mode) |
+
+Example of the appended section for an imperfect-score student:
+
+```
+The questions that you missed on this most recent attempt covered the concepts/topics:
+• recursion, base case, stack frames — 0.50 / 1.00 points
+• big-o, sorting — 0.00 / 1.00 points
+```
 
 Use `--dry-run` to preview all messages (recipient, subject, body, and reason)
 without sending anything to Canvas.
