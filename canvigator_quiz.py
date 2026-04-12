@@ -77,6 +77,37 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
+def _render_blur_bullets(blurred_question_ids, question_info):
+    """Render the 'questions with window focus change' bullet section.
+
+    `blurred_question_ids` is a set (or iterable) of question_id ints that had
+    at least one page_blurred event. `question_info` maps question_id (int) to
+    a dict with at least `position` and `keywords`. Returns None if there is
+    nothing to render.
+    """
+    rendered = []
+    for qid in blurred_question_ids:
+        info = question_info.get(qid)
+        if info is None:
+            logger.warning(f"No question_info for question_id={qid}; skipping in blur bullet")
+            continue
+        rendered.append({
+            'position': info.get('position', 0),
+            'keywords': info.get('keywords') or '',
+        })
+
+    if not rendered:
+        return None
+
+    rendered.sort(key=lambda r: r['position'])
+    header = "\n\nThe questions that you changed window focus on covered the concepts/topics:\n"
+    lines = [
+        f"• Q{r['position']}: {r['keywords']}"
+        for r in rendered
+    ]
+    return header + "\n".join(lines)
+
+
 def _extract_question_id(event):
     """Extract quiz_question_id from a Canvas question_answered event, or None."""
     edata = getattr(event, 'event_data', None)
@@ -338,6 +369,40 @@ class CanvigatorQuiz:
             return None
         return _render_missed_bullets(missed, question_info)
 
+    def _buildBlurBulletsForStudent(self, student_id, events_df, question_info):
+        """Return the blur-questions bullet section for one student, or None to skip.
+
+        Walks the student's most recent attempt events chronologically and attributes
+        each page_blurred event to the next question_answered event. Returns a rendered
+        bullet section listing the questions that had at least one blur.
+        """
+        if events_df is None or events_df.empty:
+            return None
+        student_events = events_df[events_df['id'] == student_id]
+        if student_events.empty:
+            return None
+        latest_attempt = student_events['attempt'].max()
+        attempt_events = student_events[student_events['attempt'] == latest_attempt].sort_values('timestamp')
+
+        blur_pending = False
+        blurred_qids = set()
+        for evt in attempt_events.to_dict('records'):
+            if evt['event'] == 'page_blurred':
+                blur_pending = True
+            elif evt['event'] == 'question_answered' and blur_pending:
+                qid = evt.get('question_id')
+                try:
+                    qid_int = int(qid) if qid is not None and not pd.isna(qid) else None
+                except (TypeError, ValueError):
+                    qid_int = None
+                if qid_int is not None:
+                    blurred_qids.add(qid_int)
+                blur_pending = False
+
+        if not blurred_qids:
+            return None
+        return _render_blur_bullets(blurred_qids, question_info)
+
     def _loadQuestionInfo(self):
         """Load the latest *_questions_w_tags_*.csv and build a question_id -> info map.
 
@@ -372,21 +437,32 @@ class CanvigatorQuiz:
             )
 
         question_info = {}
-        for _, row in dc_df.iterrows():
+        for idx, (_, row) in enumerate(dc_df.iterrows(), start=1):
             qid = row.get('question_id')
             if pd.isna(qid):
                 continue
             pp = row.get('points_possible')
             question_info[int(qid)] = {
-                'position': int(row['position']) if pd.notna(row.get('position')) else 0,
+                'position': int(row['position']) if pd.notna(row.get('position')) else idx,
                 'keywords': row.get('keywords') if pd.notna(row.get('keywords')) else '',
                 'question_name': row.get('question_name') if pd.notna(row.get('question_name')) else '',
                 'points_possible': float(pp) if pd.notna(pp) else None,
             }
         return question_info
 
+    def _buildQuizScores(self):
+        """Build a dict mapping student_id -> score from the student_analysis report."""
+        quiz_scores = {}
+        if self.quiz_df is not None and self.n_students is not None and self.n_students > 0:
+            for _, row in self.quiz_df.iterrows():
+                student_id = row['id']
+                score = row['score']
+                if pd.notna(score):
+                    quiz_scores[student_id] = score
+        return quiz_scores
+
     def sendQuizReminders(self, dry_run=False):
-        """Send reminder messages to students who haven't taken the quiz or haven't achieved a perfect score."""
+        """Send reminder messages to students who haven't taken the quiz, haven't achieved a perfect score, or had page blur events."""
         quiz_name = self.canvas_quiz.title
         points_possible = self.canvas_quiz.points_possible
 
@@ -398,17 +474,9 @@ class CanvigatorQuiz:
         print("\nFetching latest submissions for missed-question details...")
         self.getAllSubmissionsAndEvents()
         subs_by_q_df = self.all_subs_by_question
+        events_df = self.all_subs_and_events
 
-        # Build set of student IDs and scores from the student_analysis report
-        quiz_scores = {}
-        if self.quiz_df is not None and self.n_students is not None and self.n_students > 0:
-            for _, row in self.quiz_df.iterrows():
-                student_id = row['id']
-                score = row['score']
-                if pd.notna(score):
-                    quiz_scores[student_id] = score
-
-        # All enrolled students from the course
+        quiz_scores = self._buildQuizScores()
         enrolled = self.canvas_course.students
 
         no_attempt_template = (
@@ -427,6 +495,15 @@ class CanvigatorQuiz:
             "questions on your own without using any other resources. Learning happens best "
             "when it feels challenging to recall concepts and ideas, so embrace the struggle."
             " Good luck! \n\nNOTE: This an auto-generated message, please let me know if you have any questions/concerns/suggestions about it."
+        )
+
+        blur_template = (
+            "Nice work on earning a perfect score on {quiz_name}! However, it looks "
+            "like you may have left the quiz window at some point during your most recent "
+            "attempt. Remember, quizzes are most effective as learning tools when you try "
+            "to answer the questions on your own without using any other resources. Learning "
+            "happens best when it feels challenging to recall concepts and ideas, so embrace "
+            "the struggle. \n\nNOTE: This an auto-generated message, please let me know if you have any questions/concerns/suggestions about it."
         )
 
         subject_str = f"Quiz Reminder - {quiz_name}"
@@ -449,13 +526,22 @@ class CanvigatorQuiz:
                 if bullets:
                     reminder = reminder + bullets
             else:
-                continue
+                # Perfect score — check for page blur events
+                blur_bullets = self._buildBlurBulletsForStudent(student_id, events_df, question_info)
+                if not blur_bullets:
+                    continue
+                reminder = blur_template.format(quiz_name=quiz_name) + blur_bullets
+                reason = "page blur"
 
             message_str = f"Hello {first_name}, {reminder}"
             messages.append((student_id, student_name, message_str, reason))
 
+        self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible, dry_run)
+
+    def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible, dry_run):
+        """Send or preview the collected reminder messages and print a summary."""
         if not messages:
-            print("No reminders to send — all students have perfect scores!")
+            print("No reminders to send — all students have perfect scores with no page blur events!")
             return
 
         if dry_run:
@@ -476,13 +562,16 @@ class CanvigatorQuiz:
                 print(f"  Sent to: {student_name} (id: {student_id}, {reason})")
 
         n_no_attempt = sum(1 for _, _, _, r in messages if r == "no attempt")
-        n_imperfect = len(messages) - n_no_attempt
+        n_blur = sum(1 for _, _, _, r in messages if r == "page blur")
+        n_imperfect = len(messages) - n_no_attempt - n_blur
         action = "would be sent" if dry_run else "sent"
         summary_parts = []
         if n_no_attempt:
             summary_parts.append(f"{n_no_attempt} no-attempt")
         if n_imperfect:
             summary_parts.append(f"{n_imperfect} imperfect-score")
+        if n_blur:
+            summary_parts.append(f"{n_blur} page-blur")
         print(f"\n{len(messages)} reminder(s) {action} ({', '.join(summary_parts)}).")
         logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
 
