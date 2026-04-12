@@ -368,7 +368,7 @@ class CanvigatorQuiz:
             "way to use the quiz as a learning tool is to try to answer the questions "
             "without going to outside references or AI tools. Trying to answer on your "
             "own, even if it feels like a struggle, is the best way to help learn this "
-            "material. Good luck!"
+            "material. Good luck! \n\nNOTE: This an auto-generated message, please let me know if you have any questions/concerns/suggestions about it."
         )
 
         imperfect_template = (
@@ -377,7 +377,7 @@ class CanvigatorQuiz:
             "quizzes are most effective as learning tools when you try to answer the "
             "questions on your own without using any other resources. Learning happens best "
             "when it feels challenging to recall concepts and ideas, so embrace the struggle."
-            " Good luck!"
+            " Good luck! \n\nNOTE: This an auto-generated message, please let me know if you have any questions/concerns/suggestions about it."
         )
 
         subject_str = f"Quiz Reminder - {quiz_name}"
