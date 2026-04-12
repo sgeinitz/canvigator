@@ -53,6 +53,7 @@ class CanvigatorCourse:
             if quiz.published and quiz.n_students is not None and quiz.n_students > 1:
                 quiz.generateQuestionHistograms()
                 quiz.getAllSubmissionsAndEvents()
+                quiz.generateFirstAttemptHistograms()
             else:
                 print("  Skipping (unpublished or insufficient submissions)")
 
