@@ -77,6 +77,44 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
+def _extract_question_id(event):
+    """Extract quiz_question_id from a Canvas question_answered event, or None."""
+    edata = getattr(event, 'event_data', None)
+    if isinstance(edata, list) and edata:
+        first_entry = edata[0]
+        if isinstance(first_entry, dict):
+            return first_entry.get('quiz_question_id')
+    return None
+
+
+def _collect_timing_and_blurs(student_events, timing_by_q, blurs_by_q):
+    """Walk one student's first-attempt events and accumulate per-question timing and blur counts."""
+    prev_time = None
+    blur_count = 0
+
+    for evt in student_events:
+        if prev_time is None:
+            prev_time = evt['timestamp']
+
+        if evt['event'] == 'page_blurred':
+            blur_count += 1
+
+        if evt['event'] == 'question_answered':
+            qid = evt.get('question_id')
+            try:
+                qid_str = str(int(float(qid))) if pd.notna(qid) else None
+            except (TypeError, ValueError):
+                qid_str = None
+            if qid_str and qid_str in timing_by_q:
+                delta_mins = (evt['timestamp'] - prev_time).total_seconds() / 60.0
+                if 0 <= delta_mins < 10:
+                    timing_by_q[qid_str].append(delta_mins)
+                blurs_by_q[qid_str].append(blur_count)
+
+            prev_time = evt['timestamp']
+            blur_count = 0
+
+
 class CanvigatorQuiz:
     """A class for one quiz and associated attributes/data."""
 
@@ -420,11 +458,16 @@ class CanvigatorQuiz:
     def generateQuestionHistograms(self):
         """Draw a histogram of scores of each question."""
         mpl.style.use('seaborn-v0_8')
-        figure, axis = plt.subplots(1, len(self.quiz_question_ids), sharey=True)
+        n_questions = len(self.quiz_question_ids)
+        figure, axis = plt.subplots(1, n_questions, sharey=True)
+        if n_questions == 1:
+            axis = [axis]
         figure.set_size_inches(13, 3)
         for i, q in enumerate(self.quiz_question_ids):
             score_col = q + '_score'
-            axis[i].hist(self.quiz_df[score_col], bins=6, facecolor='#00447c', edgecolor='black', alpha=0.8)
+            col_data = self.quiz_df[score_col]
+            axis[i].hist(col_data, bins=6, facecolor='#00447c', edgecolor='black', alpha=0.8)
+            axis[i].axvline(col_data.mean(), color='black', linestyle='dashed', linewidth=1)
             axis[i].set_xlabel('score')
             axis[i].set_title('question: ' + q.split('_')[0])
         axis[0].set_ylabel('# of people')
@@ -433,6 +476,66 @@ class CanvigatorQuiz:
         figure.savefig(fig_path, dpi=200)
         plt.close('all')
         print(f"  ✓ Saved: {fig_path.name}")
+
+    def _plotPerQuestionHistogram(self, data_by_q, xlabel, facecolor, figure_name):
+        """Plot a row of per-question histograms and save the figure."""
+        question_ids = self.quiz_question_ids
+        n_questions = len(question_ids)
+        mpl.style.use('seaborn-v0_8')
+        fig, axes = plt.subplots(1, n_questions, sharey=True)
+        if n_questions == 1:
+            axes = [axes]
+        fig.set_size_inches(13, 3)
+        for i, qid in enumerate(question_ids):
+            data = data_by_q[qid]
+            if data:
+                bins = range(0, max(data) + 2) if all(isinstance(v, int) for v in data) else 10
+                axes[i].hist(data, bins=bins, facecolor=facecolor, edgecolor='black', alpha=0.8)
+                axes[i].axvline(sum(data) / len(data), color='black', linestyle='dashed', linewidth=1)
+            axes[i].set_xlabel(xlabel)
+            axes[i].set_title(f'Q{i + 1}')
+        axes[0].set_ylabel('# of students')
+        plt.tight_layout()
+        fig_path = self.figurePath(figure_name)
+        fig.savefig(fig_path, dpi=200)
+        plt.close('all')
+        print(f"  ✓ Saved: {fig_path.name}")
+
+    def generateFirstAttemptHistograms(self):
+        """Generate per-question timing and page-blur histograms for first attempts only.
+
+        Requires getAllSubmissionsAndEvents() to have been run first. Uses
+        question_answered events to compute per-question time deltas and counts
+        page_blurred events between consecutive answers.
+        """
+        events_df = getattr(self, 'all_subs_and_events', None)
+        if events_df is None or events_df.empty:
+            return
+
+        first = events_df[events_df['attempt'] == 1].copy()
+        if first.empty:
+            return
+
+        first['timestamp'] = pd.to_datetime(first['timestamp'])
+
+        question_ids = self.quiz_question_ids
+        if not question_ids:
+            return
+
+        timing_by_q = {qid: [] for qid in question_ids}
+        blurs_by_q = {qid: [] for qid in question_ids}
+
+        for sid in first['id'].unique():
+            student_events = first[first['id'] == sid].sort_values('timestamp').to_dict('records')
+            _collect_timing_and_blurs(student_events, timing_by_q, blurs_by_q)
+
+        has_data = any(timing_by_q[qid] or blurs_by_q[qid] for qid in question_ids)
+        if not has_data:
+            print("  (No per-question event data available for timing/blur histograms)")
+            return
+
+        self._plotPerQuestionHistogram(timing_by_q, 'minutes', '#00447c', 'timing_first_attempt')
+        self._plotPerQuestionHistogram(blurs_by_q, '# of page blurs', '#c44e52', 'blurs_first_attempt')
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
         """Calculate vector distance between all possible student pairs."""
@@ -1027,8 +1130,8 @@ class CanvigatorQuiz:
                 assignment_ids=[self.canvas_quiz.assignment_id],
                 include=['submission_history'])[0]
             n_attempts = len(student_subs.submission_history)
-            for i in range(n_attempts):
-                attempt_data = student_subs.submission_history[i]
+            for a in range(n_attempts):
+                attempt_data = student_subs.submission_history[a]
                 attempt_num = attempt_data['attempt']
 
                 # Compute raw score from per-question points to exclude any fudge points
@@ -1062,24 +1165,25 @@ class CanvigatorQuiz:
                     )
 
                 # see scratch_work.py for getting all events for this submission
-                this_submission_events = sub.get_submission_events(attempt=i + 1)  # get sub. events for this attempt
+                this_submission_events = sub.get_submission_events(attempt=attempt_num)
 
                 try:
                     for event in this_submission_events:
                         subs_and_events_data.append({
                             'id': sub.user_id,
-                            'attempt': i + 1,
+                            'attempt': attempt_num,
                             'event': event.event_type,
-                            'timestamp': event.created_at
+                            'timestamp': event.created_at,
+                            'question_id': _extract_question_id(event) if event.event_type == 'question_answered' else None,
                         })
                 except Exception:
-                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {i + 1}")
+                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {attempt_num}")
                     continue
 
         # Create DataFrames from the collected lists
         all_submissions = pd.DataFrame(submissions_data)
         all_subs_by_question = pd.DataFrame(subs_by_question_data)
-        all_subs_and_events = pd.DataFrame(subs_and_events_data, columns=['id', 'attempt', 'event', 'timestamp'])
+        all_subs_and_events = pd.DataFrame(subs_and_events_data, columns=['id', 'attempt', 'event', 'timestamp', 'question_id'])
 
         # do a full outer join of quiz_takers on 'id' to get names for the submission data
         if not all_submissions.empty:
@@ -1101,6 +1205,7 @@ class CanvigatorQuiz:
         all_sub_and_events_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_and_events_{today_str()}.csv"
         all_subs_and_events.to_csv(all_sub_and_events_csv, index=False)
         print(f"  ✓ Saved: {all_sub_and_events_csv.name}")
+        self.all_subs_and_events = all_subs_and_events
 
     def _populateTimestamps(self, quiz_summary, row_index, sub):
         """Fill in start/finish/minutes for a student row using first-attempt times if available."""
