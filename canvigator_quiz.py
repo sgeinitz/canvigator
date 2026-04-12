@@ -106,9 +106,9 @@ def _collect_timing_and_blurs(student_events, timing_by_q, blurs_by_q):
             except (TypeError, ValueError):
                 qid_str = None
             if qid_str and qid_str in timing_by_q:
-                delta = (evt['timestamp'] - prev_time).total_seconds()
-                if 0 <= delta < 600:
-                    timing_by_q[qid_str].append(delta)
+                delta_mins = (evt['timestamp'] - prev_time).total_seconds() / 60.0
+                if 0 <= delta_mins < 10:
+                    timing_by_q[qid_str].append(delta_mins)
                 blurs_by_q[qid_str].append(blur_count)
 
             prev_time = evt['timestamp']
@@ -531,7 +531,7 @@ class CanvigatorQuiz:
             print("  (No per-question event data available for timing/blur histograms)")
             return
 
-        self._plotPerQuestionHistogram(timing_by_q, 'seconds', '#00447c', 'timing_first_attempt')
+        self._plotPerQuestionHistogram(timing_by_q, 'minutes', '#00447c', 'timing_first_attempt')
         self._plotPerQuestionHistogram(blurs_by_q, '# of page blurs', '#c44e52', 'blurs_first_attempt')
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
@@ -1127,8 +1127,8 @@ class CanvigatorQuiz:
                 assignment_ids=[self.canvas_quiz.assignment_id],
                 include=['submission_history'])[0]
             n_attempts = len(student_subs.submission_history)
-            for i in range(n_attempts):
-                attempt_data = student_subs.submission_history[i]
+            for a in range(n_attempts):
+                attempt_data = student_subs.submission_history[a]
                 attempt_num = attempt_data['attempt']
 
                 # Compute raw score from per-question points to exclude any fudge points
@@ -1162,19 +1162,19 @@ class CanvigatorQuiz:
                     )
 
                 # see scratch_work.py for getting all events for this submission
-                this_submission_events = sub.get_submission_events(attempt=i + 1)  # get sub. events for this attempt
+                this_submission_events = sub.get_submission_events(attempt=attempt_num)
 
                 try:
                     for event in this_submission_events:
                         subs_and_events_data.append({
                             'id': sub.user_id,
-                            'attempt': i + 1,
+                            'attempt': attempt_num,
                             'event': event.event_type,
                             'timestamp': event.created_at,
                             'question_id': _extract_question_id(event) if event.event_type == 'question_answered' else None,
                         })
                 except Exception:
-                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {i + 1}")
+                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {attempt_num}")
                     continue
 
         # Create DataFrames from the collected lists
