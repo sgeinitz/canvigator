@@ -660,8 +660,8 @@ class TestRenderMissedBullets:
         assert result.startswith("\n\nThe questions that you missed on this most recent attempt")
         lines = result.strip().splitlines()
         # Header + 2 bullets
-        assert lines[-2] == "• recursion, base case (0.50 / 1.00 pts)"
-        assert lines[-1] == "• big-o, sorting (0.00 / 1.00 pts)"
+        assert lines[-2] == "• Q1: recursion, base case (0.50 / 1.00 pts)"
+        assert lines[-1] == "• Q2: big-o, sorting (0.00 / 1.00 pts)"
 
     def test_skips_unknown_question_ids(self):
         """Rows whose question_id isn't in question_info are skipped with a warning."""
@@ -694,7 +694,58 @@ class TestRenderMissedBullets:
         from canvigator_quiz import _render_missed_bullets
         rows = [{'question_id': 101, 'points': 0.6666, 'points_possible': 1.0}]
         result = _render_missed_bullets(rows, self._question_info())
+        assert "Q1:" in result
         assert "(0.67 / 1.00 pts)" in result
+
+
+# ---------------------------------------------------------------------------
+# canvigator_quiz._render_blur_bullets tests
+# ---------------------------------------------------------------------------
+
+class TestRenderBlurBullets:
+    """Tests for the pure _render_blur_bullets helper."""
+
+    def _question_info(self):
+        """Return a simple question_info mapping used across tests."""
+        return {
+            101: {'position': 1, 'keywords': 'recursion, base case'},
+            102: {'position': 2, 'keywords': 'big-o, sorting'},
+            103: {'position': 3, 'keywords': 'pointers'},
+        }
+
+    def test_returns_none_when_empty(self):
+        """Empty input returns None."""
+        from canvigator_quiz import _render_blur_bullets
+        assert _render_blur_bullets(set(), self._question_info()) is None
+
+    def test_renders_bullets_in_position_order(self):
+        """Bullets are sorted by position and include Q number and keywords."""
+        from canvigator_quiz import _render_blur_bullets
+        result = _render_blur_bullets({102, 101}, self._question_info())
+        assert result is not None
+        assert "changed window focus" in result
+        lines = result.strip().splitlines()
+        assert lines[-2] == "• Q1: recursion, base case"
+        assert lines[-1] == "• Q2: big-o, sorting"
+
+    def test_skips_unknown_question_ids(self):
+        """Question IDs not in question_info are skipped."""
+        from canvigator_quiz import _render_blur_bullets
+        result = _render_blur_bullets({999, 103}, self._question_info())
+        assert result is not None
+        assert "pointers" in result
+        assert "999" not in result
+
+    def test_returns_none_when_all_unknown(self):
+        """If every question ID is unknown, returns None."""
+        from canvigator_quiz import _render_blur_bullets
+        assert _render_blur_bullets({999}, self._question_info()) is None
+
+    def test_no_points_in_output(self):
+        """Blur bullets should not include point scores."""
+        from canvigator_quiz import _render_blur_bullets
+        result = _render_blur_bullets({101}, self._question_info())
+        assert "/ 1.00 pts)" not in result
 
 
 # ---------------------------------------------------------------------------
