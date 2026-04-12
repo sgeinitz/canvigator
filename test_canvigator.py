@@ -190,13 +190,13 @@ class TestCollectStudentIds:
         assert len(result) == 1
 
     def test_gradebook_csv(self, tmp_path):
-        """Collects IDs from gradebook-style name/user_id columns."""
+        """Collects IDs from gradebook-style name/id columns."""
         from canvigator_course import _collectStudentIds
         csv_file = tmp_path / "gradebook.csv"
         df = pd.DataFrame({
             'name': ['Alice', 'Bob'],
             'sortable_name': ['Smith, Alice', 'Jones, Bob'],
-            'user_id': [100, 200],
+            'id': [100, 200],
             'assignment_name': ['Quiz 1', 'Quiz 1'],
             'score': [95, 87],
         })
@@ -257,7 +257,7 @@ class TestAnonymizeCsvFile:
         assert 'anon_id2' in result.columns
 
     def test_gradebook_file(self, tmp_path):
-        """Gradebook CSV: name/sortable_name/user_id replaced with anon_id."""
+        """Gradebook CSV: name/sortable_name/id replaced with anon_id."""
         from canvigator_course import _anonymizeCsvFile
         csv_file = tmp_path / "gradebook_20240101.csv"
         anon_dir = tmp_path / "anon"
@@ -266,7 +266,7 @@ class TestAnonymizeCsvFile:
         df = pd.DataFrame({
             'name': ['Alice', 'Bob'],
             'sortable_name': ['Smith, Alice', 'Jones, Bob'],
-            'user_id': [100, 200],
+            'id': [100, 200],
             'assignment_name': ['Quiz 1', 'Quiz 1'],
             'assignment_id': [10, 10],
             'points_possible': [100, 100],
@@ -282,7 +282,7 @@ class TestAnonymizeCsvFile:
         result = pd.read_csv(anon_dir / "gradebook_20240101.csv")
         assert 'name' not in result.columns
         assert 'sortable_name' not in result.columns
-        assert 'user_id' not in result.columns
+        assert 'id' not in result.columns
         assert 'anon_id' in result.columns
         assert list(result['anon_id']) == [1111111111, 2222222222]
         assert list(result['score']) == [95, 87]

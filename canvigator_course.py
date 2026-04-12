@@ -133,7 +133,7 @@ class CanvigatorCourse:
                 gradebook_rows.append({
                     'name': student['name'],
                     'sortable_name': student['sortable_name'],
-                    'user_id': user_id,
+                    'id': user_id,
                     'assignment_name': assignment.name,
                     'assignment_id': assignment.id,
                     'points_possible': assignment.points_possible,
@@ -142,7 +142,7 @@ class CanvigatorCourse:
                 })
 
         gradebook_df = pd.DataFrame(gradebook_rows, columns=[
-            'name', 'sortable_name', 'user_id', 'assignment_name',
+            'name', 'sortable_name', 'id', 'assignment_name',
             'assignment_id', 'points_possible', 'grade', 'score'
         ])
 
@@ -213,11 +213,6 @@ def _collectStudentIds(csv_files):
                 if 'sis_id' in cols and pd.notna(row.get('sis_id')) and sid in id_to_info:
                     id_to_info[sid]['sis_id'] = row['sis_id']
 
-        # Gradebook files with name + user_id columns
-        if 'name' in cols and 'user_id' in cols:
-            for _, row in df.iterrows():
-                _addStudentId(id_to_info, row['user_id'], row['name'])
-
         # Pairing-style files with person1/id1, person2/id2, person3/id3
         for suffix in ['1', '2', '3']:
             id_col, name_col = f'id{suffix}', f'person{suffix}'
@@ -246,16 +241,7 @@ def _anonymizeCsvFile(csv_file, anon_dir, id_to_anon):
     # Standard files: replace id with anon_id, drop name and sis_id
     if 'name' in cols and 'id' in cols:
         df['anon_id'] = df['id'].apply(map_student_id)
-        drop_cols = [c for c in ['name', 'id', 'sis_id'] if c in cols]
-        df = df.drop(columns=drop_cols)
-        remaining = [c for c in df.columns if c != 'anon_id']
-        df = df[['anon_id'] + remaining]
-        modified = True
-
-    # Gradebook files: replace user_id with anon_id, drop name and sortable_name
-    if 'name' in cols and 'user_id' in cols:
-        df['anon_id'] = df['user_id'].apply(map_student_id)
-        drop_cols = [c for c in ['name', 'sortable_name', 'user_id'] if c in cols]
+        drop_cols = [c for c in ['name', 'id', 'sis_id', 'sortable_name'] if c in cols]
         df = df.drop(columns=drop_cols)
         remaining = [c for c in df.columns if c != 'anon_id']
         df = df[['anon_id'] + remaining]
