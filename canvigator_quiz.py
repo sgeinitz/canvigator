@@ -71,7 +71,7 @@ def _render_missed_bullets(missed_rows, question_info):
     rendered.sort(key=lambda r: r['position'])
     header = "\n\nThe questions that you missed on this most recent attempt covered the concepts/topics:\n"
     lines = [
-        f"• {r['keywords']} ({r['points']:.2f} / {r['points_possible']:.2f} pts)"
+        f"• Q{r['position']}: {r['keywords']} ({r['points']:.2f} / {r['points_possible']:.2f} pts)"
         for r in rendered
     ]
     return header + "\n".join(lines)

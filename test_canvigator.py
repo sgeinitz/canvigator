@@ -660,8 +660,8 @@ class TestRenderMissedBullets:
         assert result.startswith("\n\nThe questions that you missed on this most recent attempt")
         lines = result.strip().splitlines()
         # Header + 2 bullets
-        assert lines[-2] == "• recursion, base case (0.50 / 1.00 pts)"
-        assert lines[-1] == "• big-o, sorting (0.00 / 1.00 pts)"
+        assert lines[-2] == "• Q1: recursion, base case (0.50 / 1.00 pts)"
+        assert lines[-1] == "• Q2: big-o, sorting (0.00 / 1.00 pts)"
 
     def test_skips_unknown_question_ids(self):
         """Rows whose question_id isn't in question_info are skipped with a warning."""
@@ -694,6 +694,7 @@ class TestRenderMissedBullets:
         from canvigator_quiz import _render_missed_bullets
         rows = [{'question_id': 101, 'points': 0.6666, 'points_possible': 1.0}]
         result = _render_missed_bullets(rows, self._question_info())
+        assert "Q1:" in result
         assert "(0.67 / 1.00 pts)" in result
 
 
