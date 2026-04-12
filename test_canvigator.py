@@ -558,3 +558,140 @@ class TestSelectCSVFromList:
 
         with pytest.raises(FileNotFoundError, match="No CSV files"):
             selectCSVFromList(str(tmp_path), 'present', "Pick: ")
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm tests
+# ---------------------------------------------------------------------------
+
+class TestStripHtml:
+    """Tests for _strip_html HTML-to-text conversion."""
+
+    def test_empty(self):
+        """Empty/None input yields empty string."""
+        from canvigator_llm import _strip_html
+        assert _strip_html("") == ""
+        assert _strip_html(None) == ""
+
+    def test_strips_tags(self):
+        """Tags are removed and entities unescaped."""
+        from canvigator_llm import _strip_html
+        result = _strip_html("<p>What is <b>2 &amp; 3</b>?</p>")
+        assert result == "What is 2 & 3?"
+
+    def test_converts_breaks(self):
+        """Break and closing-p tags become newlines."""
+        from canvigator_llm import _strip_html
+        result = _strip_html("line1<br>line2<br/>line3")
+        assert "line1" in result and "line2" in result and "line3" in result
+        assert "<br" not in result
+
+    def test_collapses_whitespace(self):
+        """Runs of spaces are collapsed."""
+        from canvigator_llm import _strip_html
+        assert _strip_html("a    b   c") == "a b c"
+
+
+class TestParseTags:
+    """Tests for _parse_tags response parser."""
+
+    def test_empty(self):
+        """Empty response yields empty list."""
+        from canvigator_llm import _parse_tags
+        assert _parse_tags("") == []
+        assert _parse_tags(None) == []
+
+    def test_basic(self):
+        """Comma-separated tags are lowercased and stripped."""
+        from canvigator_llm import _parse_tags
+        assert _parse_tags("Recursion, Base Case, Stack") == ["recursion", "base case", "stack"]
+
+    def test_truncates_to_three(self):
+        """Only the first three unique tags are kept."""
+        from canvigator_llm import _parse_tags
+        result = _parse_tags("a, b, c, d, e")
+        assert result == ["a", "b", "c"]
+
+    def test_dedupes(self):
+        """Duplicate tags collapse."""
+        from canvigator_llm import _parse_tags
+        assert _parse_tags("loops, loops, iteration") == ["loops", "iteration"]
+
+    def test_ignores_extra_lines(self):
+        """Only the first non-empty line is parsed."""
+        from canvigator_llm import _parse_tags
+        assert _parse_tags("recursion, pointers\nExplanation: ...") == ["recursion", "pointers"]
+
+    def test_strips_quotes(self):
+        """Wrapping quotes are stripped."""
+        from canvigator_llm import _parse_tags
+        assert _parse_tags('"big-o", "sorting"') == ["big-o", "sorting"]
+
+
+# ---------------------------------------------------------------------------
+# canvigator_quiz._render_missed_bullets tests
+# ---------------------------------------------------------------------------
+
+class TestRenderMissedBullets:
+    """Tests for the pure _render_missed_bullets helper."""
+
+    def _question_info(self):
+        """Return a simple question_info mapping used across tests."""
+        return {
+            101: {'position': 1, 'keywords': 'recursion, base case', 'question_name': 'Q1'},
+            102: {'position': 2, 'keywords': 'big-o, sorting', 'question_name': 'Q2'},
+            103: {'position': 3, 'keywords': 'pointers', 'question_name': 'Q3'},
+        }
+
+    def test_returns_none_when_empty(self):
+        """Empty input returns None."""
+        from canvigator_quiz import _render_missed_bullets
+        assert _render_missed_bullets([], self._question_info()) is None
+
+    def test_renders_bullet_lines_in_position_order(self):
+        """Bullets are sorted by position and include keywords + score."""
+        from canvigator_quiz import _render_missed_bullets
+        rows = [
+            {'question_id': 102, 'points': 0.0, 'points_possible': 1.0},
+            {'question_id': 101, 'points': 0.5, 'points_possible': 1.0},
+        ]
+        result = _render_missed_bullets(rows, self._question_info())
+        assert result is not None
+        assert result.startswith("\n\nThe questions that you missed on this most recent attempt")
+        lines = result.strip().splitlines()
+        # Header + 2 bullets
+        assert lines[-2] == "• recursion, base case (0.50 / 1.00 pts)"
+        assert lines[-1] == "• big-o, sorting (0.00 / 1.00 pts)"
+
+    def test_skips_unknown_question_ids(self):
+        """Rows whose question_id isn't in question_info are skipped with a warning."""
+        from canvigator_quiz import _render_missed_bullets
+        rows = [
+            {'question_id': 999, 'points': 0.0, 'points_possible': 1.0},
+            {'question_id': 103, 'points': 0.25, 'points_possible': 1.0},
+        ]
+        result = _render_missed_bullets(rows, self._question_info())
+        assert result is not None
+        assert "pointers" in result
+        assert "999" not in result
+
+    def test_returns_none_when_all_unknown(self):
+        """If every row is skipped, the helper returns None (no empty section)."""
+        from canvigator_quiz import _render_missed_bullets
+        rows = [{'question_id': 999, 'points': 0.0, 'points_possible': 1.0}]
+        assert _render_missed_bullets(rows, self._question_info()) is None
+
+    def test_handles_string_question_id(self):
+        """question_id stored as a string (e.g. from CSV round-trip) still joins."""
+        from canvigator_quiz import _render_missed_bullets
+        rows = [{'question_id': '102', 'points': 0.0, 'points_possible': 1.0}]
+        result = _render_missed_bullets(rows, self._question_info())
+        assert result is not None
+        assert "big-o" in result
+
+    def test_score_formatting_uses_two_decimals(self):
+        """Scores are formatted with exactly two decimals."""
+        from canvigator_quiz import _render_missed_bullets
+        rows = [{'question_id': 101, 'points': 0.6666, 'points_possible': 1.0}]
+        result = _render_missed_bullets(rows, self._question_info())
+        assert "(0.67 / 1.00 pts)" in result
