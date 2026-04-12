@@ -465,7 +465,9 @@ class CanvigatorQuiz:
         figure.set_size_inches(13, 3)
         for i, q in enumerate(self.quiz_question_ids):
             score_col = q + '_score'
-            axis[i].hist(self.quiz_df[score_col], bins=6, facecolor='#00447c', edgecolor='black', alpha=0.8)
+            col_data = self.quiz_df[score_col]
+            axis[i].hist(col_data, bins=6, facecolor='#00447c', edgecolor='black', alpha=0.8)
+            axis[i].axvline(col_data.mean(), color='black', linestyle='dashed', linewidth=1)
             axis[i].set_xlabel('score')
             axis[i].set_title('question: ' + q.split('_')[0])
         axis[0].set_ylabel('# of people')
@@ -489,6 +491,7 @@ class CanvigatorQuiz:
             if data:
                 bins = range(0, max(data) + 2) if all(isinstance(v, int) for v in data) else 10
                 axes[i].hist(data, bins=bins, facecolor=facecolor, edgecolor='black', alpha=0.8)
+                axes[i].axvline(sum(data) / len(data), color='black', linestyle='dashed', linewidth=1)
             axes[i].set_xlabel(xlabel)
             axes[i].set_title(f'Q{i + 1}')
         axes[0].set_ylabel('# of students')
