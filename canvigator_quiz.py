@@ -557,7 +557,7 @@ class CanvigatorQuiz:
                 print(f"            Message: {message_str}\n")
             else:
                 self.canvas.create_conversation(
-                    [str(student_id)], message_str, subject=subject_str
+                    [str(student_id)], message_str, subject=subject_str, force_new=True
                 )
                 print(f"  Sent to: {student_name} (id: {student_id}, {reason})")
 
