@@ -536,35 +536,30 @@ class CanvigatorQuiz:
             message_str = f"Hello {first_name}, {reminder}"
             messages.append((student_id, student_name, message_str, reason))
 
-        self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible, dry_run)
+        if dry_run:
+            self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible)
+        else:
+            self._interactiveSend(messages, subject_str, quiz_name, points_possible)
 
-    def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible, dry_run):
-        """Send or preview the collected reminder messages and print a summary."""
+    def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible):
+        """Preview the collected messages in dry-run mode and print a summary."""
         if not messages:
             print("No reminders to send — all students have perfect scores with no page blur events!")
             return
 
-        if dry_run:
-            print("\n=== DRY RUN MODE - No messages will be sent on Canvas ===\n")
+        print("\n=== DRY RUN MODE - No messages will be sent on Canvas ===\n")
 
         print(f"Quiz: {quiz_name} ({points_possible} points possible)")
         print(f"Reminders to send: {len(messages)}\n")
 
         for student_id, student_name, message_str, reason in messages:
-            if dry_run:
-                print(f"  [DRY RUN] To: {student_name} (id: {student_id}, {reason})")
-                print(f"            Subject: {subject_str}")
-                print(f"            Message: {message_str}\n")
-            else:
-                self.canvas.create_conversation(
-                    [str(student_id)], message_str, subject=subject_str, force_new=True
-                )
-                print(f"  Sent to: {student_name} (id: {student_id}, {reason})")
+            print(f"  [DRY RUN] To: {student_name} (id: {student_id}, {reason})")
+            print(f"            Subject: {subject_str}")
+            print(f"            Message: {message_str}\n")
 
         n_no_attempt = sum(1 for _, _, _, r in messages if r == "no attempt")
         n_blur = sum(1 for _, _, _, r in messages if r == "page blur")
         n_imperfect = len(messages) - n_no_attempt - n_blur
-        action = "would be sent" if dry_run else "sent"
         summary_parts = []
         if n_no_attempt:
             summary_parts.append(f"{n_no_attempt} no-attempt")
@@ -572,8 +567,8 @@ class CanvigatorQuiz:
             summary_parts.append(f"{n_imperfect} imperfect-score")
         if n_blur:
             summary_parts.append(f"{n_blur} page-blur")
-        print(f"\n{len(messages)} reminder(s) {action} ({', '.join(summary_parts)}).")
-        logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
+        print(f"\n{len(messages)} reminder(s) would be sent ({', '.join(summary_parts)}).")
+        logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)} for {quiz_name}")
 
     def sendFollowUpQuestions(self, dry_run=False):
         """Send the most-missed open-ended follow-up question to students who missed it.
@@ -668,26 +663,26 @@ class CanvigatorQuiz:
             messages.append((student_id, student_name, message_str, f"missed Q{position}"))
 
         if dry_run:
-            self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible, dry_run)
+            self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
             self._saveFollowUpManifest(messages, most_missed_qid, question_mode, subject_str, dry_run)
         else:
-            sent_messages = self._interactiveSendFollowUps(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
+            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
             if sent_messages:
                 self._saveFollowUpManifest(sent_messages, most_missed_qid, question_mode, subject_str, dry_run)
 
-    def _interactiveSendFollowUps(self, messages, subject_str, quiz_name, points_possible):
-        """Interactively prompt the instructor to send or skip each follow-up message.
+    def _interactiveSend(self, messages, subject_str, quiz_name, points_possible):
+        """Interactively prompt the instructor to send or skip each message.
 
         For each student, displays the message preview and asks the instructor
         to type 'send' or 'skip' (default: skip). Returns the list of messages
         that were actually sent.
         """
         if not messages:
-            print("No follow-up messages to send — all students scored perfectly!")
+            print("No messages to send!")
             return []
 
         print(f"\nQuiz: {quiz_name} ({points_possible} points possible)")
-        print(f"Follow-up messages to review: {len(messages)}")
+        print(f"Messages to review: {len(messages)}")
         print("For each student, enter 'send' to send or press Enter to skip.\n")
 
         sent_messages = []
@@ -709,8 +704,8 @@ class CanvigatorQuiz:
 
         n_sent = len(sent_messages)
         n_skipped = len(messages) - n_sent
-        print(f"\n{n_sent} follow-up(s) sent, {n_skipped} skipped.")
-        logger.info(f"Follow-up questions interactive send: {n_sent} sent, {n_skipped} skipped for {quiz_name}")
+        print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
+        logger.info(f"Interactive send for {quiz_name}: {n_sent} sent, {n_skipped} skipped")
         return sent_messages
 
     def _findMostMissedQuestion(self, subs_by_q_df, question_info):
