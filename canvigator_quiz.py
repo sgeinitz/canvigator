@@ -667,10 +667,51 @@ class CanvigatorQuiz:
             )
             messages.append((student_id, student_name, message_str, f"missed Q{position}"))
 
-        self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible, dry_run)
+        if dry_run:
+            self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible, dry_run)
+            self._saveFollowUpManifest(messages, most_missed_qid, question_mode, subject_str, dry_run)
+        else:
+            sent_messages = self._interactiveSendFollowUps(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
+            if sent_messages:
+                self._saveFollowUpManifest(sent_messages, most_missed_qid, question_mode, subject_str, dry_run)
 
-        # Save the follow-up manifest CSV
-        self._saveFollowUpManifest(messages, most_missed_qid, question_mode, subject_str, dry_run)
+    def _interactiveSendFollowUps(self, messages, subject_str, quiz_name, points_possible):
+        """Interactively prompt the instructor to send or skip each follow-up message.
+
+        For each student, displays the message preview and asks the instructor
+        to type 'send' or 'skip' (default: skip). Returns the list of messages
+        that were actually sent.
+        """
+        if not messages:
+            print("No follow-up messages to send — all students scored perfectly!")
+            return []
+
+        print(f"\nQuiz: {quiz_name} ({points_possible} points possible)")
+        print(f"Follow-up messages to review: {len(messages)}")
+        print("For each student, enter 'send' to send or press Enter to skip.\n")
+
+        sent_messages = []
+        for i, (student_id, student_name, message_str, reason) in enumerate(messages, 1):
+            print(f"--- Student {i}/{len(messages)} ---")
+            print(f"  To: {student_name} (id: {student_id}, {reason})")
+            print(f"  Subject: {subject_str}")
+            print(f"  Message: {message_str}\n")
+
+            choice = input(f"  Send to {student_name}? [send/SKIP]: ").strip().lower()
+            if choice == 'send':
+                self.canvas.create_conversation(
+                    [str(student_id)], message_str, subject=subject_str, force_new=True
+                )
+                print("  -> Sent!\n")
+                sent_messages.append((student_id, student_name, message_str, reason))
+            else:
+                print("  -> Skipped.\n")
+
+        n_sent = len(sent_messages)
+        n_skipped = len(messages) - n_sent
+        print(f"\n{n_sent} follow-up(s) sent, {n_skipped} skipped.")
+        logger.info(f"Follow-up questions interactive send: {n_sent} sent, {n_skipped} skipped for {quiz_name}")
+        return sent_messages
 
     def _findMostMissedQuestion(self, subs_by_q_df, question_info):
         """Return the question_id with the highest miss rate, or None if all are perfect.
