@@ -860,3 +860,110 @@ class TestBuildOpenEndedPrompt:
         from canvigator_llm import _build_open_ended_prompt
         result = _build_open_ended_prompt("", "", None, "explain")
         assert "Oral explanation question" in result
+
+
+# ---------------------------------------------------------------------------
+# canvigator_quiz: follow-up question helper tests
+# ---------------------------------------------------------------------------
+
+def _make_subs_by_question_df(rows):
+    """Build a DataFrame matching the all_subs_by_question schema."""
+    return pd.DataFrame(rows, columns=['name', 'id', 'attempt', 'question', 'question_id', 'points', 'points_possible', 'correct'])
+
+
+def _make_quiz_stub():
+    """Create a minimal mock object with the methods _findMostMissedQuestion and _findStudentsWhoMissed."""
+    from canvigator_quiz import CanvigatorQuiz
+    # We only need the unbound methods — call them with an explicit self=None
+    # since they don't use self at all (only their arguments).
+    return CanvigatorQuiz
+
+
+class TestFindMostMissedQuestion:
+    """Tests for CanvigatorQuiz._findMostMissedQuestion."""
+
+    def _call(self, subs_rows, question_info):
+        """Helper to call _findMostMissedQuestion without a full quiz instance."""
+        cls = _make_quiz_stub()
+        df = _make_subs_by_question_df(subs_rows)
+        return cls._findMostMissedQuestion(None, df, question_info)
+
+    def test_returns_most_missed(self):
+        """Question with higher miss rate is returned."""
+        question_info = {
+            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
+            200: {'position': 2, 'keywords': 'topic b', 'points_possible': 1.0},
+        }
+        rows = [
+            ('A', 1, 1, 1, 100, 1.0, 1.0, True),   # student 1 got Q100 right
+            ('A', 1, 1, 2, 200, 0.0, 1.0, False),   # student 1 missed Q200
+            ('B', 2, 1, 1, 100, 0.0, 1.0, False),   # student 2 missed Q100
+            ('B', 2, 1, 2, 200, 0.0, 1.0, False),   # student 2 missed Q200
+        ]
+        result = self._call(rows, question_info)
+        assert result == 200  # both students missed Q200, only one missed Q100
+
+    def test_returns_none_when_all_perfect(self):
+        """Returns None when no questions are missed."""
+        question_info = {
+            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
+        }
+        rows = [
+            ('A', 1, 1, 1, 100, 1.0, 1.0, True),
+            ('B', 2, 1, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(rows, question_info)
+        assert result is None
+
+    def test_uses_latest_attempt(self):
+        """Only the latest attempt per student counts toward miss rate."""
+        question_info = {
+            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
+        }
+        rows = [
+            # Student 1: missed on attempt 1, got it right on attempt 2
+            ('A', 1, 1, 1, 100, 0.0, 1.0, False),
+            ('A', 1, 2, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(rows, question_info)
+        assert result is None  # latest attempt is perfect
+
+
+class TestFindStudentsWhoMissed:
+    """Tests for CanvigatorQuiz._findStudentsWhoMissed."""
+
+    def _call(self, question_id, subs_rows, question_info):
+        """Helper to call _findStudentsWhoMissed without a full quiz instance."""
+        cls = _make_quiz_stub()
+        df = _make_subs_by_question_df(subs_rows)
+        return cls._findStudentsWhoMissed(None, question_id, df, question_info)
+
+    def test_returns_students_who_missed(self):
+        """Only students who scored below points_possible are returned."""
+        question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
+        rows = [
+            ('A', 1, 1, 1, 100, 0.0, 1.0, False),
+            ('B', 2, 1, 1, 100, 1.0, 1.0, True),
+            ('C', 3, 1, 1, 100, 0.5, 1.0, False),
+        ]
+        result = self._call(100, rows, question_info)
+        assert sorted(result) == [1, 3]
+
+    def test_uses_latest_attempt(self):
+        """Student who fixed the question on a later attempt is excluded."""
+        question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
+        rows = [
+            ('A', 1, 1, 1, 100, 0.0, 1.0, False),
+            ('A', 1, 2, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(100, rows, question_info)
+        assert result == []
+
+    def test_empty_when_no_misses(self):
+        """Returns empty list when all students scored perfectly."""
+        question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
+        rows = [
+            ('A', 1, 1, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(100, rows, question_info)
+        assert result == []

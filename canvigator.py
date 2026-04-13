@@ -13,6 +13,7 @@ task_descriptions = {
     'get-all-subs': 'Export all quiz submissions and events',
     'get-gradebook': 'Export course gradebook',
     'get-quiz-questions': 'Export quiz question content',
+    'send-follow-up-question': 'Send the most-missed open-ended follow-up question to students',
     'send-quiz-reminder': 'Send quiz reminder messages to students',
 }
 tasks = list(task_descriptions.keys())
@@ -22,7 +23,7 @@ def print_help():
     """Print usage information with task descriptions."""
     print("Usage: canvigator.py [--dry-run] [--tag] [--crn <CRN>] <task>\n")
     print("Options:")
-    print("  --dry-run      Preview changes without modifying Canvas (bonus and reminder tasks)")
+    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)")
     print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)\n")
     print("Tasks:")
@@ -172,6 +173,12 @@ elif task == 'send-quiz-reminder':
     print(f"\nSelected quiz: {quiz_choice.title}")
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
     quiz.sendQuizReminders(dry_run=dry_run)
+
+elif task == 'send-follow-up-question':
+    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
+    print(f"\nSelected quiz: {quiz_choice.title}")
+    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
+    quiz.sendFollowUpQuestions(dry_run=dry_run)
 
 elif task in ['create-pairs', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
     # Prompt user to select a quiz

@@ -575,6 +575,219 @@ class CanvigatorQuiz:
         print(f"\n{len(messages)} reminder(s) {action} ({', '.join(summary_parts)}).")
         logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
 
+    def sendFollowUpQuestions(self, dry_run=False):
+        """Send the most-missed open-ended follow-up question to students who missed it.
+
+        Requires that get-quiz-questions --tag and generate-open-ended-questions
+        have both been run for this quiz. Auto-refreshes submission data to pick
+        up recent attempts.
+        """
+        quiz_name = self.canvas_quiz.title
+
+        # Load question metadata (from *_questions_w_tags_*.csv)
+        question_info = self._loadQuestionInfo()
+
+        # Load the open-ended questions CSV
+        open_ended_rows = self._loadOpenEndedQuestions()
+
+        # Refresh submission data for up-to-date per-question scores
+        print("\nFetching latest submissions for follow-up question targeting...")
+        self.getAllSubmissionsAndEvents()
+        subs_by_q_df = self.all_subs_by_question
+
+        if subs_by_q_df is None or subs_by_q_df.empty:
+            print("No submission data available — cannot determine missed questions.")
+            return
+
+        # Find the most-missed question
+        most_missed_qid = self._findMostMissedQuestion(subs_by_q_df, question_info)
+        if most_missed_qid is None:
+            print("All students scored perfectly on all questions — no follow-up needed!")
+            return
+
+        info = question_info[most_missed_qid]
+        position = info['position']
+        keywords = info['keywords']
+
+        # Look up the open-ended question for this question_id
+        oe_row = open_ended_rows.get(most_missed_qid)
+        if oe_row is None:
+            print(f"No open-ended question found for question_id {most_missed_qid} (Q{position}: {keywords}).")
+            print("Re-run 'generate-open-ended-questions' to regenerate.")
+            return
+
+        question_mode = oe_row.get('question_mode', 'explain')
+        open_ended_text = oe_row['open_ended_question']
+
+        print(f"\nMost-missed question: Q{position} — {keywords}")
+        print(f"  Mode: {question_mode}")
+        print(f"  Follow-up: {open_ended_text[:120]}{'...' if len(open_ended_text) > 120 else ''}")
+
+        # Build the list of students who missed this question on their latest attempt
+        students_who_missed = self._findStudentsWhoMissed(most_missed_qid, subs_by_q_df, question_info)
+
+        if not students_who_missed:
+            print("No students missed this question on their latest attempt — no follow-up needed!")
+            return
+
+        # Compose messages
+        if question_mode == 'draw':
+            instructions = (
+                "Please draw your answer on paper (or a tablet) and reply to this "
+                "message with a photo of your drawing attached using the attachment "
+                "button (the paperclip icon)."
+            )
+        else:
+            instructions = (
+                "Please reply to this message with a voice recording explaining "
+                "your answer. You can use the microphone button in the Canvas "
+                "message editor to record your response."
+            )
+
+        subject_str = f"Follow-Up Question - {quiz_name} - Q{position}"
+        enrolled = self.canvas_course.students
+        enrolled_map = {s['id']: s['name'] for s in enrolled}
+
+        messages = []
+        for student_id in students_who_missed:
+            student_name = enrolled_map.get(student_id)
+            if student_name is None:
+                continue
+            first_name = student_name.split()[0]
+            message_str = (
+                f"Hello {first_name}, based on your recent attempt on {quiz_name}, "
+                f"here is a follow-up question to help reinforce your understanding "
+                f"of the topic ({keywords}):\n\n"
+                f"{open_ended_text}\n\n"
+                f"{instructions}\n\n"
+                f"You can reply as many times as you'd like — only your most recent "
+                f"response will be assessed.\n\n"
+                f"NOTE: This is an auto-generated message, please let me know if you "
+                f"have any questions/concerns/suggestions about it."
+            )
+            messages.append((student_id, student_name, message_str, f"missed Q{position}"))
+
+        self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible, dry_run)
+
+        # Save the follow-up manifest CSV
+        self._saveFollowUpManifest(messages, most_missed_qid, question_mode, subject_str, dry_run)
+
+    def _findMostMissedQuestion(self, subs_by_q_df, question_info):
+        """Return the question_id with the highest miss rate, or None if all are perfect.
+
+        Miss rate = fraction of students whose latest attempt scored below
+        points_possible for that question.
+        """
+        # Use only the latest attempt per student (each student has multiple rows — one per question)
+        max_attempt_per_student = subs_by_q_df.groupby('id')['attempt'].transform('max')
+        latest_attempts = subs_by_q_df[subs_by_q_df['attempt'] == max_attempt_per_student]
+
+        miss_rates = {}
+        for qid, info in question_info.items():
+            pp = info.get('points_possible')
+            if pp is None:
+                continue
+            q_rows = latest_attempts[latest_attempts['question_id'] == qid]
+            if q_rows.empty:
+                continue
+            n_total = len(q_rows)
+            n_missed = sum(1 for _, row in q_rows.iterrows()
+                           if pd.notna(row.get('points')) and float(row['points']) < float(pp))
+            miss_rates[qid] = n_missed / n_total if n_total > 0 else 0.0
+
+        if not miss_rates or max(miss_rates.values()) == 0:
+            return None
+
+        # Report top-5 miss rates for instructor visibility
+        sorted_rates = sorted(miss_rates.items(), key=lambda t: t[1], reverse=True)
+        print("\nQuestion miss rates (latest attempt):")
+        for qid, rate in sorted_rates[:5]:
+            info = question_info.get(qid, {})
+            label = f"Q{info.get('position', '?')} ({info.get('keywords', '')})"
+            print(f"  {label}: {rate:.0%}")
+
+        return sorted_rates[0][0]
+
+    def _findStudentsWhoMissed(self, question_id, subs_by_q_df, question_info):
+        """Return a list of student IDs who scored below points_possible on the given question in their latest attempt."""
+        pp = question_info.get(question_id, {}).get('points_possible')
+        if pp is None:
+            return []
+
+        max_attempt_per_student = subs_by_q_df.groupby('id')['attempt'].transform('max')
+        latest_attempts = subs_by_q_df[subs_by_q_df['attempt'] == max_attempt_per_student]
+        q_rows = latest_attempts[latest_attempts['question_id'] == question_id]
+
+        missed_ids = []
+        for _, row in q_rows.iterrows():
+            points = row.get('points')
+            if points is not None and pd.notna(points) and float(points) < float(pp):
+                missed_ids.append(row['id'])
+        return missed_ids
+
+    def _loadOpenEndedQuestions(self):
+        """Load the latest *_open_ended_*.csv and return a dict keyed by question_id.
+
+        Raises FileNotFoundError if no open-ended CSV exists for the quiz.
+        """
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        oe_pattern = file_prefix + "open_ended_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and oe_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_open_ended_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'python canvigator.py generate-open-ended-questions' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using open-ended questions from: {latest_file.name}")
+
+        df = pd.read_csv(latest_file)
+        if 'open_ended_question' not in df.columns:
+            raise RuntimeError(
+                f"The file {latest_file.name} has no 'open_ended_question' column. "
+                f"Re-run 'generate-open-ended-questions'."
+            )
+
+        rows_by_qid = {}
+        for _, row in df.iterrows():
+            qid = row.get('question_id')
+            if pd.notna(qid):
+                rows_by_qid[int(qid)] = row.to_dict()
+        return rows_by_qid
+
+    def _saveFollowUpManifest(self, messages, question_id, question_mode, subject_str, dry_run):
+        """Save a CSV manifest of follow-up messages sent (or previewed in dry-run)."""
+        from datetime import datetime
+        sent_at = datetime.utcnow().isoformat() + 'Z'
+        manifest_rows = []
+        for student_id, student_name, _, reason in messages:
+            manifest_rows.append({
+                'student_id': student_id,
+                'student_name': student_name,
+                'question_id': question_id,
+                'question_mode': question_mode,
+                'conversation_subject': subject_str,
+                'sent_at': sent_at,
+            })
+
+        manifest_df = pd.DataFrame(manifest_rows)
+        suffix = "_dryrun" if dry_run else ""
+        csv_name = self.config.data_path / (
+            f"{self.config.quiz_prefix}{self.canvas_quiz.id}_followup_sent{suffix}_{today_str()}.csv"
+        )
+        manifest_df.to_csv(csv_name, index=False)
+        print(f"  Manifest saved: {csv_name.name}")
+        logger.info(f"Follow-up manifest saved: {csv_name}")
+
     SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def _spin(self, frame, message, indent=2):
