@@ -1046,3 +1046,94 @@ class TestExtractStudentReplies:
         result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
         assert result[0]['id'] == 2
         assert result[1]['id'] == 1
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm: assessment helper tests
+# ---------------------------------------------------------------------------
+
+class TestParseAssessment:
+    """Tests for canvigator_llm._parse_assessment."""
+
+    def test_parses_pass(self):
+        """Correctly parses a pass result with feedback."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: pass\nFeedback: Good explanation of the concept.")
+        assert result == 'pass'
+        assert feedback == 'Good explanation of the concept.'
+
+    def test_parses_fail(self):
+        """Correctly parses a fail result with feedback."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: fail\nFeedback: The student did not address the question.")
+        assert result == 'fail'
+        assert feedback == 'The student did not address the question.'
+
+    def test_defaults_to_fail_on_empty(self):
+        """Returns fail with default feedback on empty input."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("")
+        assert result == 'fail'
+
+    def test_defaults_to_fail_on_none(self):
+        """Returns fail with default feedback on None input."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment(None)
+        assert result == 'fail'
+
+    def test_case_insensitive_result(self):
+        """Result parsing is case-insensitive."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: Pass\nFeedback: OK.")
+        assert result == 'pass'
+
+    def test_unknown_result_defaults_to_fail(self):
+        """Unknown result value defaults to fail."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: maybe\nFeedback: Unclear.")
+        assert result == 'fail'
+
+    def test_fallback_uses_whole_response_as_feedback(self):
+        """If no Feedback: line, the whole response becomes feedback."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: pass\nThe student did well.")
+        assert result == 'pass'
+        assert 'The student did well' in feedback
+
+
+class TestBuildAssessmentPrompt:
+    """Tests for canvigator_llm._build_assessment_prompt."""
+
+    def test_includes_all_fields(self):
+        """All provided fields appear in the prompt."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="neural networks",
+            open_ended_question="Explain backprop.",
+            original_question_text="What is backprop?",
+            transcript="It's a way to compute gradients.",
+        )
+        assert "neural networks" in result
+        assert "Explain backprop." in result
+        assert "What is backprop?" in result
+        assert "It's a way to compute gradients." in result
+
+    def test_omits_empty_fields(self):
+        """Empty or None fields are omitted cleanly."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(keywords="", open_ended_question="Q?", original_question_text="", transcript=None)
+        assert "Topic keywords" not in result
+        assert "Original quiz question" not in result
+        assert "transcript" not in result.lower()
+        assert "Q?" in result
+
+    def test_works_for_draw_mode(self):
+        """Prompt without transcript is suitable for draw assessments."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="binary trees",
+            open_ended_question="Draw a binary search tree.",
+            original_question_text="What is a BST?",
+        )
+        assert "binary trees" in result
+        assert "transcript" not in result.lower()

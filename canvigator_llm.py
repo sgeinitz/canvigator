@@ -8,6 +8,7 @@ import re
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:31b")
+DEFAULT_AUDIO_MODEL = os.environ.get("OLLAMA_AUDIO_MODEL", "gemma4:e4b")
 
 _TAG_SYSTEM_PROMPT = (
     "You are a concise topic tagger for university quiz questions. "
@@ -273,6 +274,239 @@ def generate_open_ended_question(row, client, model, mode):
     except Exception as e:
         logger.warning(f"LLM generation failed for question {row.get('question_id')}: {e}")
         return ""
+
+
+_TRANSCRIBE_SYSTEM_PROMPT = (
+    "You are a transcription assistant. Listen to the audio and produce an accurate, "
+    "verbatim transcription of everything the speaker says. Output ONLY the transcription "
+    "text — no preamble, no labels, no timestamps, no commentary."
+)
+
+_ASSESS_EXPLAIN_SYSTEM_PROMPT = (
+    "You are a university instructor assessing a student's verbal explanation of a concept. "
+    "Given the original quiz question, the topic keywords, and the student's spoken response "
+    "(provided as a transcript), determine whether the student demonstrates a reasonable "
+    "understanding of the core concept.\n\n"
+    "A \"pass\" means the student demonstrates a reasonable understanding of the core concept, "
+    "even if their explanation is imprecise, incomplete, or uses informal language. "
+    "A \"fail\" means the student shows a fundamental misunderstanding, did not address the "
+    "question, or gave a response with no substantive content.\n\n"
+    "Respond in EXACTLY this format (two lines):\n"
+    "Result: pass\n"
+    "Feedback: Your 2-3 sentence feedback here.\n\n"
+    "Or:\n"
+    "Result: fail\n"
+    "Feedback: Your 2-3 sentence feedback here."
+)
+
+_ASSESS_DRAW_SYSTEM_PROMPT = (
+    "You are a university instructor assessing a student's hand-drawn diagram or figure. "
+    "Given the original quiz question, the topic keywords, and the student's drawing "
+    "(provided as an image), determine whether the drawing demonstrates a reasonable "
+    "understanding of the key concepts and relationships.\n\n"
+    "A \"pass\" means the drawing shows the essential structure or relationships, even if "
+    "it is rough, has minor inaccuracies, or is missing non-critical labels. "
+    "A \"fail\" means the drawing is fundamentally incorrect, shows the wrong structure, "
+    "is missing critical elements, or does not address the question.\n\n"
+    "Respond in EXACTLY this format (two lines):\n"
+    "Result: pass\n"
+    "Feedback: Your 2-3 sentence feedback here.\n\n"
+    "Or:\n"
+    "Result: fail\n"
+    "Feedback: Your 2-3 sentence feedback here."
+)
+
+
+def _parse_assessment(response):
+    r"""Parse a 'Result: pass/fail\nFeedback: ...' response into (result, feedback)."""
+    if not response:
+        return 'fail', 'No response from model.'
+
+    result = 'fail'
+    feedback = ''
+    for line in response.strip().splitlines():
+        line_stripped = line.strip()
+        if line_stripped.lower().startswith('result:'):
+            token = line_stripped[len('result:'):].strip().lower().strip('.,')
+            result = 'pass' if token == 'pass' else 'fail'
+        elif line_stripped.lower().startswith('feedback:'):
+            feedback = line_stripped[len('feedback:'):].strip()
+
+    if not feedback:
+        # Fallback: treat the whole response as feedback
+        feedback = response.strip()
+
+    return result, feedback
+
+
+def _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=None):
+    """Build the user-side prompt for assessing a student response."""
+    parts = []
+    if keywords:
+        parts.append(f"Topic keywords: {keywords}")
+    if original_question_text:
+        parts.append(f"Original quiz question: {original_question_text}")
+    if open_ended_question:
+        parts.append(f"Follow-up question asked: {open_ended_question}")
+    if transcript:
+        parts.append(f"Student's response (transcript): {transcript}")
+    return "\n".join(parts)
+
+
+def transcribe_audio(audio_path, client, model):
+    """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b)."""
+    try:
+        resp = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": _TRANSCRIBE_SYSTEM_PROMPT},
+                {"role": "user", "content": "Transcribe this audio recording.", "images": [audio_path]},
+            ],
+            options={"temperature": 0.1},
+        )
+        return resp["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"Audio transcription failed for {audio_path}: {e}")
+        return ""
+
+
+def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model):
+    """Assess a student's verbal explanation using the transcript."""
+    prompt = _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=transcript)
+    try:
+        resp = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": _ASSESS_EXPLAIN_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.3},
+        )
+        return _parse_assessment(resp["message"]["content"])
+    except Exception as e:
+        logger.warning(f"Explain assessment failed: {e}")
+        return 'fail', f'Assessment error: {e}'
+
+
+def assess_draw(image_path, keywords, open_ended_question, original_question_text, client, model):
+    """Assess a student's drawing by sending the image to a multimodal model."""
+    prompt = _build_assessment_prompt(keywords, open_ended_question, original_question_text)
+    try:
+        resp = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": _ASSESS_DRAW_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt, "images": [image_path]},
+            ],
+            options={"temperature": 0.3},
+        )
+        return _parse_assessment(resp["message"]["content"])
+    except Exception as e:
+        logger.warning(f"Draw assessment failed for {image_path}: {e}")
+        return 'fail', f'Assessment error: {e}'
+
+
+def assess_replies(replies, question_info_row, model=None, audio_model=None):
+    """Assess a list of student reply dicts, returning a list of assessment result dicts.
+
+    Each reply dict should have keys: student_id, student_name, question_id,
+    question_mode, reply_text, attachment_path, audio_path.
+
+    question_info_row should have: keywords, open_ended_question, original_question_text.
+    """
+    try:
+        import ollama
+    except ImportError as e:
+        raise RuntimeError(
+            "The 'ollama' package is required for assess-replies. "
+            "Install with: pip install ollama"
+        ) from e
+
+    model = model or DEFAULT_MODEL
+    audio_model = audio_model or DEFAULT_AUDIO_MODEL
+    client = ollama.Client()
+
+    try:
+        client.list()
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not reach Ollama at its configured host ({os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}). "
+            f"Is the Ollama server running? Original error: {e}"
+        ) from e
+
+    keywords = question_info_row.get('keywords', '')
+    oe_question = question_info_row.get('open_ended_question', '')
+    orig_text = question_info_row.get('original_question_text', '')
+
+    total = len(replies)
+    print(f"Assessing {total} student replies with model '{model}'...")
+    results = []
+    for i, reply in enumerate(replies, start=1):
+        student_name = reply.get('student_name', '?')
+        mode = reply.get('question_mode', 'explain')
+        print(f"  [{i}/{total}] {student_name} ({mode})...", end="", flush=True)
+
+        transcript = ''
+        if mode == 'explain':
+            audio_path = reply.get('audio_path', '')
+            if audio_path:
+                print(" transcribing...", end="", flush=True)
+                transcript = transcribe_audio(audio_path, client, audio_model)
+            if not transcript:
+                # Fall back to reply text if no audio or transcription failed
+                transcript = _strip_html(reply.get('reply_text', ''))
+            if not transcript:
+                print(" no response content — skipped")
+                results.append({
+                    'student_id': reply['student_id'],
+                    'student_name': student_name,
+                    'question_id': reply['question_id'],
+                    'question_mode': mode,
+                    'result': 'fail',
+                    'feedback': 'No response content to assess (no audio and no text).',
+                    'transcript': '',
+                    'assessed_at': '',
+                })
+                continue
+            print(" assessing...", end="", flush=True)
+            result, feedback = assess_explain(transcript, keywords, oe_question, orig_text, client, model)
+        else:
+            # Draw mode
+            image_path = reply.get('attachment_path', '')
+            if not image_path:
+                print(" no image attached — skipped")
+                results.append({
+                    'student_id': reply['student_id'],
+                    'student_name': student_name,
+                    'question_id': reply['question_id'],
+                    'question_mode': mode,
+                    'result': 'fail',
+                    'feedback': 'No image attachment to assess.',
+                    'transcript': '',
+                    'assessed_at': '',
+                })
+                continue
+            transcript = ''
+            print(" assessing image...", end="", flush=True)
+            result, feedback = assess_draw(image_path, keywords, oe_question, orig_text, client, model)
+
+        from datetime import datetime, timezone
+        assessed_at = datetime.now(timezone.utc).isoformat()
+        print(f" {result}")
+
+        results.append({
+            'student_id': reply['student_id'],
+            'student_name': student_name,
+            'question_id': reply['question_id'],
+            'question_mode': mode,
+            'result': result,
+            'feedback': feedback,
+            'transcript': transcript,
+            'assessed_at': assessed_at,
+        })
+
+    print("Assessment complete.")
+    return results
 
 
 def generate_open_ended_questions(rows, model=None):

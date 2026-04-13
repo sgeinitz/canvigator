@@ -1020,6 +1020,81 @@ class CanvigatorQuiz:
 
         return attachment_path, audio_path
 
+    def assessFollowUpReplies(self):
+        """Assess student replies using the local LLM.
+
+        Loads the latest followup_replies CSV, filters to only the latest reply
+        per student, loads the open-ended question context, and calls the LLM
+        to produce a pass/fail assessment with feedback. Outputs a
+        followup_assessments CSV.
+        """
+        # Load replies CSV
+        replies_df = self._loadFollowUpReplies()
+        # Filter to latest reply per student only
+        latest_replies = replies_df[replies_df['latest'] == True].to_dict('records')  # noqa: E712
+
+        if not latest_replies:
+            print("No student replies to assess.")
+            return
+
+        # Load the open-ended questions to get context for assessment
+        open_ended_rows = self._loadOpenEndedQuestions()
+
+        # All replies should share the same question_id (Phase 1 sends one question)
+        question_id = int(latest_replies[0]['question_id'])
+        oe_row = open_ended_rows.get(question_id)
+        if oe_row is None:
+            print(f"No open-ended question found for question_id {question_id}.")
+            return
+
+        print(f"\nAssessing {len(latest_replies)} student replies for question_id {question_id}")
+        print(f"  Question: {oe_row.get('open_ended_question', '')[:100]}...")
+        print(f"  Mode: {latest_replies[0].get('question_mode', 'explain')}")
+
+        import canvigator_llm
+        results = canvigator_llm.assess_replies(latest_replies, oe_row)
+
+        # Save assessments CSV
+        out_df = pd.DataFrame(results, columns=[
+            'student_id', 'student_name', 'question_id', 'question_mode',
+            'result', 'feedback', 'transcript', 'assessed_at',
+        ])
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        csv_name = self.config.data_path / f"{file_prefix}followup_assessments_{today_str()}.csv"
+        out_df.to_csv(csv_name, index=False)
+
+        n_pass = sum(1 for r in results if r['result'] == 'pass')
+        n_fail = sum(1 for r in results if r['result'] == 'fail')
+        print(f"\n  Results: {n_pass} pass, {n_fail} fail")
+        print(f"  Assessments saved: {csv_name.name}")
+        logger.info(f"Follow-up assessments saved: {csv_name}")
+
+    def _loadFollowUpReplies(self):
+        """Load the latest *_followup_replies_*.csv.
+
+        Raises FileNotFoundError if no replies CSV exists for the quiz.
+        """
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        replies_pattern = file_prefix + "followup_replies_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and replies_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_followup_replies_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'get-replies' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using replies from: {latest_file.name}")
+        return pd.read_csv(latest_file)
+
     SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def _spin(self, frame, message, indent=2):

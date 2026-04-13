@@ -2,6 +2,7 @@
 import sys
 
 task_descriptions = {
+    'assess-replies': 'Assess student follow-up replies using local LLM (requires get-replies)',
     'award-bonus': 'Award partner + retake bonus points for a quiz',
     'award-bonus-partner-only': 'Award only the partner bonus points',
     'award-bonus-retake-only': 'Award only the retake bonus points',
@@ -37,6 +38,37 @@ def print_help():
     print("    1. Classifies each question as 'explain' (oral) or 'draw' (visual)")
     print("    2. Generates a mode-appropriate open-ended question for instructor review")
     print("  Output CSV includes a question_mode column so the instructor can override choices.")
+
+
+def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
+    """Dispatch a quiz-level task to the appropriate method."""
+    if task == 'get-quiz-questions':
+        quiz.getQuizQuestions(tag=tag)
+    elif task == 'generate-open-ended-questions':
+        quiz.generateOpenEndedQuestions()
+    elif task == 'get-replies':
+        quiz.getFollowUpReplies(reply_window_days=reply_window_days)
+    elif task == 'assess-replies':
+        quiz.assessFollowUpReplies()
+    elif task == 'send-quiz-reminder':
+        quiz.sendQuizReminders(dry_run=dry_run)
+    elif task == 'send-follow-up-question':
+        quiz.sendFollowUpQuestions(dry_run=dry_run)
+    elif task == 'create-pairs':
+        quiz.openPresentCSV()
+        quiz.generateDistanceMatrix(only_present=True)
+        quiz.comparePairingMethods()
+        quiz.createStudentPairings(method='med', write_csv=True)
+    elif task == 'award-bonus':
+        quiz.detectPartners()
+        quiz.detectRetakers()
+        quiz.awardBonusPoints(dry_run=dry_run)
+    elif task == 'award-bonus-partner-only':
+        quiz.detectPartners()
+        quiz.awardBonusPoints(dry_run=dry_run)
+    elif task == 'award-bonus-retake-only':
+        quiz.detectRetakers()
+        quiz.awardBonusPoints(dry_run=dry_run)
 
 
 args = sys.argv[1:]
@@ -168,75 +200,18 @@ if task == 'get-activity':
 elif task == 'get-all-subs':
     course.getAllQuizzesAndSubmissions()
 
-elif task == 'get-quiz-questions':
-    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
-    print(f"\nSelected quiz: {quiz_choice.title}")
-    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
-    quiz.getQuizQuestions(tag=tag)
-
-elif task == 'generate-open-ended-questions':
-    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
-    print(f"\nSelected quiz: {quiz_choice.title}")
-    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
-    quiz.generateOpenEndedQuestions()
-
 elif task == 'create-quiz':
     course.createQuiz()
 
 elif task == 'get-gradebook':
     course.exportGradebook(canv_config.data_path)
 
-elif task == 'send-quiz-reminder':
+else:
+    # All remaining tasks require quiz selection
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
-    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
-    quiz.sendQuizReminders(dry_run=dry_run)
-
-elif task == 'send-follow-up-question':
-    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
-    print(f"\nSelected quiz: {quiz_choice.title}")
-    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
-    quiz.sendFollowUpQuestions(dry_run=dry_run)
-
-elif task == 'get-replies':
-    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
-    print(f"\nSelected quiz: {quiz_choice.title}")
-    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
-    quiz.getFollowUpReplies(reply_window_days=reply_window_days)
-
-elif task in ['create-pairs', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
-    # Prompt user to select a quiz
-    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
-    print(f"\nSelected quiz: {quiz_choice.title}")
-
-    # Obtain quiz data for the selected task.
-    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
-
-    if task == 'create-pairs':
-        # Open the CSV file with student data for who is present today and recalculate distance matrix.
-        quiz.openPresentCSV()
-        quiz.generateDistanceMatrix(only_present=True)
-
-        # Compare all four methods of pairings students
-        quiz.comparePairingMethods()
-
-        # Generate pairings for today using the median method
-        quiz.createStudentPairings(method='med', write_csv=True)
-
-    elif task == 'award-bonus':
-        # Detect partners and retakers, then award both bonus types
-        quiz.detectPartners()
-        quiz.detectRetakers()
-        quiz.awardBonusPoints(dry_run=dry_run)
-
-    elif task == 'award-bonus-partner-only':
-        # Detect partners and award only the partner bonus
-        quiz.detectPartners()
-        quiz.awardBonusPoints(dry_run=dry_run)
-
-    elif task == 'award-bonus-retake-only':
-        # Detect retakers and award only the retake bonus
-        quiz.detectRetakers()
-        quiz.awardBonusPoints(dry_run=dry_run)
+    skip = task in ('get-quiz-questions', 'generate-open-ended-questions', 'get-replies', 'assess-replies')
+    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
+    _run_quiz_task(task, quiz, dry_run, tag, reply_window_days)
 
 print("\n*** Done ***\n")
