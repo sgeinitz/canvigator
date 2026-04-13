@@ -13,6 +13,7 @@ task_descriptions = {
     'get-all-subs': 'Export all quiz submissions and events',
     'get-gradebook': 'Export course gradebook',
     'get-quiz-questions': 'Export quiz question content',
+    'get-replies': 'Retrieve student replies to follow-up questions',
     'send-follow-up-question': 'Send the most-missed open-ended follow-up question to students',
     'send-quiz-reminder': 'Send quiz reminder messages to students',
 }
@@ -25,7 +26,8 @@ def print_help():
     print("Options:")
     print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)")
     print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
-    print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)\n")
+    print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
+    print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, get-replies only)\n")
     print("Tasks:")
     max_name = max(len(t) for t in tasks)
     for name, desc in task_descriptions.items():
@@ -58,6 +60,22 @@ if '--crn' in args:
         sys.exit(1)
     args.pop(crn_idx)  # remove '--crn'
     args.pop(crn_idx)  # remove the CRN value
+
+reply_window_days = 5
+if '--reply-window-days' in args:
+    rw_idx = args.index('--reply-window-days')
+    if rw_idx + 1 >= len(args):
+        print("Error: --reply-window-days requires a numeric value")
+        sys.exit(1)
+    try:
+        reply_window_days = int(args[rw_idx + 1])
+        if reply_window_days < 1:
+            raise ValueError
+    except ValueError:
+        print(f"Error: --reply-window-days must be a positive integer, got '{args[rw_idx + 1]}'")
+        sys.exit(1)
+    args.pop(rw_idx)  # remove '--reply-window-days'
+    args.pop(rw_idx)  # remove the value
 
 if len(args) < 1:
     print_help()
@@ -179,6 +197,12 @@ elif task == 'send-follow-up-question':
     print(f"\nSelected quiz: {quiz_choice.title}")
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False)
     quiz.sendFollowUpQuestions(dry_run=dry_run)
+
+elif task == 'get-replies':
+    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
+    print(f"\nSelected quiz: {quiz_choice.title}")
+    quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=True)
+    quiz.getFollowUpReplies(reply_window_days=reply_window_days)
 
 elif task in ['create-pairs', 'award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only']:
     # Prompt user to select a quiz

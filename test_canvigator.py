@@ -967,3 +967,82 @@ class TestFindStudentsWhoMissed:
         ]
         result = self._call(100, rows, question_info)
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# canvigator_quiz: reply extraction tests
+# ---------------------------------------------------------------------------
+
+class TestExtractStudentReplies:
+    """Tests for CanvigatorQuiz._extractStudentReplies."""
+
+    def _call(self, messages, instructor_id, sent_at, cutoff):
+        """Helper to call _extractStudentReplies without a full quiz instance."""
+        from canvigator_quiz import CanvigatorQuiz
+        return CanvigatorQuiz._extractStudentReplies(None, messages, instructor_id, sent_at, cutoff)
+
+    def _make_times(self):
+        """Return (sent_at, cutoff) spanning a 5-day window for testing."""
+        from datetime import datetime, timedelta, timezone
+        sent = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+        cutoff = sent + timedelta(days=5)
+        return sent, cutoff
+
+    def test_filters_instructor_messages(self):
+        """Messages from the instructor are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 999, 'body': 'instructor msg', 'created_at': '2026-04-11T10:00:00Z'},
+            {'id': 2, 'author_id': 42, 'body': 'student reply', 'created_at': '2026-04-11T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 1
+        assert result[0]['author_id'] == 42
+
+    def test_filters_messages_before_sent_at(self):
+        """Messages created before the follow-up was sent are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'old msg', 'created_at': '2026-04-09T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 0
+
+    def test_filters_messages_after_cutoff(self):
+        """Messages created after the reply window closes are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'late msg', 'created_at': '2026-04-20T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 0
+
+    def test_includes_messages_within_window(self):
+        """Messages within the reply window from a student are included."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'reply 1', 'created_at': '2026-04-12T10:00:00Z'},
+            {'id': 2, 'author_id': 42, 'body': 'reply 2', 'created_at': '2026-04-13T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 2
+
+    def test_skips_generated_messages(self):
+        """System-generated messages are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'auto', 'created_at': '2026-04-11T10:00:00Z', 'generated': True},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 0
+
+    def test_preserves_newest_first_order(self):
+        """Canvas returns messages newest-first; this order is preserved."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 2, 'author_id': 42, 'body': 'newer', 'created_at': '2026-04-13T10:00:00Z'},
+            {'id': 1, 'author_id': 42, 'body': 'older', 'created_at': '2026-04-11T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert result[0]['id'] == 2
+        assert result[1]['id'] == 1

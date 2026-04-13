@@ -788,6 +788,238 @@ class CanvigatorQuiz:
         print(f"  Manifest saved: {csv_name.name}")
         logger.info(f"Follow-up manifest saved: {csv_name}")
 
+    def getFollowUpReplies(self, reply_window_days=5):
+        """Retrieve student replies to follow-up questions from Canvas conversations.
+
+        Loads the followup_sent manifest CSV to know which conversations to look
+        for, then uses the Canvas conversations API to find matching threads and
+        extract student replies (text, audio, image attachments). Downloads media
+        to a replies/ subdirectory. Outputs a followup_replies CSV.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        manifest = self._loadFollowUpManifest()
+        subject_str = manifest['conversation_subject'].iloc[0]
+        question_id = int(manifest['question_id'].iloc[0])
+        question_mode = manifest['question_mode'].iloc[0]
+
+        # Parse the sent_at timestamp to compute the reply window cutoff
+        sent_at_str = manifest['sent_at'].iloc[0]
+        sent_at = datetime.fromisoformat(sent_at_str.replace('Z', '+00:00'))
+        cutoff = sent_at + timedelta(days=reply_window_days)
+        now = datetime.now(timezone.utc)
+
+        print(f"\nLooking for replies to: {subject_str}")
+        print(f"  Reply window: {reply_window_days} days (cutoff: {cutoff.strftime('%Y-%m-%d %H:%M UTC')})")
+        if now < cutoff:
+            remaining = cutoff - now
+            print(f"  Window still open — {remaining.days}d {remaining.seconds // 3600}h remaining")
+
+        # Build a set of student IDs we expect replies from
+        expected_students = set(manifest['student_id'].astype(int))
+        student_names = dict(zip(manifest['student_id'].astype(int), manifest['student_name']))
+
+        # Get the instructor's user ID to filter out instructor messages
+        instructor_id = self.canvas.get_current_user().id
+
+        # Search sent conversations for threads matching our subject
+        print("\n  Scanning sent conversations...")
+        matching_convos = self._findConversationsBySubject(subject_str)
+        print(f"  Found {len(matching_convos)} matching conversation(s)")
+
+        # Ensure the replies directory exists
+        replies_dir = self.config.data_path / "replies"
+        replies_dir.mkdir(exist_ok=True)
+
+        # Extract replies from each matching conversation
+        all_replies = []
+        n_with_reply = 0
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+
+        for convo_summary in matching_convos:
+            # Get full conversation with messages (don't mark as read)
+            convo = self.canvas.get_conversation(convo_summary.id, auto_mark_as_read=False)
+            messages = getattr(convo, 'messages', [])
+            audience = set(getattr(convo, 'audience', []))
+
+            # Determine which student this conversation belongs to
+            student_ids_in_convo = audience & expected_students
+            if not student_ids_in_convo:
+                continue
+            student_id = next(iter(student_ids_in_convo))
+            student_name = student_names.get(student_id, f"Unknown ({student_id})")
+
+            # Collect student replies (messages not from the instructor)
+            student_replies = self._extractStudentReplies(
+                messages, instructor_id, sent_at, cutoff
+            )
+
+            if student_replies:
+                n_with_reply += 1
+
+            for i, msg in enumerate(student_replies):
+                is_latest = (i == 0)  # messages are newest-first from Canvas
+                attachment_path, audio_path = self._downloadReplyMedia(
+                    msg, student_id, question_id, file_prefix, replies_dir
+                )
+                replied_at = msg.get('created_at', '')
+
+                all_replies.append({
+                    'student_id': student_id,
+                    'student_name': student_name,
+                    'question_id': question_id,
+                    'question_mode': question_mode,
+                    'message_id': msg.get('id', ''),
+                    'reply_text': msg.get('body', ''),
+                    'has_attachment': bool(attachment_path),
+                    'attachment_path': attachment_path or '',
+                    'has_audio': bool(audio_path),
+                    'audio_path': audio_path or '',
+                    'replied_at': replied_at,
+                    'latest': is_latest,
+                })
+
+        # Save the replies CSV
+        replies_df = pd.DataFrame(all_replies)
+        csv_name = self.config.data_path / f"{file_prefix}followup_replies_{today_str()}.csv"
+        replies_df.to_csv(csv_name, index=False)
+
+        # Print summary
+        n_expected = len(expected_students)
+        print(f"\n  Students who received follow-up: {n_expected}")
+        print(f"  Students who replied: {n_with_reply}")
+        print(f"  Students with no reply: {n_expected - n_with_reply}")
+        print(f"  Total reply messages: {len(all_replies)}")
+        n_attachments = sum(1 for r in all_replies if r['has_attachment'])
+        n_audio = sum(1 for r in all_replies if r['has_audio'])
+        if n_attachments:
+            print(f"  Image attachments downloaded: {n_attachments}")
+        if n_audio:
+            print(f"  Audio recordings downloaded: {n_audio}")
+        print(f"  Replies saved: {csv_name.name}")
+        logger.info(f"Follow-up replies saved: {csv_name}")
+
+    def _loadFollowUpManifest(self):
+        """Load the latest *_followup_sent_*.csv manifest (non-dryrun only).
+
+        Raises FileNotFoundError if no manifest exists for the quiz.
+        """
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        manifest_pattern = file_prefix + "followup_sent_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            # Skip dryrun manifests
+            if '_dryrun_' in f:
+                continue
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and manifest_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_followup_sent_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'send-follow-up-question' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using follow-up manifest: {latest_file.name}")
+
+        df = pd.read_csv(latest_file)
+        required_cols = {'student_id', 'student_name', 'question_id', 'question_mode', 'conversation_subject', 'sent_at'}
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise RuntimeError(f"Manifest {latest_file.name} is missing columns: {missing}")
+        return df
+
+    def _findConversationsBySubject(self, subject_str):
+        """Return a list of Conversation objects from sent conversations matching the given subject."""
+        matching = []
+        for convo in self.canvas.get_conversations(scope='sent'):
+            if getattr(convo, 'subject', '') == subject_str:
+                matching.append(convo)
+        return matching
+
+    def _extractStudentReplies(self, messages, instructor_id, sent_at, cutoff):
+        """Filter conversation messages to only student replies within the reply window.
+
+        Returns a list of message dicts, newest first (Canvas's default order).
+        Messages from the instructor or outside the window are excluded.
+        """
+        from datetime import datetime
+
+        replies = []
+        for msg in messages:
+            # Skip instructor's own messages
+            if msg.get('author_id') == instructor_id:
+                continue
+            # Skip system-generated messages
+            if msg.get('generated', False):
+                continue
+            # Check reply window
+            created_str = msg.get('created_at', '')
+            if created_str:
+                try:
+                    created = datetime.fromisoformat(created_str.replace('Z', '+00:00'))
+                    if created < sent_at or created > cutoff:
+                        logger.info(f"Skipping message {msg.get('id')} — outside reply window "
+                                    f"(created: {created_str}, window: {sent_at} to {cutoff})")
+                        continue
+                except (ValueError, TypeError):
+                    pass  # If we can't parse the timestamp, include the message
+            replies.append(msg)
+        return replies
+
+    def _downloadReplyMedia(self, msg, student_id, question_id, file_prefix, replies_dir):
+        """Download any attachment or audio from a reply message.
+
+        Returns (attachment_path, audio_path) — each is a string path relative
+        to the data directory, or None if no media of that type.
+        """
+        attachment_path = None
+        audio_path = None
+
+        # Download image/file attachments
+        attachments = msg.get('attachments', [])
+        if attachments:
+            att = attachments[0]  # Take the first attachment
+            att_url = att.get('url', '')
+            filename = att.get('filename', '') or att.get('display_name', 'attachment')
+            ext = os.path.splitext(filename)[1] or '.bin'
+            local_name = f"{file_prefix}{student_id}_{question_id}{ext}"
+            local_path = replies_dir / local_name
+            try:
+                resp = requests.get(att_url, timeout=30)
+                resp.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    f.write(resp.content)
+                attachment_path = str(local_path.relative_to(self.config.data_path.parent))
+                logger.info(f"Downloaded attachment for student {student_id}: {local_name}")
+            except Exception as e:
+                logger.warning(f"Failed to download attachment for student {student_id}: {e}")
+
+        # Download audio/video media comment
+        media_comment = msg.get('media_comment')
+        if media_comment:
+            media_url = media_comment.get('url', '')
+            media_type = media_comment.get('media_type', 'audio')
+            ext = '.m4a' if media_type == 'audio' else '.mp4'
+            local_name = f"{file_prefix}{student_id}_{question_id}{ext}"
+            local_path = replies_dir / local_name
+            try:
+                resp = requests.get(media_url, timeout=60)
+                resp.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    f.write(resp.content)
+                audio_path = str(local_path.relative_to(self.config.data_path.parent))
+                logger.info(f"Downloaded media for student {student_id}: {local_name}")
+            except Exception as e:
+                logger.warning(f"Failed to download media for student {student_id}: {e}")
+
+        return attachment_path, audio_path
+
     SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def _spin(self, frame, message, indent=2):
