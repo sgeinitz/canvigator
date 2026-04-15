@@ -860,3 +860,280 @@ class TestBuildOpenEndedPrompt:
         from canvigator_llm import _build_open_ended_prompt
         result = _build_open_ended_prompt("", "", None, "explain")
         assert "Oral explanation question" in result
+
+
+# ---------------------------------------------------------------------------
+# canvigator_quiz: follow-up question helper tests
+# ---------------------------------------------------------------------------
+
+def _make_subs_by_question_df(rows):
+    """Build a DataFrame matching the all_subs_by_question schema."""
+    return pd.DataFrame(rows, columns=['name', 'id', 'attempt', 'question', 'question_id', 'points', 'points_possible', 'correct'])
+
+
+def _make_quiz_stub():
+    """Create a minimal mock object with the methods _findMostMissedQuestion and _findStudentsWhoMissed."""
+    from canvigator_quiz import CanvigatorQuiz
+    # We only need the unbound methods — call them with an explicit self=None
+    # since they don't use self at all (only their arguments).
+    return CanvigatorQuiz
+
+
+class TestFindMostMissedQuestion:
+    """Tests for CanvigatorQuiz._findMostMissedQuestion."""
+
+    def _call(self, subs_rows, question_info):
+        """Helper to call _findMostMissedQuestion without a full quiz instance."""
+        cls = _make_quiz_stub()
+        df = _make_subs_by_question_df(subs_rows)
+        return cls._findMostMissedQuestion(None, df, question_info)
+
+    def test_returns_most_missed(self):
+        """Question with higher miss rate is returned."""
+        question_info = {
+            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
+            200: {'position': 2, 'keywords': 'topic b', 'points_possible': 1.0},
+        }
+        rows = [
+            ('A', 1, 1, 1, 100, 1.0, 1.0, True),   # student 1 got Q100 right
+            ('A', 1, 1, 2, 200, 0.0, 1.0, False),   # student 1 missed Q200
+            ('B', 2, 1, 1, 100, 0.0, 1.0, False),   # student 2 missed Q100
+            ('B', 2, 1, 2, 200, 0.0, 1.0, False),   # student 2 missed Q200
+        ]
+        result = self._call(rows, question_info)
+        assert result == 200  # both students missed Q200, only one missed Q100
+
+    def test_returns_none_when_all_perfect(self):
+        """Returns None when no questions are missed."""
+        question_info = {
+            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
+        }
+        rows = [
+            ('A', 1, 1, 1, 100, 1.0, 1.0, True),
+            ('B', 2, 1, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(rows, question_info)
+        assert result is None
+
+    def test_uses_latest_attempt(self):
+        """Only the latest attempt per student counts toward miss rate."""
+        question_info = {
+            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
+        }
+        rows = [
+            # Student 1: missed on attempt 1, got it right on attempt 2
+            ('A', 1, 1, 1, 100, 0.0, 1.0, False),
+            ('A', 1, 2, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(rows, question_info)
+        assert result is None  # latest attempt is perfect
+
+
+class TestFindStudentsWhoMissed:
+    """Tests for CanvigatorQuiz._findStudentsWhoMissed."""
+
+    def _call(self, question_id, subs_rows, question_info):
+        """Helper to call _findStudentsWhoMissed without a full quiz instance."""
+        cls = _make_quiz_stub()
+        df = _make_subs_by_question_df(subs_rows)
+        return cls._findStudentsWhoMissed(None, question_id, df, question_info)
+
+    def test_returns_students_who_missed(self):
+        """Only students who scored below points_possible are returned."""
+        question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
+        rows = [
+            ('A', 1, 1, 1, 100, 0.0, 1.0, False),
+            ('B', 2, 1, 1, 100, 1.0, 1.0, True),
+            ('C', 3, 1, 1, 100, 0.5, 1.0, False),
+        ]
+        result = self._call(100, rows, question_info)
+        assert sorted(result) == [1, 3]
+
+    def test_uses_latest_attempt(self):
+        """Student who fixed the question on a later attempt is excluded."""
+        question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
+        rows = [
+            ('A', 1, 1, 1, 100, 0.0, 1.0, False),
+            ('A', 1, 2, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(100, rows, question_info)
+        assert result == []
+
+    def test_empty_when_no_misses(self):
+        """Returns empty list when all students scored perfectly."""
+        question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
+        rows = [
+            ('A', 1, 1, 1, 100, 1.0, 1.0, True),
+        ]
+        result = self._call(100, rows, question_info)
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# canvigator_quiz: reply extraction tests
+# ---------------------------------------------------------------------------
+
+class TestExtractStudentReplies:
+    """Tests for CanvigatorQuiz._extractStudentReplies."""
+
+    def _call(self, messages, instructor_id, sent_at, cutoff):
+        """Helper to call _extractStudentReplies without a full quiz instance."""
+        from canvigator_quiz import CanvigatorQuiz
+        return CanvigatorQuiz._extractStudentReplies(None, messages, instructor_id, sent_at, cutoff)
+
+    def _make_times(self):
+        """Return (sent_at, cutoff) spanning a 5-day window for testing."""
+        from datetime import datetime, timedelta, timezone
+        sent = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+        cutoff = sent + timedelta(days=5)
+        return sent, cutoff
+
+    def test_filters_instructor_messages(self):
+        """Messages from the instructor are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 999, 'body': 'instructor msg', 'created_at': '2026-04-11T10:00:00Z'},
+            {'id': 2, 'author_id': 42, 'body': 'student reply', 'created_at': '2026-04-11T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 1
+        assert result[0]['author_id'] == 42
+
+    def test_filters_messages_before_sent_at(self):
+        """Messages created before the follow-up was sent are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'old msg', 'created_at': '2026-04-09T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 0
+
+    def test_filters_messages_after_cutoff(self):
+        """Messages created after the reply window closes are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'late msg', 'created_at': '2026-04-20T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 0
+
+    def test_includes_messages_within_window(self):
+        """Messages within the reply window from a student are included."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'reply 1', 'created_at': '2026-04-12T10:00:00Z'},
+            {'id': 2, 'author_id': 42, 'body': 'reply 2', 'created_at': '2026-04-13T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 2
+
+    def test_skips_generated_messages(self):
+        """System-generated messages are excluded."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 1, 'author_id': 42, 'body': 'auto', 'created_at': '2026-04-11T10:00:00Z', 'generated': True},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert len(result) == 0
+
+    def test_preserves_newest_first_order(self):
+        """Canvas returns messages newest-first; this order is preserved."""
+        sent, cutoff = self._make_times()
+        messages = [
+            {'id': 2, 'author_id': 42, 'body': 'newer', 'created_at': '2026-04-13T10:00:00Z'},
+            {'id': 1, 'author_id': 42, 'body': 'older', 'created_at': '2026-04-11T10:00:00Z'},
+        ]
+        result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
+        assert result[0]['id'] == 2
+        assert result[1]['id'] == 1
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm: assessment helper tests
+# ---------------------------------------------------------------------------
+
+class TestParseAssessment:
+    """Tests for canvigator_llm._parse_assessment."""
+
+    def test_parses_pass(self):
+        """Correctly parses a pass result with feedback."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: pass\nFeedback: Good explanation of the concept.")
+        assert result == 'pass'
+        assert feedback == 'Good explanation of the concept.'
+
+    def test_parses_fail(self):
+        """Correctly parses a fail result with feedback."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: fail\nFeedback: The student did not address the question.")
+        assert result == 'fail'
+        assert feedback == 'The student did not address the question.'
+
+    def test_defaults_to_fail_on_empty(self):
+        """Returns fail with default feedback on empty input."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("")
+        assert result == 'fail'
+
+    def test_defaults_to_fail_on_none(self):
+        """Returns fail with default feedback on None input."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment(None)
+        assert result == 'fail'
+
+    def test_case_insensitive_result(self):
+        """Result parsing is case-insensitive."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: Pass\nFeedback: OK.")
+        assert result == 'pass'
+
+    def test_unknown_result_defaults_to_fail(self):
+        """Unknown result value defaults to fail."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: maybe\nFeedback: Unclear.")
+        assert result == 'fail'
+
+    def test_fallback_uses_whole_response_as_feedback(self):
+        """If no Feedback: line, the whole response becomes feedback."""
+        from canvigator_llm import _parse_assessment
+        result, feedback = _parse_assessment("Result: pass\nThe student did well.")
+        assert result == 'pass'
+        assert 'The student did well' in feedback
+
+
+class TestBuildAssessmentPrompt:
+    """Tests for canvigator_llm._build_assessment_prompt."""
+
+    def test_includes_all_fields(self):
+        """All provided fields appear in the prompt."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="neural networks",
+            open_ended_question="Explain backprop.",
+            original_question_text="What is backprop?",
+            transcript="It's a way to compute gradients.",
+        )
+        assert "neural networks" in result
+        assert "Explain backprop." in result
+        assert "What is backprop?" in result
+        assert "It's a way to compute gradients." in result
+
+    def test_omits_empty_fields(self):
+        """Empty or None fields are omitted cleanly."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(keywords="", open_ended_question="Q?", original_question_text="", transcript=None)
+        assert "Topic keywords" not in result
+        assert "Original quiz question" not in result
+        assert "transcript" not in result.lower()
+        assert "Q?" in result
+
+    def test_works_for_draw_mode(self):
+        """Prompt without transcript is suitable for draw assessments."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="binary trees",
+            open_ended_question="Draw a binary search tree.",
+            original_question_text="What is a BST?",
+        )
+        assert "binary trees" in result
+        assert "transcript" not in result.lower()

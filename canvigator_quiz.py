@@ -536,35 +536,30 @@ class CanvigatorQuiz:
             message_str = f"Hello {first_name}, {reminder}"
             messages.append((student_id, student_name, message_str, reason))
 
-        self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible, dry_run)
+        if dry_run:
+            self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible)
+        else:
+            self._interactiveSend(messages, subject_str, quiz_name, points_possible)
 
-    def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible, dry_run):
-        """Send or preview the collected reminder messages and print a summary."""
+    def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible):
+        """Preview the collected messages in dry-run mode and print a summary."""
         if not messages:
             print("No reminders to send — all students have perfect scores with no page blur events!")
             return
 
-        if dry_run:
-            print("\n=== DRY RUN MODE - No messages will be sent on Canvas ===\n")
+        print("\n=== DRY RUN MODE - No messages will be sent on Canvas ===\n")
 
         print(f"Quiz: {quiz_name} ({points_possible} points possible)")
         print(f"Reminders to send: {len(messages)}\n")
 
         for student_id, student_name, message_str, reason in messages:
-            if dry_run:
-                print(f"  [DRY RUN] To: {student_name} (id: {student_id}, {reason})")
-                print(f"            Subject: {subject_str}")
-                print(f"            Message: {message_str}\n")
-            else:
-                self.canvas.create_conversation(
-                    [str(student_id)], message_str, subject=subject_str, force_new=True
-                )
-                print(f"  Sent to: {student_name} (id: {student_id}, {reason})")
+            print(f"  [DRY RUN] To: {student_name} (id: {student_id}, {reason})")
+            print(f"            Subject: {subject_str}")
+            print(f"            Message: {message_str}\n")
 
         n_no_attempt = sum(1 for _, _, _, r in messages if r == "no attempt")
         n_blur = sum(1 for _, _, _, r in messages if r == "page blur")
         n_imperfect = len(messages) - n_no_attempt - n_blur
-        action = "would be sent" if dry_run else "sent"
         summary_parts = []
         if n_no_attempt:
             summary_parts.append(f"{n_no_attempt} no-attempt")
@@ -572,8 +567,569 @@ class CanvigatorQuiz:
             summary_parts.append(f"{n_imperfect} imperfect-score")
         if n_blur:
             summary_parts.append(f"{n_blur} page-blur")
-        print(f"\n{len(messages)} reminder(s) {action} ({', '.join(summary_parts)}).")
-        logger.info(f"Quiz reminders {'(dry run) ' if dry_run else ''}{action}: {len(messages)} for {quiz_name}")
+        print(f"\n{len(messages)} reminder(s) would be sent ({', '.join(summary_parts)}).")
+        logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)} for {quiz_name}")
+
+    def sendFollowUpQuestions(self, dry_run=False):
+        """Send the most-missed open-ended follow-up question to students who missed it.
+
+        Requires that get-quiz-questions --tag and generate-open-ended-questions
+        have both been run for this quiz. Auto-refreshes submission data to pick
+        up recent attempts.
+        """
+        quiz_name = self.canvas_quiz.title
+
+        # Load question metadata (from *_questions_w_tags_*.csv)
+        question_info = self._loadQuestionInfo()
+
+        # Load the open-ended questions CSV
+        open_ended_rows = self._loadOpenEndedQuestions()
+
+        # Refresh submission data for up-to-date per-question scores
+        print("\nFetching latest submissions for follow-up question targeting...")
+        self.getAllSubmissionsAndEvents()
+        subs_by_q_df = self.all_subs_by_question
+
+        if subs_by_q_df is None or subs_by_q_df.empty:
+            print("No submission data available — cannot determine missed questions.")
+            return
+
+        # Find the most-missed question
+        most_missed_qid = self._findMostMissedQuestion(subs_by_q_df, question_info)
+        if most_missed_qid is None:
+            print("All students scored perfectly on all questions — no follow-up needed!")
+            return
+
+        info = question_info[most_missed_qid]
+        position = info['position']
+        keywords = info['keywords']
+
+        # Look up the open-ended question for this question_id
+        oe_row = open_ended_rows.get(most_missed_qid)
+        if oe_row is None:
+            print(f"No open-ended question found for question_id {most_missed_qid} (Q{position}: {keywords}).")
+            print("Re-run 'generate-open-ended-questions' to regenerate.")
+            return
+
+        question_mode = oe_row.get('question_mode', 'explain')
+        open_ended_text = oe_row['open_ended_question']
+
+        print(f"\nMost-missed question: Q{position} — {keywords}")
+        print(f"  Mode: {question_mode}")
+        print(f"  Follow-up: {open_ended_text[:120]}{'...' if len(open_ended_text) > 120 else ''}")
+
+        # Build the list of students who missed this question on their latest attempt
+        students_who_missed = self._findStudentsWhoMissed(most_missed_qid, subs_by_q_df, question_info)
+
+        if not students_who_missed:
+            print("No students missed this question on their latest attempt — no follow-up needed!")
+            return
+
+        # Compose messages
+        if question_mode == 'draw':
+            instructions = (
+                "Please draw your answer on paper (or a tablet) and reply to this "
+                "message with a photo of your drawing attached using the attachment "
+                "button (the paperclip icon)."
+            )
+        else:
+            instructions = (
+                "Please reply to this message with a voice recording explaining "
+                "your answer. You can use the microphone button in the Canvas "
+                "message editor to record your response."
+            )
+
+        subject_str = f"Follow-Up Question - {quiz_name} - Q{position}"
+        enrolled = self.canvas_course.students
+        enrolled_map = {s['id']: s['name'] for s in enrolled}
+
+        messages = []
+        for student_id in students_who_missed:
+            student_name = enrolled_map.get(student_id)
+            if student_name is None:
+                continue
+            first_name = student_name.split()[0]
+            message_str = (
+                f"Hello {first_name}, based on your recent attempt on {quiz_name}, "
+                f"here is a follow-up question to help reinforce your understanding "
+                f"of the topic ({keywords}):\n\n"
+                f"{open_ended_text}\n\n"
+                f"{instructions}\n\n"
+                f"You can reply as many times as you'd like — only your most recent "
+                f"response will be assessed.\n\n"
+                f"NOTE: This is an auto-generated message, please let me know if you "
+                f"have any questions/concerns/suggestions about it."
+            )
+            messages.append((student_id, student_name, message_str, f"missed Q{position}"))
+
+        if dry_run:
+            self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
+            self._saveFollowUpManifest(messages, most_missed_qid, question_mode, subject_str, dry_run)
+        else:
+            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
+            if sent_messages:
+                self._saveFollowUpManifest(sent_messages, most_missed_qid, question_mode, subject_str, dry_run)
+
+    def _interactiveSend(self, messages, subject_str, quiz_name, points_possible):
+        """Interactively prompt the instructor to send or skip each message.
+
+        For each student, displays the message preview and asks the instructor
+        to type 'send' or 'skip' (default: skip). Returns the list of messages
+        that were actually sent.
+        """
+        if not messages:
+            print("No messages to send!")
+            return []
+
+        print(f"\nQuiz: {quiz_name} ({points_possible} points possible)")
+        print(f"Messages to review: {len(messages)}")
+        print("For each student, enter 'send' to send or press Enter to skip.\n")
+
+        sent_messages = []
+        for i, (student_id, student_name, message_str, reason) in enumerate(messages, 1):
+            print(f"--- Student {i}/{len(messages)} ---")
+            print(f"  To: {student_name} (id: {student_id}, {reason})")
+            print(f"  Subject: {subject_str}")
+            print(f"  Message: {message_str}\n")
+
+            choice = input(f"  Send to {student_name}? [send/SKIP]: ").strip().lower()
+            if choice == 'send':
+                self.canvas.create_conversation(
+                    [str(student_id)], message_str, subject=subject_str, force_new=True
+                )
+                print("  -> Sent!\n")
+                sent_messages.append((student_id, student_name, message_str, reason))
+            else:
+                print("  -> Skipped.\n")
+
+        n_sent = len(sent_messages)
+        n_skipped = len(messages) - n_sent
+        print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
+        logger.info(f"Interactive send for {quiz_name}: {n_sent} sent, {n_skipped} skipped")
+        return sent_messages
+
+    def _findMostMissedQuestion(self, subs_by_q_df, question_info):
+        """Return the question_id with the highest miss rate, or None if all are perfect.
+
+        Miss rate = fraction of students whose latest attempt scored below
+        points_possible for that question.
+        """
+        # Use only the latest attempt per student (each student has multiple rows — one per question)
+        max_attempt_per_student = subs_by_q_df.groupby('id')['attempt'].transform('max')
+        latest_attempts = subs_by_q_df[subs_by_q_df['attempt'] == max_attempt_per_student]
+
+        miss_rates = {}
+        for qid, info in question_info.items():
+            pp = info.get('points_possible')
+            if pp is None:
+                continue
+            q_rows = latest_attempts[latest_attempts['question_id'] == qid]
+            if q_rows.empty:
+                continue
+            n_total = len(q_rows)
+            n_missed = sum(1 for _, row in q_rows.iterrows()
+                           if pd.notna(row.get('points')) and float(row['points']) < float(pp))
+            miss_rates[qid] = n_missed / n_total if n_total > 0 else 0.0
+
+        if not miss_rates or max(miss_rates.values()) == 0:
+            return None
+
+        # Report top-5 miss rates for instructor visibility
+        sorted_rates = sorted(miss_rates.items(), key=lambda t: t[1], reverse=True)
+        print("\nQuestion miss rates (latest attempt):")
+        for qid, rate in sorted_rates[:5]:
+            info = question_info.get(qid, {})
+            label = f"Q{info.get('position', '?')} ({info.get('keywords', '')})"
+            print(f"  {label}: {rate:.0%}")
+
+        return sorted_rates[0][0]
+
+    def _findStudentsWhoMissed(self, question_id, subs_by_q_df, question_info):
+        """Return a list of student IDs who scored below points_possible on the given question in their latest attempt."""
+        pp = question_info.get(question_id, {}).get('points_possible')
+        if pp is None:
+            return []
+
+        max_attempt_per_student = subs_by_q_df.groupby('id')['attempt'].transform('max')
+        latest_attempts = subs_by_q_df[subs_by_q_df['attempt'] == max_attempt_per_student]
+        q_rows = latest_attempts[latest_attempts['question_id'] == question_id]
+
+        missed_ids = []
+        for _, row in q_rows.iterrows():
+            points = row.get('points')
+            if points is not None and pd.notna(points) and float(points) < float(pp):
+                missed_ids.append(row['id'])
+        return missed_ids
+
+    def _loadOpenEndedQuestions(self):
+        """Load the latest *_open_ended_*.csv and return a dict keyed by question_id.
+
+        Raises FileNotFoundError if no open-ended CSV exists for the quiz.
+        """
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        oe_pattern = file_prefix + "open_ended_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and oe_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_open_ended_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'python canvigator.py generate-open-ended-questions' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using open-ended questions from: {latest_file.name}")
+
+        df = pd.read_csv(latest_file)
+        if 'open_ended_question' not in df.columns:
+            raise RuntimeError(
+                f"The file {latest_file.name} has no 'open_ended_question' column. "
+                f"Re-run 'generate-open-ended-questions'."
+            )
+
+        rows_by_qid = {}
+        for _, row in df.iterrows():
+            qid = row.get('question_id')
+            if pd.notna(qid):
+                rows_by_qid[int(qid)] = row.to_dict()
+        return rows_by_qid
+
+    def _saveFollowUpManifest(self, messages, question_id, question_mode, subject_str, dry_run):
+        """Save a CSV manifest of follow-up messages sent (or previewed in dry-run)."""
+        from datetime import datetime
+        sent_at = datetime.utcnow().isoformat() + 'Z'
+        manifest_rows = []
+        for student_id, student_name, _, reason in messages:
+            manifest_rows.append({
+                'student_id': student_id,
+                'student_name': student_name,
+                'question_id': question_id,
+                'question_mode': question_mode,
+                'conversation_subject': subject_str,
+                'sent_at': sent_at,
+            })
+
+        manifest_df = pd.DataFrame(manifest_rows)
+        suffix = "_dryrun" if dry_run else ""
+        csv_name = self.config.data_path / (
+            f"{self.config.quiz_prefix}{self.canvas_quiz.id}_followup_sent{suffix}_{today_str()}.csv"
+        )
+        manifest_df.to_csv(csv_name, index=False)
+        print(f"  Manifest saved: {csv_name.name}")
+        logger.info(f"Follow-up manifest saved: {csv_name}")
+
+    def getFollowUpReplies(self, reply_window_days=5):
+        """Retrieve student replies to follow-up questions from Canvas conversations.
+
+        Loads the followup_sent manifest CSV to know which conversations to look
+        for, then uses the Canvas conversations API to find matching threads and
+        extract student replies (text, audio, image attachments). Downloads media
+        to a replies/ subdirectory. Outputs a followup_replies CSV.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        manifest = self._loadFollowUpManifest()
+        subject_str = manifest['conversation_subject'].iloc[0]
+        question_id = int(manifest['question_id'].iloc[0])
+        question_mode = manifest['question_mode'].iloc[0]
+
+        # Parse the sent_at timestamp to compute the reply window cutoff
+        sent_at_str = manifest['sent_at'].iloc[0]
+        sent_at = datetime.fromisoformat(sent_at_str.replace('Z', '+00:00'))
+        cutoff = sent_at + timedelta(days=reply_window_days)
+        now = datetime.now(timezone.utc)
+
+        print(f"\nLooking for replies to: {subject_str}")
+        print(f"  Reply window: {reply_window_days} days (cutoff: {cutoff.strftime('%Y-%m-%d %H:%M UTC')})")
+        if now < cutoff:
+            remaining = cutoff - now
+            print(f"  Window still open — {remaining.days}d {remaining.seconds // 3600}h remaining")
+
+        # Build a set of student IDs we expect replies from
+        expected_students = set(manifest['student_id'].astype(int))
+        student_names = dict(zip(manifest['student_id'].astype(int), manifest['student_name']))
+
+        # Get the instructor's user ID to filter out instructor messages
+        instructor_id = self.canvas.get_current_user().id
+
+        # Search sent conversations for threads matching our subject
+        print("\n  Scanning sent conversations...")
+        matching_convos = self._findConversationsBySubject(subject_str)
+        print(f"  Found {len(matching_convos)} matching conversation(s)")
+
+        # Ensure the replies directory exists
+        replies_dir = self.config.data_path / "replies"
+        replies_dir.mkdir(exist_ok=True)
+
+        # Extract replies from each matching conversation
+        all_replies = []
+        n_with_reply = 0
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+
+        for convo_summary in matching_convos:
+            # Get full conversation with messages (don't mark as read)
+            convo = self.canvas.get_conversation(convo_summary.id, auto_mark_as_read=False)
+            messages = getattr(convo, 'messages', [])
+            audience = set(getattr(convo, 'audience', []))
+
+            # Determine which student this conversation belongs to
+            student_ids_in_convo = audience & expected_students
+            if not student_ids_in_convo:
+                continue
+            student_id = next(iter(student_ids_in_convo))
+            student_name = student_names.get(student_id, f"Unknown ({student_id})")
+
+            # Collect student replies (messages not from the instructor)
+            student_replies = self._extractStudentReplies(
+                messages, instructor_id, sent_at, cutoff
+            )
+
+            if student_replies:
+                n_with_reply += 1
+
+            for i, msg in enumerate(student_replies):
+                is_latest = (i == 0)  # messages are newest-first from Canvas
+                attachment_path, audio_path = self._downloadReplyMedia(
+                    msg, student_id, question_id, file_prefix, replies_dir
+                )
+                replied_at = msg.get('created_at', '')
+
+                all_replies.append({
+                    'student_id': student_id,
+                    'student_name': student_name,
+                    'question_id': question_id,
+                    'question_mode': question_mode,
+                    'message_id': msg.get('id', ''),
+                    'reply_text': msg.get('body', ''),
+                    'has_attachment': bool(attachment_path),
+                    'attachment_path': attachment_path or '',
+                    'has_audio': bool(audio_path),
+                    'audio_path': audio_path or '',
+                    'replied_at': replied_at,
+                    'latest': is_latest,
+                })
+
+        # Save the replies CSV
+        replies_df = pd.DataFrame(all_replies)
+        csv_name = self.config.data_path / f"{file_prefix}followup_replies_{today_str()}.csv"
+        replies_df.to_csv(csv_name, index=False)
+
+        # Print summary
+        n_expected = len(expected_students)
+        print(f"\n  Students who received follow-up: {n_expected}")
+        print(f"  Students who replied: {n_with_reply}")
+        print(f"  Students with no reply: {n_expected - n_with_reply}")
+        print(f"  Total reply messages: {len(all_replies)}")
+        n_attachments = sum(1 for r in all_replies if r['has_attachment'])
+        n_audio = sum(1 for r in all_replies if r['has_audio'])
+        if n_attachments:
+            print(f"  Image attachments downloaded: {n_attachments}")
+        if n_audio:
+            print(f"  Audio recordings downloaded: {n_audio}")
+        print(f"  Replies saved: {csv_name.name}")
+        logger.info(f"Follow-up replies saved: {csv_name}")
+
+    def _loadFollowUpManifest(self):
+        """Load the latest *_followup_sent_*.csv manifest (non-dryrun only).
+
+        Raises FileNotFoundError if no manifest exists for the quiz.
+        """
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        manifest_pattern = file_prefix + "followup_sent_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            # Skip dryrun manifests
+            if '_dryrun_' in f:
+                continue
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and manifest_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_followup_sent_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'send-follow-up-question' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using follow-up manifest: {latest_file.name}")
+
+        df = pd.read_csv(latest_file)
+        required_cols = {'student_id', 'student_name', 'question_id', 'question_mode', 'conversation_subject', 'sent_at'}
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise RuntimeError(f"Manifest {latest_file.name} is missing columns: {missing}")
+        return df
+
+    def _findConversationsBySubject(self, subject_str):
+        """Return a list of Conversation objects from sent conversations matching the given subject."""
+        matching = []
+        for convo in self.canvas.get_conversations(scope='sent'):
+            if getattr(convo, 'subject', '') == subject_str:
+                matching.append(convo)
+        return matching
+
+    def _extractStudentReplies(self, messages, instructor_id, sent_at, cutoff):
+        """Filter conversation messages to only student replies within the reply window.
+
+        Returns a list of message dicts, newest first (Canvas's default order).
+        Messages from the instructor or outside the window are excluded.
+        """
+        from datetime import datetime
+
+        replies = []
+        for msg in messages:
+            # Skip instructor's own messages
+            if msg.get('author_id') == instructor_id:
+                continue
+            # Skip system-generated messages
+            if msg.get('generated', False):
+                continue
+            # Check reply window
+            created_str = msg.get('created_at', '')
+            if created_str:
+                try:
+                    created = datetime.fromisoformat(created_str.replace('Z', '+00:00'))
+                    if created < sent_at or created > cutoff:
+                        logger.info(f"Skipping message {msg.get('id')} — outside reply window "
+                                    f"(created: {created_str}, window: {sent_at} to {cutoff})")
+                        continue
+                except (ValueError, TypeError):
+                    pass  # If we can't parse the timestamp, include the message
+            replies.append(msg)
+        return replies
+
+    def _downloadReplyMedia(self, msg, student_id, question_id, file_prefix, replies_dir):
+        """Download any attachment or audio from a reply message.
+
+        Returns (attachment_path, audio_path) — each is a string path relative
+        to the data directory, or None if no media of that type.
+        """
+        attachment_path = None
+        audio_path = None
+
+        # Download image/file attachments
+        attachments = msg.get('attachments', [])
+        if attachments:
+            att = attachments[0]  # Take the first attachment
+            att_url = att.get('url', '')
+            filename = att.get('filename', '') or att.get('display_name', 'attachment')
+            ext = os.path.splitext(filename)[1] or '.bin'
+            local_name = f"{file_prefix}{student_id}_{question_id}{ext}"
+            local_path = replies_dir / local_name
+            try:
+                resp = requests.get(att_url, timeout=30)
+                resp.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    f.write(resp.content)
+                attachment_path = str(local_path.relative_to(self.config.data_path.parent))
+                logger.info(f"Downloaded attachment for student {student_id}: {local_name}")
+            except Exception as e:
+                logger.warning(f"Failed to download attachment for student {student_id}: {e}")
+
+        # Download audio/video media comment
+        media_comment = msg.get('media_comment')
+        if media_comment:
+            media_url = media_comment.get('url', '')
+            media_type = media_comment.get('media_type', 'audio')
+            ext = '.m4a' if media_type == 'audio' else '.mp4'
+            local_name = f"{file_prefix}{student_id}_{question_id}{ext}"
+            local_path = replies_dir / local_name
+            try:
+                resp = requests.get(media_url, timeout=60)
+                resp.raise_for_status()
+                with open(local_path, 'wb') as f:
+                    f.write(resp.content)
+                audio_path = str(local_path.relative_to(self.config.data_path.parent))
+                logger.info(f"Downloaded media for student {student_id}: {local_name}")
+            except Exception as e:
+                logger.warning(f"Failed to download media for student {student_id}: {e}")
+
+        return attachment_path, audio_path
+
+    def assessFollowUpReplies(self):
+        """Assess student replies using the local LLM.
+
+        Loads the latest followup_replies CSV, filters to only the latest reply
+        per student, loads the open-ended question context, and calls the LLM
+        to produce a pass/fail assessment with feedback. Outputs a
+        followup_assessments CSV.
+        """
+        # Load replies CSV
+        replies_df = self._loadFollowUpReplies()
+        # Filter to latest reply per student only
+        latest_replies = replies_df[replies_df['latest'] == True].to_dict('records')  # noqa: E712
+
+        if not latest_replies:
+            print("No student replies to assess.")
+            return
+
+        # Load the open-ended questions to get context for assessment
+        open_ended_rows = self._loadOpenEndedQuestions()
+
+        # All replies should share the same question_id (Phase 1 sends one question)
+        question_id = int(latest_replies[0]['question_id'])
+        oe_row = open_ended_rows.get(question_id)
+        if oe_row is None:
+            print(f"No open-ended question found for question_id {question_id}.")
+            return
+
+        print(f"\nAssessing {len(latest_replies)} student replies for question_id {question_id}")
+        print(f"  Question: {oe_row.get('open_ended_question', '')[:100]}...")
+        print(f"  Mode: {latest_replies[0].get('question_mode', 'explain')}")
+
+        import canvigator_llm
+        results = canvigator_llm.assess_replies(latest_replies, oe_row)
+
+        # Save assessments CSV
+        out_df = pd.DataFrame(results, columns=[
+            'student_id', 'student_name', 'question_id', 'question_mode',
+            'result', 'feedback', 'transcript', 'assessed_at',
+        ])
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        csv_name = self.config.data_path / f"{file_prefix}followup_assessments_{today_str()}.csv"
+        out_df.to_csv(csv_name, index=False)
+
+        n_pass = sum(1 for r in results if r['result'] == 'pass')
+        n_fail = sum(1 for r in results if r['result'] == 'fail')
+        print(f"\n  Results: {n_pass} pass, {n_fail} fail")
+        print(f"  Assessments saved: {csv_name.name}")
+        logger.info(f"Follow-up assessments saved: {csv_name}")
+
+    def _loadFollowUpReplies(self):
+        """Load the latest *_followup_replies_*.csv.
+
+        Raises FileNotFoundError if no replies CSV exists for the quiz.
+        """
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        replies_pattern = file_prefix + "followup_replies_"
+
+        all_files = os.listdir(self.config.data_path)
+        matching_dates = []
+        for f in all_files:
+            m = re.search(r'(\d{8})\.csv$', f)
+            if m and replies_pattern in f:
+                matching_dates.append((m.group(1), f))
+
+        if not matching_dates:
+            raise FileNotFoundError(
+                f"No *_followup_replies_*.csv found for quiz '{self.quiz_name}'. "
+                f"Run 'get-replies' first."
+            )
+
+        matching_dates.sort(key=lambda t: t[0])
+        latest_file = self.config.data_path / matching_dates[-1][1]
+        print(f"  Using replies from: {latest_file.name}")
+        return pd.read_csv(latest_file)
 
     SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
