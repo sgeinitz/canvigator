@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:31b")
 DEFAULT_AUDIO_MODEL = os.environ.get("OLLAMA_AUDIO_MODEL", "gemma4:e4b")
+# Used for instructor-side text tasks that never see student data (tagging quiz
+# questions, generating open-ended follow-up questions). A larger cloud model
+# is the better fit here since privacy constraints don't apply.
+DEFAULT_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "gemini-3-flash-preview")
 
 _TAG_SYSTEM_PROMPT = (
     "You are a concise topic tagger for university quiz questions. "
@@ -165,7 +169,7 @@ def tag_questions(rows, model=None):
             "The 'ollama' package is required for --tag. Install with: pip install ollama"
         ) from e
 
-    model = model or DEFAULT_MODEL
+    model = model or DEFAULT_TEXT_MODEL
     client = ollama.Client()
 
     try:
@@ -543,7 +547,7 @@ def generate_open_ended_questions(rows, model=None, n=3):
             "Install with: pip install ollama"
         ) from e
 
-    model = model or DEFAULT_MODEL
+    model = model or DEFAULT_TEXT_MODEL
     client = ollama.Client()
 
     try:
