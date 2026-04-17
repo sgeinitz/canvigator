@@ -95,6 +95,23 @@ _DRAW_SYSTEM_PROMPT = (
     "No preamble, no explanation, no quotation marks."
 )
 
+_ASSESSMENT_GUIDE_SYSTEM_PROMPT = (
+    "You are an expert university instructor writing a short assessment guide for a specific "
+    "open-ended follow-up question. The guide will be used by another instructor (or an AI "
+    "grader) to decide whether a student's response demonstrates a reasonable understanding "
+    "of the concept.\n\n"
+    "Write 2–4 plain-prose sentences (no bullets, no markdown, no headings) that cover:\n"
+    "- For an \"Explain\" question: the key concepts, terms, or keywords the student should "
+    "mention; for a \"Draw\" question: the key elements, labels, or structural relationships "
+    "that should appear in the drawing.\n"
+    "- What a minimally-acceptable passing response looks like — the bar for \"pass\".\n"
+    "- Common misconceptions, wrong framings, or missing pieces that should NOT count as "
+    "passing.\n\n"
+    "Keep it tight and practical — a grader should be able to read it in under 15 seconds. "
+    "Refer to the student as \"the student\". Respond with ONLY the guide text on a single "
+    "paragraph — no preamble, no label, no numbering, no quotation marks."
+)
+
 
 def _strip_html(text):
     """Reduce Canvas HTML question text to plain text suitable for prompting."""
@@ -310,6 +327,53 @@ def generate_open_ended_candidates(row, client, model, mode, n=3):
         return []
 
 
+def _build_assessment_guide_prompt(keywords, original_question_text, answers_json, mode, open_ended_question):
+    """Build the user-side prompt for generating an assessment guide."""
+    clean_text = _strip_html(original_question_text)
+    labels = _answer_labels(answers_json)
+    parts = []
+    if keywords:
+        parts.append(f"Topic keywords: {keywords}")
+    if clean_text:
+        parts.append(f"Original quiz question: {clean_text}")
+    if labels:
+        joined = " | ".join(labels[:6])
+        parts.append(f"Answer choices from the original: {joined}")
+    parts.append(f"Question type: {'draw (hand-drawn diagram)' if mode == 'draw' else 'explain (verbal explanation)'}")
+    parts.append(f"Open-ended question the student will answer: {open_ended_question}")
+    parts.append("Assessment guide:")
+    return "\n".join(parts)
+
+
+def generate_assessment_guide(row, client, model, mode, open_ended_question):
+    """Call the LLM to produce a short assessment guide for one open-ended question."""
+    if not open_ended_question:
+        return ""
+    prompt = _build_assessment_guide_prompt(
+        row.get("keywords"),
+        row.get("question_text"),
+        row.get("answers"),
+        mode,
+        open_ended_question,
+    )
+    try:
+        resp = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": _ASSESSMENT_GUIDE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.3},
+        )
+        content = resp["message"]["content"].strip()
+        # Collapse any accidental newlines into spaces — guide should be a single paragraph.
+        content = re.sub(r"\s*\n+\s*", " ", content).strip().strip('"\'')
+        return content
+    except Exception as e:
+        logger.warning(f"LLM assessment-guide generation failed for question {row.get('question_id')}: {e}")
+        return ""
+
+
 _TRANSCRIBE_SYSTEM_PROMPT = (
     "You are a transcription assistant. Listen to the audio and produce an accurate, "
     "verbatim transcription of everything the speaker says. Output ONLY the transcription "
@@ -321,6 +385,9 @@ _ASSESS_EXPLAIN_SYSTEM_PROMPT = (
     "Given the original quiz question, the topic keywords, and the student's spoken response "
     "(provided as a transcript), determine whether the student demonstrates a reasonable "
     "understanding of the core concept.\n\n"
+    "If an \"Assessment guide\" is provided in the user message, treat it as the primary "
+    "rubric for deciding pass vs. fail — it was written by the instructor who knows what a "
+    "correct response looks like.\n\n"
     "A \"pass\" means the student demonstrates a reasonable understanding of the core concept, "
     "even if their explanation is imprecise, incomplete, or uses informal language. "
     "A \"fail\" means the student shows a fundamental misunderstanding, did not address the "
@@ -338,6 +405,9 @@ _ASSESS_DRAW_SYSTEM_PROMPT = (
     "Given the original quiz question, the topic keywords, and the student's drawing "
     "(provided as an image), determine whether the drawing demonstrates a reasonable "
     "understanding of the key concepts and relationships.\n\n"
+    "If an \"Assessment guide\" is provided in the user message, treat it as the primary "
+    "rubric for deciding pass vs. fail — it was written by the instructor who knows what a "
+    "correct drawing looks like.\n\n"
     "A \"pass\" means the drawing shows the essential structure or relationships, even if "
     "it is rough, has minor inaccuracies, or is missing non-critical labels. "
     "A \"fail\" means the drawing is fundamentally incorrect, shows the wrong structure, "
@@ -373,7 +443,7 @@ def _parse_assessment(response):
     return result, feedback
 
 
-def _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=None):
+def _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=None, assessment_guide=None):
     """Build the user-side prompt for assessing a student response."""
     parts = []
     if keywords:
@@ -382,6 +452,8 @@ def _build_assessment_prompt(keywords, open_ended_question, original_question_te
         parts.append(f"Original quiz question: {original_question_text}")
     if open_ended_question:
         parts.append(f"Follow-up question asked: {open_ended_question}")
+    if assessment_guide:
+        parts.append(f"Assessment guide (use this as your primary rubric): {assessment_guide}")
     if transcript:
         parts.append(f"Student's response (transcript): {transcript}")
     return "\n".join(parts)
@@ -404,9 +476,12 @@ def transcribe_audio(audio_path, client, model):
         return ""
 
 
-def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model):
+def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model, assessment_guide=None):
     """Assess a student's verbal explanation using the transcript."""
-    prompt = _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=transcript)
+    prompt = _build_assessment_prompt(
+        keywords, open_ended_question, original_question_text,
+        transcript=transcript, assessment_guide=assessment_guide,
+    )
     try:
         resp = client.chat(
             model=model,
@@ -422,9 +497,12 @@ def assess_explain(transcript, keywords, open_ended_question, original_question_
         return 'fail', f'Assessment error: {e}'
 
 
-def assess_draw(image_path, keywords, open_ended_question, original_question_text, client, model):
+def assess_draw(image_path, keywords, open_ended_question, original_question_text, client, model, assessment_guide=None):
     """Assess a student's drawing by sending the image to a multimodal model."""
-    prompt = _build_assessment_prompt(keywords, open_ended_question, original_question_text)
+    prompt = _build_assessment_prompt(
+        keywords, open_ended_question, original_question_text,
+        assessment_guide=assessment_guide,
+    )
     try:
         resp = client.chat(
             model=model,
@@ -471,6 +549,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     keywords = question_info_row.get('keywords', '')
     oe_question = question_info_row.get('open_ended_question', '')
     orig_text = question_info_row.get('original_question_text', '')
+    assessment_guide = question_info_row.get('assessment_guide', '') or ''
 
     total = len(replies)
     print(f"Assessing {total} student replies with model '{model}'...")
@@ -503,7 +582,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
                 })
                 continue
             print(" assessing...", end="", flush=True)
-            result, feedback = assess_explain(transcript, keywords, oe_question, orig_text, client, model)
+            result, feedback = assess_explain(
+                transcript, keywords, oe_question, orig_text, client, model,
+                assessment_guide=assessment_guide,
+            )
         else:
             # Draw mode
             image_path = reply.get('attachment_path', '')
@@ -522,7 +604,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
                 continue
             transcript = ''
             print(" assessing image...", end="", flush=True)
-            result, feedback = assess_draw(image_path, keywords, oe_question, orig_text, client, model)
+            result, feedback = assess_draw(
+                image_path, keywords, oe_question, orig_text, client, model,
+                assessment_guide=assessment_guide,
+            )
 
         from datetime import datetime, timezone
         assessed_at = datetime.now(timezone.utc).isoformat()
@@ -573,15 +658,18 @@ def generate_open_ended_questions(rows, model=None, n=3):
         mode = classify_question_mode(row, client, model)
         print(f" {mode} — generating {n} candidates...", end="", flush=True)
         candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
+        print(f" writing {len([c for c in candidates if c])} assessment guide(s)...", end="", flush=True)
+        guides = [generate_assessment_guide(row, client, model, mode, cand) for cand in candidates]
         print(" done")
 
         if not candidates:
             logger.warning(f"No candidates generated for question {row.get('question_id')}")
 
         # Always emit exactly n rows per question so every group has a predictable shape.
-        padded = (candidates + [''] * n)[:n]
+        padded_candidates = (candidates + [''] * n)[:n]
+        padded_guides = (guides + [''] * n)[:n]
         original_text = _strip_html(row.get('question_text'))
-        for cand in padded:
+        for cand, guide in zip(padded_candidates, padded_guides):
             results.append({
                 'selected_question': 0,
                 'question_id': row.get('question_id'),
@@ -590,6 +678,7 @@ def generate_open_ended_questions(rows, model=None, n=3):
                 'keywords': row.get('keywords'),
                 'question_mode': mode,
                 'open_ended_question': cand,
+                'assessment_guide': guide,
                 'original_question_text': original_text,
             })
     print("Generation complete.")

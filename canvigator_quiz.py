@@ -177,7 +177,8 @@ def generateOpenEndedQuestions(tagged_csv_path):
 
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',
-        'keywords', 'question_mode', 'open_ended_question', 'original_question_text',
+        'keywords', 'question_mode', 'open_ended_question', 'assessment_guide',
+        'original_question_text',
     ])
     csv_name = tagged_csv_path.parent / f"{prefix}open_ended_{today_str()}.csv"
     out_df.to_csv(csv_name, index=False)

@@ -1211,3 +1211,76 @@ class TestBuildAssessmentPrompt:
         )
         assert "binary trees" in result
         assert "transcript" not in result.lower()
+
+    def test_includes_assessment_guide(self):
+        """Assessment guide, when provided, appears labeled as the primary rubric."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="binary search",
+            open_ended_question="Explain the time complexity.",
+            original_question_text="What is O(log n)?",
+            transcript="Binary search halves the search space each step.",
+            assessment_guide="Student should mention halving, log n, and sorted input.",
+        )
+        assert "Assessment guide" in result
+        assert "primary rubric" in result
+        assert "halving, log n, and sorted input" in result
+
+    def test_omits_empty_assessment_guide(self):
+        """Empty/None assessment_guide doesn't add a stray label."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="k",
+            open_ended_question="Q",
+            original_question_text="O",
+            transcript="t",
+            assessment_guide="",
+        )
+        assert "Assessment guide" not in result
+
+
+class TestBuildAssessmentGuidePrompt:
+    """Tests for canvigator_llm._build_assessment_guide_prompt."""
+
+    def test_includes_all_fields_explain(self):
+        """Keywords, original question, mode, and open-ended question all appear."""
+        from canvigator_llm import _build_assessment_guide_prompt
+        result = _build_assessment_guide_prompt(
+            keywords="recursion, base case",
+            original_question_text="<p>What is a base case?</p>",
+            answers_json=None,
+            mode="explain",
+            open_ended_question="Explain why every recursive function needs a base case.",
+        )
+        assert "recursion, base case" in result
+        assert "What is a base case?" in result  # HTML stripped
+        assert "explain" in result
+        assert "Explain why every recursive function needs a base case." in result
+        assert "Assessment guide:" in result
+
+    def test_draw_mode_label(self):
+        """Draw mode is labeled in the prompt."""
+        from canvigator_llm import _build_assessment_guide_prompt
+        result = _build_assessment_guide_prompt(
+            keywords="linked list",
+            original_question_text="What is a linked list?",
+            answers_json=None,
+            mode="draw",
+            open_ended_question="Draw a diagram of a singly-linked list with 3 nodes.",
+        )
+        assert "draw" in result
+        assert "Draw a diagram of a singly-linked list with 3 nodes." in result
+
+    def test_includes_answer_choices(self):
+        """Answer labels from the original question appear in the prompt."""
+        import json
+        from canvigator_llm import _build_assessment_guide_prompt
+        answers = json.dumps([{"text": "O(1)"}, {"text": "O(log n)"}, {"text": "O(n)"}])
+        result = _build_assessment_guide_prompt(
+            keywords="big-o",
+            original_question_text="What is the complexity?",
+            answers_json=answers,
+            mode="explain",
+            open_ended_question="Explain the complexity.",
+        )
+        assert "O(log n)" in result
