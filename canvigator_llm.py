@@ -14,6 +14,28 @@ DEFAULT_AUDIO_MODEL = os.environ.get("OLLAMA_AUDIO_MODEL", "gemma4:e4b")
 # is the better fit here since privacy constraints don't apply.
 DEFAULT_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "gemini-3-flash-preview")
 
+# Cloud host for Ollama's hosted models. Used when OLLAMA_API_KEY is set, since
+# models like gemini-3-flash-preview are not available on a local Ollama server.
+OLLAMA_CLOUD_HOST = "https://ollama.com"
+
+
+def _make_client(cloud=False):
+    """Build an ollama.Client — cloud=True points at ollama.com with OLLAMA_API_KEY."""
+    import ollama
+    if cloud:
+        api_key = os.environ.get("OLLAMA_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OLLAMA_API_KEY is required for cloud-hosted text models. "
+                "Re-run ./configure.sh (or add `export OLLAMA_API_KEY=...` to set_env.sh) and re-source."
+            )
+        return ollama.Client(
+            host=OLLAMA_CLOUD_HOST,
+            headers={"Authorization": "Bearer " + api_key},
+        )
+    return ollama.Client()
+
+
 _TAG_SYSTEM_PROMPT = (
     "You are a concise topic tagger for university quiz questions. "
     "Given a question, respond with 1 to 3 short concept tags that describe "
@@ -163,25 +185,17 @@ def tag_question(row, client, model):
 def tag_questions(rows, model=None):
     """Annotate each row dict in-place with a 'tags' key (comma-separated string)."""
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "The 'ollama' package is required for --tag. Install with: pip install ollama"
         ) from e
 
     model = model or DEFAULT_TEXT_MODEL
-    client = ollama.Client()
-
-    try:
-        client.list()
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not reach Ollama at its configured host ({os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}). "
-            f"Is the Ollama server running? Original error: {e}"
-        ) from e
+    client = _make_client(cloud=True)
 
     total = len(rows)
-    print(f"Tagging {total} questions with model '{model}'...")
+    print(f"Tagging {total} questions with cloud model '{model}'...")
     for i, row in enumerate(rows, start=1):
         print(f"  [{i}/{total}] {row.get('question_name') or row.get('question_id')}")
         tags = tag_question(row, client, model)
@@ -435,7 +449,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     question_info_row should have: keywords, open_ended_question, original_question_text.
     """
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "The 'ollama' package is required for assess-replies. "
@@ -444,7 +458,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
 
     model = model or DEFAULT_MODEL
     audio_model = audio_model or DEFAULT_AUDIO_MODEL
-    client = ollama.Client()
+    client = _make_client(cloud=False)
 
     try:
         client.list()
@@ -540,7 +554,7 @@ def generate_open_ended_questions(rows, model=None, n=3):
     the instructor reviews the output CSV and sets one row per group to 1.
     """
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "The 'ollama' package is required for generate-open-ended-questions. "
@@ -548,18 +562,10 @@ def generate_open_ended_questions(rows, model=None, n=3):
         ) from e
 
     model = model or DEFAULT_TEXT_MODEL
-    client = ollama.Client()
-
-    try:
-        client.list()
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not reach Ollama at its configured host ({os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}). "
-            f"Is the Ollama server running? Original error: {e}"
-        ) from e
+    client = _make_client(cloud=True)
 
     total = len(rows)
-    print(f"Generating {n} candidate open-ended questions for each of {total} questions with model '{model}'...")
+    print(f"Generating {n} candidate open-ended questions for each of {total} questions with cloud model '{model}'...")
     results = []
     for i, row in enumerate(rows, start=1):
         label = row.get('question_name') or row.get('question_id')

@@ -20,9 +20,15 @@ read LMSURL
 echo "Enter or paste your Canvas LMS access token here (be careful not to share this with anyone else):"
 read TOKEN
 
+echo "Enter or paste your Ollama API key (used for cloud-hosted text models like gemini-3-flash-preview; leave blank if you only plan to use local Ollama models):"
+read OLLAMAKEY
+
 echo "#!/bin/bash" > "$SETENV"
 echo "export CANVAS_URL=\"$LMSURL\"" >> "$SETENV"
 echo "export CANVAS_TOKEN=\"$TOKEN\"" >> "$SETENV"
+if [[ -n "$OLLAMAKEY" ]]; then
+  echo "export OLLAMA_API_KEY=\"$OLLAMAKEY\"" >> "$SETENV"
+fi
 
 # Restrict permissions so only the owner can read the token
 chmod 600 "$SETENV"
