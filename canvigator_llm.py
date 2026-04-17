@@ -36,8 +36,8 @@ _CLASSIFY_SYSTEM_PROMPT = (
 
 _EXPLAIN_SYSTEM_PROMPT = (
     "You are an expert university instructor designing oral exam questions. "
-    "Given a topic and details from an existing quiz question, create ONE new open-ended "
-    "question that a student would answer verbally. The question should:\n"
+    "Given a topic and details from an existing quiz question, create THREE distinct "
+    "open-ended questions that a student would answer verbally. Each question should:\n"
     "- Begin with \"Explain\" and require the student to explain a concept or idea clearly "
     "in their own words\n"
     "- Be answerable in under 1 minute of speaking\n"
@@ -46,14 +46,16 @@ _EXPLAIN_SYSTEM_PROMPT = (
     "- Be self-contained (a student should understand what is being asked without seeing "
     "the original quiz question)\n"
     "- NOT be a yes/no question or a question that can be answered in one word\n\n"
-    "Respond with ONLY the question text — no preamble, no numbering, no explanation, "
-    "no quotation marks."
+    "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
+    "do not reword the same question three times.\n\n"
+    "Respond with ONLY the three questions, numbered \"1.\", \"2.\", \"3.\", one per line. "
+    "No preamble, no explanation, no quotation marks."
 )
 
 _DRAW_SYSTEM_PROMPT = (
     "You are an expert university instructor designing visual assessment questions. "
-    "Given a topic and details from an existing quiz question, create ONE new question "
-    "that asks a student to draw a diagram or figure by hand. The question should:\n"
+    "Given a topic and details from an existing quiz question, create THREE distinct "
+    "questions that ask a student to draw a diagram or figure by hand. Each question should:\n"
     "- Begin with \"Draw a diagram\" or \"Draw a figure\" and clearly describe what the "
     "student should illustrate\n"
     "- Be completable in under 2 minutes of drawing\n"
@@ -61,8 +63,10 @@ _DRAW_SYSTEM_PROMPT = (
     "- Be self-contained (a student should understand what is being asked without seeing "
     "the original quiz question)\n"
     "- Specify what key elements or labels should appear in the diagram\n\n"
-    "Respond with ONLY the question text — no preamble, no numbering, no explanation, "
-    "no quotation marks."
+    "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
+    "do not reword the same question three times.\n\n"
+    "Respond with ONLY the three questions, numbered \"1.\", \"2.\", \"3.\", one per line. "
+    "No preamble, no explanation, no quotation marks."
 )
 
 
@@ -181,6 +185,20 @@ def tag_questions(rows, model=None):
     print("Tagging complete.")
 
 
+def _parse_candidates(response, n=3):
+    """Parse up to n candidate questions from a numbered LLM response."""
+    if not response:
+        return []
+    candidates = []
+    for line in response.strip().splitlines():
+        stripped = re.sub(r'^\s*(?:\d+[\.\)]|[-*])\s+', '', line).strip().strip("\"'")
+        if stripped:
+            candidates.append(stripped)
+        if len(candidates) == n:
+            break
+    return candidates
+
+
 def _parse_question_mode(response):
     """Parse the classify response into 'explain' or 'draw', defaulting to 'explain'."""
     if not response:
@@ -249,8 +267,8 @@ def classify_question_mode(row, client, model):
         return "explain"
 
 
-def generate_open_ended_question(row, client, model, mode):
-    """Call the LLM to generate one open-ended question of the given mode (explain or draw)."""
+def generate_open_ended_candidates(row, client, model, mode, n=3):
+    """Call the LLM to generate n candidate open-ended questions of the given mode."""
     prompt = _build_open_ended_prompt(
         row.get("keywords"),
         row.get("question_text"),
@@ -268,12 +286,10 @@ def generate_open_ended_question(row, client, model, mode):
             options={"temperature": 0.7},
         )
         content = resp["message"]["content"].strip()
-        # Take only the first paragraph in case the model over-generates
-        first_para = content.split("\n\n")[0].strip()
-        return first_para
+        return _parse_candidates(content, n=n)
     except Exception as e:
         logger.warning(f"LLM generation failed for question {row.get('question_id')}: {e}")
-        return ""
+        return []
 
 
 _TRANSCRIBE_SYSTEM_PROMPT = (
@@ -509,12 +525,15 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     return results
 
 
-def generate_open_ended_questions(rows, model=None):
-    """Classify then generate an open-ended question for each row; returns a list of result dicts.
+def generate_open_ended_questions(rows, model=None, n=3):
+    """Classify and generate n candidate open-ended questions per input row.
 
     Step 1: For each question, ask the LLM whether 'explain' or 'draw' is the
     better assessment mode based on the topic and question content.
-    Step 2: Generate the open-ended question using the mode-specific prompt.
+    Step 2: Generate n candidate open-ended questions using the mode-specific prompt.
+    Returns a flat list of result dicts — n rows per input row (padded with empty
+    candidate strings if the LLM returned fewer). Each row has selected_question=0;
+    the instructor reviews the output CSV and sets one row per group to 1.
     """
     try:
         import ollama
@@ -536,23 +555,32 @@ def generate_open_ended_questions(rows, model=None):
         ) from e
 
     total = len(rows)
-    print(f"Generating {total} open-ended questions with model '{model}'...")
+    print(f"Generating {n} candidate open-ended questions for each of {total} questions with model '{model}'...")
     results = []
     for i, row in enumerate(rows, start=1):
         label = row.get('question_name') or row.get('question_id')
         print(f"  [{i}/{total}] {label} — classifying...", end="", flush=True)
         mode = classify_question_mode(row, client, model)
-        print(f" {mode} — generating...", end="", flush=True)
-        question = generate_open_ended_question(row, client, model, mode)
+        print(f" {mode} — generating {n} candidates...", end="", flush=True)
+        candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
         print(" done")
-        results.append({
-            'question_id': row.get('question_id'),
-            'position': row.get('position'),
-            'question_name': row.get('question_name'),
-            'keywords': row.get('keywords'),
-            'question_mode': mode,
-            'original_question_text': _strip_html(row.get('question_text')),
-            'open_ended_question': question,
-        })
+
+        if not candidates:
+            logger.warning(f"No candidates generated for question {row.get('question_id')}")
+
+        # Always emit exactly n rows per question so every group has a predictable shape.
+        padded = (candidates + [''] * n)[:n]
+        original_text = _strip_html(row.get('question_text'))
+        for cand in padded:
+            results.append({
+                'selected_question': 0,
+                'question_id': row.get('question_id'),
+                'position': row.get('position'),
+                'question_name': row.get('question_name'),
+                'keywords': row.get('keywords'),
+                'question_mode': mode,
+                'open_ended_question': cand,
+                'original_question_text': original_text,
+            })
     print("Generation complete.")
     return results

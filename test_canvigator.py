@@ -863,6 +863,80 @@ class TestBuildOpenEndedPrompt:
 
 
 # ---------------------------------------------------------------------------
+# canvigator_llm._parse_candidates tests
+# ---------------------------------------------------------------------------
+
+class TestParseCandidates:
+    """Tests for _parse_candidates numbered-response parser."""
+
+    def test_empty_and_none(self):
+        """Empty string or None returns an empty list."""
+        from canvigator_llm import _parse_candidates
+        assert _parse_candidates("") == []
+        assert _parse_candidates(None) == []
+
+    def test_numbered_dot_prefix(self):
+        """Parses '1.' / '2.' / '3.' numbered output."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. Explain recursion.\n2. Explain the base case.\n3. Explain stack frames."
+        assert _parse_candidates(resp) == [
+            "Explain recursion.",
+            "Explain the base case.",
+            "Explain stack frames.",
+        ]
+
+    def test_numbered_paren_prefix(self):
+        """Parses '1)' / '2)' / '3)' style numbering."""
+        from canvigator_llm import _parse_candidates
+        resp = "1) First question?\n2) Second question?\n3) Third question?"
+        assert _parse_candidates(resp) == [
+            "First question?",
+            "Second question?",
+            "Third question?",
+        ]
+
+    def test_bulleted_prefix(self):
+        """Parses '- ' and '* ' bulleted lines."""
+        from canvigator_llm import _parse_candidates
+        resp = "- first\n* second\n- third"
+        assert _parse_candidates(resp) == ["first", "second", "third"]
+
+    def test_strips_surrounding_quotes(self):
+        """Surrounding single/double quotes are stripped."""
+        from canvigator_llm import _parse_candidates
+        resp = '1. "Explain A."\n2. \'Explain B.\'\n3. Explain C.'
+        assert _parse_candidates(resp) == ["Explain A.", "Explain B.", "Explain C."]
+
+    def test_skips_blank_lines(self):
+        """Blank lines between candidates are dropped."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. One\n\n2. Two\n\n\n3. Three"
+        assert _parse_candidates(resp) == ["One", "Two", "Three"]
+
+    def test_truncates_to_n(self):
+        """Only the first n candidates are returned."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. a\n2. b\n3. c\n4. d\n5. e"
+        assert _parse_candidates(resp, n=3) == ["a", "b", "c"]
+
+    def test_no_prefix_each_line_is_candidate(self):
+        """Plain lines without numbering are still treated as candidates."""
+        from canvigator_llm import _parse_candidates
+        resp = "Explain one thing.\nExplain another thing.\nExplain a third thing."
+        assert _parse_candidates(resp) == [
+            "Explain one thing.",
+            "Explain another thing.",
+            "Explain a third thing.",
+        ]
+
+    def test_fewer_than_n_candidates(self):
+        """Returns whatever was generated even if fewer than n."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. Only one."
+        assert _parse_candidates(resp) == ["Only one."]
+
+
+# ---------------------------------------------------------------------------
 # canvigator_quiz: follow-up question helper tests
 # ---------------------------------------------------------------------------
 
