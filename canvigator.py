@@ -44,8 +44,6 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
     """Dispatch a quiz-level task to the appropriate method."""
     if task == 'get-quiz-questions':
         quiz.getQuizQuestions(tag=tag)
-    elif task == 'generate-open-ended-questions':
-        quiz.generateOpenEndedQuestions()
     elif task == 'get-replies':
         quiz.getFollowUpReplies(reply_window_days=reply_window_days)
     elif task == 'assess-replies':
@@ -206,11 +204,20 @@ elif task == 'create-quiz':
 elif task == 'get-gradebook':
     course.exportGradebook(canv_config.data_path)
 
+elif task == 'generate-open-ended-questions':
+    # Driven by a pre-selected tagged-questions CSV, not a Canvas quiz
+    tagged_csv = cu.selectCSVFromList(
+        canv_config.data_path,
+        'questions_w_tags',
+        "\nSelect tagged questions CSV (using index in '[ ]'): ",
+    )
+    cq.generateOpenEndedQuestions(tagged_csv)
+
 else:
     # All remaining tasks require quiz selection
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
-    skip = task in ('get-quiz-questions', 'generate-open-ended-questions', 'get-replies', 'assess-replies')
+    skip = task in ('get-quiz-questions', 'get-replies', 'assess-replies')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
     _run_quiz_task(task, quiz, dry_run, tag, reply_window_days)
 

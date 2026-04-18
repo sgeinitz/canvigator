@@ -9,6 +9,32 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:31b")
 DEFAULT_AUDIO_MODEL = os.environ.get("OLLAMA_AUDIO_MODEL", "gemma4:e4b")
+# Used for instructor-side text tasks that never see student data (tagging quiz
+# questions, generating open-ended follow-up questions). A larger cloud model
+# is the better fit here since privacy constraints don't apply.
+DEFAULT_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "gemini-3-flash-preview")
+
+# Cloud host for Ollama's hosted models. Used when OLLAMA_API_KEY is set, since
+# models like gemini-3-flash-preview are not available on a local Ollama server.
+OLLAMA_CLOUD_HOST = "https://ollama.com"
+
+
+def _make_client(cloud=False):
+    """Build an ollama.Client — cloud=True points at ollama.com with OLLAMA_API_KEY."""
+    import ollama
+    if cloud:
+        api_key = os.environ.get("OLLAMA_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OLLAMA_API_KEY is required for cloud-hosted text models. "
+                "Re-run ./configure.sh (or add `export OLLAMA_API_KEY=...` to set_env.sh) and re-source."
+            )
+        return ollama.Client(
+            host=OLLAMA_CLOUD_HOST,
+            headers={"Authorization": "Bearer " + api_key},
+        )
+    return ollama.Client()
+
 
 _TAG_SYSTEM_PROMPT = (
     "You are a concise topic tagger for university quiz questions. "
@@ -36,8 +62,8 @@ _CLASSIFY_SYSTEM_PROMPT = (
 
 _EXPLAIN_SYSTEM_PROMPT = (
     "You are an expert university instructor designing oral exam questions. "
-    "Given a topic and details from an existing quiz question, create ONE new open-ended "
-    "question that a student would answer verbally. The question should:\n"
+    "Given a topic and details from an existing quiz question, create THREE distinct "
+    "open-ended questions that a student would answer verbally. Each question should:\n"
     "- Begin with \"Explain\" and require the student to explain a concept or idea clearly "
     "in their own words\n"
     "- Be answerable in under 1 minute of speaking\n"
@@ -46,14 +72,16 @@ _EXPLAIN_SYSTEM_PROMPT = (
     "- Be self-contained (a student should understand what is being asked without seeing "
     "the original quiz question)\n"
     "- NOT be a yes/no question or a question that can be answered in one word\n\n"
-    "Respond with ONLY the question text — no preamble, no numbering, no explanation, "
-    "no quotation marks."
+    "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
+    "do not reword the same question three times.\n\n"
+    "Respond with ONLY the three questions, numbered \"1.\", \"2.\", \"3.\", one per line. "
+    "No preamble, no explanation, no quotation marks."
 )
 
 _DRAW_SYSTEM_PROMPT = (
     "You are an expert university instructor designing visual assessment questions. "
-    "Given a topic and details from an existing quiz question, create ONE new question "
-    "that asks a student to draw a diagram or figure by hand. The question should:\n"
+    "Given a topic and details from an existing quiz question, create THREE distinct "
+    "questions that ask a student to draw a diagram or figure by hand. Each question should:\n"
     "- Begin with \"Draw a diagram\" or \"Draw a figure\" and clearly describe what the "
     "student should illustrate\n"
     "- Be completable in under 2 minutes of drawing\n"
@@ -61,8 +89,27 @@ _DRAW_SYSTEM_PROMPT = (
     "- Be self-contained (a student should understand what is being asked without seeing "
     "the original quiz question)\n"
     "- Specify what key elements or labels should appear in the diagram\n\n"
-    "Respond with ONLY the question text — no preamble, no numbering, no explanation, "
-    "no quotation marks."
+    "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
+    "do not reword the same question three times.\n\n"
+    "Respond with ONLY the three questions, numbered \"1.\", \"2.\", \"3.\", one per line. "
+    "No preamble, no explanation, no quotation marks."
+)
+
+_ASSESSMENT_GUIDE_SYSTEM_PROMPT = (
+    "You are an expert university instructor writing a short assessment guide for a specific "
+    "open-ended follow-up question. The guide will be used by another instructor (or an AI "
+    "grader) to decide whether a student's response demonstrates a reasonable understanding "
+    "of the concept.\n\n"
+    "Write 2–4 plain-prose sentences (no bullets, no markdown, no headings) that cover:\n"
+    "- For an \"Explain\" question: the key concepts, terms, or keywords the student should "
+    "mention; for a \"Draw\" question: the key elements, labels, or structural relationships "
+    "that should appear in the drawing.\n"
+    "- What a minimally-acceptable passing response looks like — the bar for \"pass\".\n"
+    "- Common misconceptions, wrong framings, or missing pieces that should NOT count as "
+    "passing.\n\n"
+    "Keep it tight and practical — a grader should be able to read it in under 15 seconds. "
+    "Refer to the student as \"the student\". Respond with ONLY the guide text on a single "
+    "paragraph — no preamble, no label, no numbering, no quotation marks."
 )
 
 
@@ -155,30 +202,36 @@ def tag_question(row, client, model):
 def tag_questions(rows, model=None):
     """Annotate each row dict in-place with a 'tags' key (comma-separated string)."""
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "The 'ollama' package is required for --tag. Install with: pip install ollama"
         ) from e
 
-    model = model or DEFAULT_MODEL
-    client = ollama.Client()
-
-    try:
-        client.list()
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not reach Ollama at its configured host ({os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}). "
-            f"Is the Ollama server running? Original error: {e}"
-        ) from e
+    model = model or DEFAULT_TEXT_MODEL
+    client = _make_client(cloud=True)
 
     total = len(rows)
-    print(f"Tagging {total} questions with model '{model}'...")
+    print(f"Tagging {total} questions with cloud model '{model}'...")
     for i, row in enumerate(rows, start=1):
         print(f"  [{i}/{total}] {row.get('question_name') or row.get('question_id')}")
         tags = tag_question(row, client, model)
         row["keywords"] = ", ".join(tags)
     print("Tagging complete.")
+
+
+def _parse_candidates(response, n=3):
+    """Parse up to n candidate questions from a numbered LLM response."""
+    if not response:
+        return []
+    candidates = []
+    for line in response.strip().splitlines():
+        stripped = re.sub(r'^\s*(?:\d+[\.\)]|[-*])\s+', '', line).strip().strip("\"'")
+        if stripped:
+            candidates.append(stripped)
+        if len(candidates) == n:
+            break
+    return candidates
 
 
 def _parse_question_mode(response):
@@ -249,8 +302,8 @@ def classify_question_mode(row, client, model):
         return "explain"
 
 
-def generate_open_ended_question(row, client, model, mode):
-    """Call the LLM to generate one open-ended question of the given mode (explain or draw)."""
+def generate_open_ended_candidates(row, client, model, mode, n=3):
+    """Call the LLM to generate n candidate open-ended questions of the given mode."""
     prompt = _build_open_ended_prompt(
         row.get("keywords"),
         row.get("question_text"),
@@ -268,11 +321,56 @@ def generate_open_ended_question(row, client, model, mode):
             options={"temperature": 0.7},
         )
         content = resp["message"]["content"].strip()
-        # Take only the first paragraph in case the model over-generates
-        first_para = content.split("\n\n")[0].strip()
-        return first_para
+        return _parse_candidates(content, n=n)
     except Exception as e:
         logger.warning(f"LLM generation failed for question {row.get('question_id')}: {e}")
+        return []
+
+
+def _build_assessment_guide_prompt(keywords, original_question_text, answers_json, mode, open_ended_question):
+    """Build the user-side prompt for generating an assessment guide."""
+    clean_text = _strip_html(original_question_text)
+    labels = _answer_labels(answers_json)
+    parts = []
+    if keywords:
+        parts.append(f"Topic keywords: {keywords}")
+    if clean_text:
+        parts.append(f"Original quiz question: {clean_text}")
+    if labels:
+        joined = " | ".join(labels[:6])
+        parts.append(f"Answer choices from the original: {joined}")
+    parts.append(f"Question type: {'draw (hand-drawn diagram)' if mode == 'draw' else 'explain (verbal explanation)'}")
+    parts.append(f"Open-ended question the student will answer: {open_ended_question}")
+    parts.append("Assessment guide:")
+    return "\n".join(parts)
+
+
+def generate_assessment_guide(row, client, model, mode, open_ended_question):
+    """Call the LLM to produce a short assessment guide for one open-ended question."""
+    if not open_ended_question:
+        return ""
+    prompt = _build_assessment_guide_prompt(
+        row.get("keywords"),
+        row.get("question_text"),
+        row.get("answers"),
+        mode,
+        open_ended_question,
+    )
+    try:
+        resp = client.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": _ASSESSMENT_GUIDE_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.3},
+        )
+        content = resp["message"]["content"].strip()
+        # Collapse any accidental newlines into spaces — guide should be a single paragraph.
+        content = re.sub(r"\s*\n+\s*", " ", content).strip().strip('"\'')
+        return content
+    except Exception as e:
+        logger.warning(f"LLM assessment-guide generation failed for question {row.get('question_id')}: {e}")
         return ""
 
 
@@ -287,6 +385,9 @@ _ASSESS_EXPLAIN_SYSTEM_PROMPT = (
     "Given the original quiz question, the topic keywords, and the student's spoken response "
     "(provided as a transcript), determine whether the student demonstrates a reasonable "
     "understanding of the core concept.\n\n"
+    "If an \"Assessment guide\" is provided in the user message, treat it as the primary "
+    "rubric for deciding pass vs. fail — it was written by the instructor who knows what a "
+    "correct response looks like.\n\n"
     "A \"pass\" means the student demonstrates a reasonable understanding of the core concept, "
     "even if their explanation is imprecise, incomplete, or uses informal language. "
     "A \"fail\" means the student shows a fundamental misunderstanding, did not address the "
@@ -304,6 +405,9 @@ _ASSESS_DRAW_SYSTEM_PROMPT = (
     "Given the original quiz question, the topic keywords, and the student's drawing "
     "(provided as an image), determine whether the drawing demonstrates a reasonable "
     "understanding of the key concepts and relationships.\n\n"
+    "If an \"Assessment guide\" is provided in the user message, treat it as the primary "
+    "rubric for deciding pass vs. fail — it was written by the instructor who knows what a "
+    "correct drawing looks like.\n\n"
     "A \"pass\" means the drawing shows the essential structure or relationships, even if "
     "it is rough, has minor inaccuracies, or is missing non-critical labels. "
     "A \"fail\" means the drawing is fundamentally incorrect, shows the wrong structure, "
@@ -339,7 +443,7 @@ def _parse_assessment(response):
     return result, feedback
 
 
-def _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=None):
+def _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=None, assessment_guide=None):
     """Build the user-side prompt for assessing a student response."""
     parts = []
     if keywords:
@@ -348,6 +452,8 @@ def _build_assessment_prompt(keywords, open_ended_question, original_question_te
         parts.append(f"Original quiz question: {original_question_text}")
     if open_ended_question:
         parts.append(f"Follow-up question asked: {open_ended_question}")
+    if assessment_guide:
+        parts.append(f"Assessment guide (use this as your primary rubric): {assessment_guide}")
     if transcript:
         parts.append(f"Student's response (transcript): {transcript}")
     return "\n".join(parts)
@@ -370,9 +476,12 @@ def transcribe_audio(audio_path, client, model):
         return ""
 
 
-def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model):
+def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model, assessment_guide=None):
     """Assess a student's verbal explanation using the transcript."""
-    prompt = _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=transcript)
+    prompt = _build_assessment_prompt(
+        keywords, open_ended_question, original_question_text,
+        transcript=transcript, assessment_guide=assessment_guide,
+    )
     try:
         resp = client.chat(
             model=model,
@@ -388,9 +497,12 @@ def assess_explain(transcript, keywords, open_ended_question, original_question_
         return 'fail', f'Assessment error: {e}'
 
 
-def assess_draw(image_path, keywords, open_ended_question, original_question_text, client, model):
+def assess_draw(image_path, keywords, open_ended_question, original_question_text, client, model, assessment_guide=None):
     """Assess a student's drawing by sending the image to a multimodal model."""
-    prompt = _build_assessment_prompt(keywords, open_ended_question, original_question_text)
+    prompt = _build_assessment_prompt(
+        keywords, open_ended_question, original_question_text,
+        assessment_guide=assessment_guide,
+    )
     try:
         resp = client.chat(
             model=model,
@@ -415,7 +527,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     question_info_row should have: keywords, open_ended_question, original_question_text.
     """
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "The 'ollama' package is required for assess-replies. "
@@ -424,7 +536,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
 
     model = model or DEFAULT_MODEL
     audio_model = audio_model or DEFAULT_AUDIO_MODEL
-    client = ollama.Client()
+    client = _make_client(cloud=False)
 
     try:
         client.list()
@@ -437,6 +549,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     keywords = question_info_row.get('keywords', '')
     oe_question = question_info_row.get('open_ended_question', '')
     orig_text = question_info_row.get('original_question_text', '')
+    assessment_guide = question_info_row.get('assessment_guide', '') or ''
 
     total = len(replies)
     print(f"Assessing {total} student replies with model '{model}'...")
@@ -469,7 +582,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
                 })
                 continue
             print(" assessing...", end="", flush=True)
-            result, feedback = assess_explain(transcript, keywords, oe_question, orig_text, client, model)
+            result, feedback = assess_explain(
+                transcript, keywords, oe_question, orig_text, client, model,
+                assessment_guide=assessment_guide,
+            )
         else:
             # Draw mode
             image_path = reply.get('attachment_path', '')
@@ -488,7 +604,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
                 continue
             transcript = ''
             print(" assessing image...", end="", flush=True)
-            result, feedback = assess_draw(image_path, keywords, oe_question, orig_text, client, model)
+            result, feedback = assess_draw(
+                image_path, keywords, oe_question, orig_text, client, model,
+                assessment_guide=assessment_guide,
+            )
 
         from datetime import datetime, timezone
         assessed_at = datetime.now(timezone.utc).isoformat()
@@ -509,50 +628,58 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     return results
 
 
-def generate_open_ended_questions(rows, model=None):
-    """Classify then generate an open-ended question for each row; returns a list of result dicts.
+def generate_open_ended_questions(rows, model=None, n=3):
+    """Classify and generate n candidate open-ended questions per input row.
 
     Step 1: For each question, ask the LLM whether 'explain' or 'draw' is the
     better assessment mode based on the topic and question content.
-    Step 2: Generate the open-ended question using the mode-specific prompt.
+    Step 2: Generate n candidate open-ended questions using the mode-specific prompt.
+    Returns a flat list of result dicts — n rows per input row (padded with empty
+    candidate strings if the LLM returned fewer). Each row has selected_question=0;
+    the instructor reviews the output CSV and sets one row per group to 1.
     """
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "The 'ollama' package is required for generate-open-ended-questions. "
             "Install with: pip install ollama"
         ) from e
 
-    model = model or DEFAULT_MODEL
-    client = ollama.Client()
-
-    try:
-        client.list()
-    except Exception as e:
-        raise RuntimeError(
-            f"Could not reach Ollama at its configured host ({os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}). "
-            f"Is the Ollama server running? Original error: {e}"
-        ) from e
+    model = model or DEFAULT_TEXT_MODEL
+    client = _make_client(cloud=True)
 
     total = len(rows)
-    print(f"Generating {total} open-ended questions with model '{model}'...")
+    print(f"Generating {n} candidate open-ended questions for each of {total} questions with cloud model '{model}'...")
     results = []
     for i, row in enumerate(rows, start=1):
         label = row.get('question_name') or row.get('question_id')
         print(f"  [{i}/{total}] {label} — classifying...", end="", flush=True)
         mode = classify_question_mode(row, client, model)
-        print(f" {mode} — generating...", end="", flush=True)
-        question = generate_open_ended_question(row, client, model, mode)
+        print(f" {mode} — generating {n} candidates...", end="", flush=True)
+        candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
+        print(f" writing {len([c for c in candidates if c])} assessment guide(s)...", end="", flush=True)
+        guides = [generate_assessment_guide(row, client, model, mode, cand) for cand in candidates]
         print(" done")
-        results.append({
-            'question_id': row.get('question_id'),
-            'position': row.get('position'),
-            'question_name': row.get('question_name'),
-            'keywords': row.get('keywords'),
-            'question_mode': mode,
-            'original_question_text': _strip_html(row.get('question_text')),
-            'open_ended_question': question,
-        })
+
+        if not candidates:
+            logger.warning(f"No candidates generated for question {row.get('question_id')}")
+
+        # Always emit exactly n rows per question so every group has a predictable shape.
+        padded_candidates = (candidates + [''] * n)[:n]
+        padded_guides = (guides + [''] * n)[:n]
+        original_text = _strip_html(row.get('question_text'))
+        for cand, guide in zip(padded_candidates, padded_guides):
+            results.append({
+                'selected_question': 0,
+                'question_id': row.get('question_id'),
+                'position': row.get('position'),
+                'question_name': row.get('question_name'),
+                'keywords': row.get('keywords'),
+                'question_mode': mode,
+                'open_ended_question': cand,
+                'assessment_guide': guide,
+                'original_question_text': original_text,
+            })
     print("Generation complete.")
     return results

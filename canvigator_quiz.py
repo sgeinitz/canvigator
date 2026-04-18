@@ -12,6 +12,7 @@ import seaborn as sbn
 import os
 import re
 import json
+from pathlib import Path
 from canvigator_utils import today_str, selectCSVFromList, prompt_for_index
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,50 @@ def _collect_timing_and_blurs(student_events, timing_by_q, blurs_by_q):
             blur_count = 0
 
 
+def generateOpenEndedQuestions(tagged_csv_path):
+    """Generate open-ended questions from a *_questions_w_tags_*.csv.
+
+    For each original quiz question, asks the LLM to classify the follow-up mode
+    and produce 3 candidate open-ended questions, then prompts the instructor to
+    pick one. The chosen question is saved to a *_open_ended_YYYYMMDD.csv next
+    to the input file.
+    """
+    tagged_csv_path = Path(tagged_csv_path)
+    marker = "_questions_w_tags_"
+    if marker not in tagged_csv_path.name:
+        raise ValueError(
+            f"Expected filename containing '{marker}', got: {tagged_csv_path.name}"
+        )
+    prefix = tagged_csv_path.name.split(marker)[0] + "_"
+
+    df = pd.read_csv(tagged_csv_path)
+    if 'keywords' not in df.columns:
+        raise RuntimeError(
+            f"The file {tagged_csv_path.name} has no 'keywords' column. "
+            f"Re-run 'get-quiz-questions --tag' first."
+        )
+
+    rows = df.to_dict('records')
+
+    import canvigator_llm
+    results = canvigator_llm.generate_open_ended_questions(rows)
+
+    out_df = pd.DataFrame(results, columns=[
+        'selected_question', 'question_id', 'position', 'question_name',
+        'keywords', 'question_mode', 'open_ended_question', 'assessment_guide',
+        'original_question_text',
+    ])
+    csv_name = tagged_csv_path.parent / f"{prefix}open_ended_{today_str()}.csv"
+    out_df.to_csv(csv_name, index=False)
+    print(f"\nSaved {len(results)} candidate rows ({len(rows)} original questions x 3) to {csv_name}")
+    print(
+        "\nNext step: open this CSV and, for each group of 3 candidates sharing a question_id,\n"
+        "set `selected_question` = 1 on the one candidate you want to send to students\n"
+        "(leave the other two as 0). Then run `send-follow-up-question`."
+    )
+    logger.info(f"Open-ended questions saved: {csv_name}")
+
+
 class CanvigatorQuiz:
     """A class for one quiz and associated attributes/data."""
 
@@ -274,55 +319,6 @@ class CanvigatorQuiz:
         df.to_csv(csv_name, index=False)
         print(f"Saved {len(rows)} questions to {csv_name}")
         logger.info(f"Quiz questions saved: {csv_name}")
-
-    def generateOpenEndedQuestions(self):
-        """Generate open-ended oral exam questions from the tagged questions CSV.
-
-        Requires that get-quiz-questions --tag has been run first. Reads the
-        tagged questions CSV, sends each question to the LLM, and writes the
-        results to a new CSV for instructor review.
-        """
-        # Reuse _loadQuestionInfo's file-finding logic but we need the full CSV rows
-        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
-        tagged_pattern = file_prefix + "questions_w_tags_"
-
-        all_files = os.listdir(self.config.data_path)
-        matching_dates = []
-        for f in all_files:
-            m = re.search(r'(\d{8})\.csv$', f)
-            if m and tagged_pattern in f:
-                matching_dates.append((m.group(1), f))
-
-        if not matching_dates:
-            raise FileNotFoundError(
-                f"No *_questions_w_tags_*.csv found for quiz '{self.quiz_name}'. "
-                f"Run 'python canvigator.py --crn <CRN> --tag get-quiz-questions' first."
-            )
-
-        matching_dates.sort(key=lambda t: t[0])
-        latest_file = self.config.data_path / matching_dates[-1][1]
-        print(f"  Using tagged questions from: {latest_file.name}")
-
-        df = pd.read_csv(latest_file)
-        if 'keywords' not in df.columns:
-            raise RuntimeError(
-                f"The file {latest_file.name} has no 'keywords' column. "
-                f"Re-run 'get-quiz-questions --tag' first."
-            )
-
-        rows = df.to_dict('records')
-
-        import canvigator_llm
-        results = canvigator_llm.generate_open_ended_questions(rows)
-
-        out_df = pd.DataFrame(results, columns=[
-            'question_id', 'position', 'question_name', 'keywords',
-            'question_mode', 'original_question_text', 'open_ended_question',
-        ])
-        csv_name = self.config.data_path / f"{file_prefix}open_ended_{today_str()}.csv"
-        out_df.to_csv(csv_name, index=False)
-        print(f"Saved {len(results)} open-ended questions to {csv_name}")
-        logger.info(f"Open-ended questions saved: {csv_name}")
 
     def _buildMissedBulletsForStudent(self, student_id, subs_by_q_df, question_info):
         """Return the missed-questions bullet section for one student, or None to skip."""
@@ -793,6 +789,33 @@ class CanvigatorQuiz:
                 f"Re-run 'generate-open-ended-questions'."
             )
 
+        if 'selected_question' in df.columns:
+            selected = df[df['selected_question'] == 1]
+            all_qids = {int(q) for q in df['question_id'].dropna().unique()}
+            chosen_qids = {int(q) for q in selected['question_id'].dropna().unique()}
+            missing = all_qids - chosen_qids
+            if missing:
+                logger.warning(
+                    f"{latest_file.name}: no `selected_question` row marked for question_id(s) "
+                    f"{sorted(missing)} — they will be skipped."
+                )
+            dup_qids = selected['question_id'].value_counts()
+            dup_qids = [int(q) for q, c in dup_qids.items() if c > 1]
+            if dup_qids:
+                logger.warning(
+                    f"{latest_file.name}: multiple `selected_question=1` rows for question_id(s) "
+                    f"{sorted(dup_qids)} — the first of each will be used."
+                )
+            rows_by_qid = {}
+            for _, row in selected.iterrows():
+                qid = row.get('question_id')
+                if pd.notna(qid):
+                    qid_int = int(qid)
+                    if qid_int not in rows_by_qid:
+                        rows_by_qid[qid_int] = row.to_dict()
+            return rows_by_qid
+
+        # Legacy format: one row per question_id, no selected_question column.
         rows_by_qid = {}
         for _, row in df.iterrows():
             qid = row.get('question_id')

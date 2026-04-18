@@ -863,6 +863,80 @@ class TestBuildOpenEndedPrompt:
 
 
 # ---------------------------------------------------------------------------
+# canvigator_llm._parse_candidates tests
+# ---------------------------------------------------------------------------
+
+class TestParseCandidates:
+    """Tests for _parse_candidates numbered-response parser."""
+
+    def test_empty_and_none(self):
+        """Empty string or None returns an empty list."""
+        from canvigator_llm import _parse_candidates
+        assert _parse_candidates("") == []
+        assert _parse_candidates(None) == []
+
+    def test_numbered_dot_prefix(self):
+        """Parses '1.' / '2.' / '3.' numbered output."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. Explain recursion.\n2. Explain the base case.\n3. Explain stack frames."
+        assert _parse_candidates(resp) == [
+            "Explain recursion.",
+            "Explain the base case.",
+            "Explain stack frames.",
+        ]
+
+    def test_numbered_paren_prefix(self):
+        """Parses '1)' / '2)' / '3)' style numbering."""
+        from canvigator_llm import _parse_candidates
+        resp = "1) First question?\n2) Second question?\n3) Third question?"
+        assert _parse_candidates(resp) == [
+            "First question?",
+            "Second question?",
+            "Third question?",
+        ]
+
+    def test_bulleted_prefix(self):
+        """Parses '- ' and '* ' bulleted lines."""
+        from canvigator_llm import _parse_candidates
+        resp = "- first\n* second\n- third"
+        assert _parse_candidates(resp) == ["first", "second", "third"]
+
+    def test_strips_surrounding_quotes(self):
+        """Surrounding single/double quotes are stripped."""
+        from canvigator_llm import _parse_candidates
+        resp = '1. "Explain A."\n2. \'Explain B.\'\n3. Explain C.'
+        assert _parse_candidates(resp) == ["Explain A.", "Explain B.", "Explain C."]
+
+    def test_skips_blank_lines(self):
+        """Blank lines between candidates are dropped."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. One\n\n2. Two\n\n\n3. Three"
+        assert _parse_candidates(resp) == ["One", "Two", "Three"]
+
+    def test_truncates_to_n(self):
+        """Only the first n candidates are returned."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. a\n2. b\n3. c\n4. d\n5. e"
+        assert _parse_candidates(resp, n=3) == ["a", "b", "c"]
+
+    def test_no_prefix_each_line_is_candidate(self):
+        """Plain lines without numbering are still treated as candidates."""
+        from canvigator_llm import _parse_candidates
+        resp = "Explain one thing.\nExplain another thing.\nExplain a third thing."
+        assert _parse_candidates(resp) == [
+            "Explain one thing.",
+            "Explain another thing.",
+            "Explain a third thing.",
+        ]
+
+    def test_fewer_than_n_candidates(self):
+        """Returns whatever was generated even if fewer than n."""
+        from canvigator_llm import _parse_candidates
+        resp = "1. Only one."
+        assert _parse_candidates(resp) == ["Only one."]
+
+
+# ---------------------------------------------------------------------------
 # canvigator_quiz: follow-up question helper tests
 # ---------------------------------------------------------------------------
 
@@ -1137,3 +1211,76 @@ class TestBuildAssessmentPrompt:
         )
         assert "binary trees" in result
         assert "transcript" not in result.lower()
+
+    def test_includes_assessment_guide(self):
+        """Assessment guide, when provided, appears labeled as the primary rubric."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="binary search",
+            open_ended_question="Explain the time complexity.",
+            original_question_text="What is O(log n)?",
+            transcript="Binary search halves the search space each step.",
+            assessment_guide="Student should mention halving, log n, and sorted input.",
+        )
+        assert "Assessment guide" in result
+        assert "primary rubric" in result
+        assert "halving, log n, and sorted input" in result
+
+    def test_omits_empty_assessment_guide(self):
+        """Empty/None assessment_guide doesn't add a stray label."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="k",
+            open_ended_question="Q",
+            original_question_text="O",
+            transcript="t",
+            assessment_guide="",
+        )
+        assert "Assessment guide" not in result
+
+
+class TestBuildAssessmentGuidePrompt:
+    """Tests for canvigator_llm._build_assessment_guide_prompt."""
+
+    def test_includes_all_fields_explain(self):
+        """Keywords, original question, mode, and open-ended question all appear."""
+        from canvigator_llm import _build_assessment_guide_prompt
+        result = _build_assessment_guide_prompt(
+            keywords="recursion, base case",
+            original_question_text="<p>What is a base case?</p>",
+            answers_json=None,
+            mode="explain",
+            open_ended_question="Explain why every recursive function needs a base case.",
+        )
+        assert "recursion, base case" in result
+        assert "What is a base case?" in result  # HTML stripped
+        assert "explain" in result
+        assert "Explain why every recursive function needs a base case." in result
+        assert "Assessment guide:" in result
+
+    def test_draw_mode_label(self):
+        """Draw mode is labeled in the prompt."""
+        from canvigator_llm import _build_assessment_guide_prompt
+        result = _build_assessment_guide_prompt(
+            keywords="linked list",
+            original_question_text="What is a linked list?",
+            answers_json=None,
+            mode="draw",
+            open_ended_question="Draw a diagram of a singly-linked list with 3 nodes.",
+        )
+        assert "draw" in result
+        assert "Draw a diagram of a singly-linked list with 3 nodes." in result
+
+    def test_includes_answer_choices(self):
+        """Answer labels from the original question appear in the prompt."""
+        import json
+        from canvigator_llm import _build_assessment_guide_prompt
+        answers = json.dumps([{"text": "O(1)"}, {"text": "O(log n)"}, {"text": "O(n)"}])
+        result = _build_assessment_guide_prompt(
+            keywords="big-o",
+            original_question_text="What is the complexity?",
+            answers_json=answers,
+            mode="explain",
+            open_ended_question="Explain the complexity.",
+        )
+        assert "O(log n)" in result
