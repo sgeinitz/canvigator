@@ -11,6 +11,12 @@ Continuous Assessments and Collaborative Learning. This tool has been used to
 carry out novel research utilizing these well-known techniques
 (as see in [this paper](https://link.springer.com/chapter/10.1007/978-3-031-74627-7_1)).
 
+More recently, Canvigator has added LLM-assisted workflows (via
+[Ollama](https://ollama.com)) for topic-tagging quiz questions, generating
+open-ended follow-up questions for students who missed a concept, and
+assessing the free-form replies (audio "explain" or photo "draw") that
+students send back through Canvas conversations.
+
 Currently, this terminal-based tool works with the Canvas Learning Management System (LMS) using the 
 [CanvasAPI](https://github.com/ucfopen/canvasapi). In addition to increased functionality, development 
 plans for this project include extending it to other LMSs and creating a richer interface. Suggestions 
@@ -39,7 +45,8 @@ in just one place on your local system, or separately for each course that it wi
    You will be prompted to enter:
    - Your institution's Canvas LMS base URL (you can find this on your Canvas home page).
    - Your Canvas token, which can be created by navigating to _'Account'_, then _'Settings'_. Towards the bottom of this window in Canvas you will see a blue button, _'+ New Access Token_'. Click on this button to copy/download the token to your local system. DO NOT TO SHARE YOUR CANVAS TOKEN w/ ANYONE (e.g. do not save it in a shared directory).
- 
+   - Your Ollama API key (optional — only needed if you plan to use the cloud-hosted text model for the LLM-powered tasks below). Leave it blank if you plan to use only local Ollama models (or none at all). See the [Ollama setup](#ollama-setup-optional) section for how to generate one.
+
 This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 
 3. **Verify Setup**:
@@ -62,24 +69,51 @@ This will prompt the creation of the _data/_ and _figures/_ subdirectories.
     
     2. Alternatively, you can install each library individually if needed.
 
-        * ![canvasapi](https://img.shields.io/badge/canvasapi-2.2.0-blue)
-        * ![matplotlib](https://img.shields.io/badge/matplotlib-3.3.4-brightgreen)
-        * ![numpy](https://img.shields.io/badge/numpy-1.22.0-yellow)
-        * ![pandas](https://img.shields.io/badge/pandas-1.3.4-orange)
+        * ![canvasapi](https://img.shields.io/badge/canvasapi-3.3.0-blue)
+        * ![matplotlib](https://img.shields.io/badge/matplotlib-3.8.4-brightgreen)
+        * ![numpy](https://img.shields.io/badge/numpy-1.26.4-yellow)
+        * ![pandas](https://img.shields.io/badge/pandas-2.2.2-orange)
         * ![requests](https://img.shields.io/badge/requests-2.33.0-red)
-        * ![scipy](https://img.shields.io/badge/scipy-1.10.0-lightgrey)
-        * ![seaborn](https://img.shields.io/badge/seaborn-0.11.2-blueviolet)
+        * ![scipy](https://img.shields.io/badge/scipy-1.13.1-lightgrey)
+        * ![seaborn](https://img.shields.io/badge/seaborn-0.13.2-blueviolet)
+        * ![ollama](https://img.shields.io/badge/ollama-0.4.7-black)
 
-    If no errors are thrown, the libraries are successfully installed.
+    If no errors are thrown, the libraries are successfully installed. The `ollama` client is only used by the LLM-assisted tasks described below — see [Ollama setup](#ollama-setup-optional).
+
+
+### Ollama setup (optional)
+
+Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) to tag questions, generate open-ended follow-ups, transcribe student audio, and assess student replies. You can skip this section if you will not be running any of these tasks (`get-quiz-questions --tag`, `generate-open-ended-questions`, `send-quiz-reminder`, `send-follow-up-question`, `assess-replies`).
+
+Canvigator uses two kinds of models:
+
+1. **A cloud-hosted text model** (default `gemini-3-flash-preview`, set via `OLLAMA_TEXT_MODEL`) for instructor-side text generation — tagging quiz questions and generating open-ended questions. These tasks never see student data, so a larger cloud model is a good fit.
+2. **Local models** for tasks that process student input — `gemma4:31b` (default `OLLAMA_MODEL`) for assessing text/image replies, and `gemma4:e4b` (default `OLLAMA_AUDIO_MODEL`) for transcribing student audio. Keeping these local is deliberate: student submissions should not leave your machine.
+
+**To use the cloud text model:**
+1. Sign in at [ollama.com](https://ollama.com) and create an API key from your account settings.
+2. Paste the key when prompted by `./configure.sh` (or add `export OLLAMA_API_KEY="..."` directly to `set_env.sh`).
+
+**To use the local models:**
+1. Install Ollama from [ollama.com/download](https://ollama.com/download) and start it (`ollama serve`, or use the Ollama desktop app).
+2. Pull the models you need:
+   ```bash
+   ollama pull gemma4:31b   # assessment of text/image replies (assess-replies)
+   ollama pull gemma4:e4b   # transcription of student audio (assess-replies, explain mode)
+   ```
+   Only pull the models for tasks you actually plan to run. `gemma4:31b` is a large download (~20 GB) and is only required for `assess-replies`.
+
+All model names are overridable via env vars (`OLLAMA_TEXT_MODEL`, `OLLAMA_MODEL`, `OLLAMA_AUDIO_MODEL`), and the local host can be overridden via the standard `OLLAMA_HOST` env var.
 
 
 ### Usage
 
 ```bash
-source set_env.sh                            # set Canvas environment variables (once per terminal session)
+source set_env.sh                            # set Canvas (and optional Ollama) environment variables (once per terminal session)
 python canvigator.py <task>                  # run a task (prompts for course selection)
 python canvigator.py --crn <CRN> <task>      # select course by CRN (last 5 digits of course code)
 python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)
+python canvigator.py --tag get-quiz-questions     # add LLM-generated topic tags to the quiz questions export
 python canvigator.py --reply-window-days N <task>  # set the days-after-send window for get-replies (default: 5)
 ```
 
@@ -96,6 +130,20 @@ Canvas course code. In the file names below, `<quiz>` refers to the quiz title
 and `YYYYMMDD` is the current date. Figure files now follow the same pattern as
 the CSV exports, with the date at the end of the filename. Event exports and
 per-question histograms are only generated by `get-all-subs`.
+
+#### LLM-assisted follow-up workflow
+
+Several of the newer tasks are designed to chain together into a single
+end-to-end flow. Run them in this order for a given quiz:
+
+1. `python canvigator.py --tag get-quiz-questions` — export the quiz's question content and add LLM topic tags (cloud model, requires `OLLAMA_API_KEY`).
+2. `python canvigator.py generate-open-ended-questions` — generate 3 candidate open-ended follow-up questions per original question, with an assessment guide for each. **Review the output CSV and set `selected_question=1` on one row per question group before moving on.**
+3. _(optional)_ `python canvigator.py send-quiz-reminder` — nudge students who haven't attempted the quiz or who scored below perfect. Imperfect-score students get a bulleted list of the topics (from the tags) they missed.
+4. `python canvigator.py send-follow-up-question` — send the single most-missed question's open-ended counterpart to each student who missed it. Students reply via Canvas conversations with an audio recording ("explain") or a photo ("draw").
+5. `python canvigator.py get-replies` — pull the students' replies (and attached audio/images) back from Canvas into a local CSV.
+6. `python canvigator.py assess-replies` — run the replies through the local `gemma4` models (transcription + assessment) to produce pass/fail + feedback for each student.
+
+Steps 4–6 can be repeated as students keep replying: `get-replies` picks up new messages, and `assess-replies` reassesses against the latest reply per student.
 
 ---
 
@@ -263,39 +311,49 @@ subdirectories (by `--crn` or interactively).
 
 #### `generate-open-ended-questions` — Generate open-ended questions from a tagged quiz
 
-Reads the tagged questions CSV for a selected quiz and uses a local LLM (via
-Ollama) in two steps to generate one open-ended follow-up question per quiz
-question:
+Reads the tagged questions CSV for a selected quiz and uses a cloud-hosted LLM
+(via Ollama's hosted endpoint, default `gemini-3-flash-preview`) to produce
+open-ended follow-up candidates. For each original quiz question the task runs
+three steps:
 
-1. **Classify** — For each question, the LLM decides whether an oral
-   explanation ("explain") or a hand-drawn diagram ("draw") would be the better
-   way to assess student understanding. Inherently visual topics (e.g. data
-   structures, memory layouts, process flows) are classified as "draw"; verbal
-   topics (e.g. trade-offs, algorithm logic, definitions) as "explain".
-2. **Generate** — Using the classification, the LLM generates a self-contained
-   open-ended question. "Explain" questions begin with "Explain..." and target
-   a ~1 minute oral response. "Draw" questions begin with "Draw a diagram..." or
-   "Draw a figure..." and target a ~2 minute hand-drawn response.
+1. **Classify** — The LLM decides whether an oral explanation ("explain") or a
+   hand-drawn diagram ("draw") would be the better way to assess student
+   understanding. Inherently visual topics (e.g. data structures, memory
+   layouts, process flows) are classified as "draw"; verbal topics (e.g.
+   trade-offs, algorithm logic, definitions) as "explain".
+2. **Generate 3 candidates** — Using the classification, the LLM generates 3
+   self-contained candidate open-ended questions. "Explain" questions begin with
+   "Explain..." and target a ~1 minute oral response. "Draw" questions begin
+   with "Draw a diagram..." or "Draw a figure..." and target a ~2 minute
+   hand-drawn response.
+3. **Assessment guide** — For each candidate, the LLM writes a short
+   `assessment_guide` describing the key concepts/elements a passing student
+   response must include. This guide is later used as the primary rubric in
+   `assess-replies`.
 
-The output CSV is intended for instructor review — edit the questions and
-override the `question_mode` column as needed before using them with students.
+The output CSV is intended for instructor review. Three rows are written per
+original question (one per candidate) with `selected_question=0`; **the
+instructor must review the candidates offline and set `selected_question=1`
+on exactly one row per question group** before running
+`send-follow-up-question`.
 
 **Prerequisite**: run `get-quiz-questions --tag` for the same quiz first so the
-`*_questions_w_tags_*.csv` is on disk.
+`*_questions_w_tags_*.csv` is on disk. Requires `OLLAMA_API_KEY` to be set —
+see [Ollama setup](#ollama-setup-optional).
 
 | | Files |
 |---|---|
 | **Input** | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
 | **Output** | `data/<course>/<quiz>_<id>_open_ended_YYYYMMDD.csv` |
 
-The output CSV contains columns: `question_id`, `position`, `question_name`,
-`keywords`, `question_mode` (`explain` or `draw`), `original_question_text`,
-`open_ended_question`.
+The output CSV contains columns: `selected_question`, `question_id`,
+`position`, `question_name`, `keywords`, `question_mode` (`explain` or
+`draw`), `open_ended_question`, `assessment_guide`, `original_question_text`.
 
 **Typical workflow:**
 1. Run `python canvigator.py --tag get-quiz-questions` and select the quiz.
-2. Run `python canvigator.py generate-open-ended-questions` and select the same quiz.
-3. Open the `*_open_ended_*.csv`, review/edit questions, and adjust any `question_mode` values as desired.
+2. Run `python canvigator.py generate-open-ended-questions` and select the tagged questions CSV.
+3. Open the `*_open_ended_*.csv`, review the 3 candidates per question, and set `selected_question=1` on the single row you want to use per question group (edit the question text, `question_mode`, or `assessment_guide` as desired).
 
 ---
 
@@ -365,13 +423,13 @@ The output CSV contains columns: `quiz_id`, `assignment_id`, `question_id`,
 gradebook/assignment exports.
 
 Pass `--tag` to add a `keywords` column (inserted before `question_text`) with
-1–3 short topical tags per question, produced by a local LLM via
+1–3 short topical tags per question, produced by an LLM via
 [Ollama](https://ollama.com). The output is written to a separate file
 (`*_questions_w_tags_*.csv`) so untagged and tagged exports never overwrite
-each other. This requires the Ollama server to be running and the model to be
-pulled locally. The model defaults to `gemma4:31b` and can be overridden with
-the `OLLAMA_MODEL` env var; the host can be overridden with the standard
-`OLLAMA_HOST` env var.
+each other. By default this uses the cloud-hosted text model
+`gemini-3-flash-preview` at `https://ollama.com`, which requires `OLLAMA_API_KEY`
+to be set — see [Ollama setup](#ollama-setup-optional). The model can be
+overridden via `OLLAMA_TEXT_MODEL`.
 
 ---
 
