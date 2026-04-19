@@ -431,6 +431,10 @@ each other. By default this uses the cloud-hosted text model
 to be set — see [Ollama setup](#ollama-setup-optional). The model can be
 overridden via `OLLAMA_TEXT_MODEL`.
 
+Pass `--all` to skip the interactive quiz prompt and export every quiz in the
+selected course — one CSV per quiz, using each quiz's own filename prefix.
+`--all` and `--tag` can be used independently or together.
+
 ---
 
 #### `get-replies` — Retrieve student replies to follow-up questions

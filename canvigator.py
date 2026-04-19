@@ -23,10 +23,11 @@ tasks = list(task_descriptions.keys())
 
 def print_help():
     """Print usage information with task descriptions."""
-    print("Usage: canvigator.py [--dry-run] [--tag] [--crn <CRN>] <task>\n")
+    print("Usage: canvigator.py [--dry-run] [--tag] [--all] [--crn <CRN>] <task>\n")
     print("Options:")
     print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)")
     print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
+    print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
     print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, get-replies only)\n")
     print("Tasks:")
@@ -77,6 +78,10 @@ if dry_run:
 tag = '--tag' in args
 if tag:
     args.remove('--tag')
+
+all_quizzes_flag = '--all' in args
+if all_quizzes_flag:
+    args.remove('--all')
 
 crn = None
 if '--crn' in args:
@@ -212,6 +217,14 @@ elif task == 'generate-open-ended-questions':
         "\nSelect tagged questions CSV (using index in '[ ]'): ",
     )
     cq.generateOpenEndedQuestions(tagged_csv)
+
+elif task == 'get-quiz-questions' and all_quizzes_flag:
+    all_course_quizzes = list(course_choice.get_quizzes())
+    print(f"\nFound {len(all_course_quizzes)} quiz(zes).")
+    for i, q in enumerate(all_course_quizzes, start=1):
+        print(f"\n[{i}/{len(all_course_quizzes)}] {q.title}")
+        quiz = cq.CanvigatorQuiz(canvas, course, q, canv_config, verbose=False, skip_student_data=True)
+        quiz.getQuizQuestions(tag=tag)
 
 else:
     # All remaining tasks require quiz selection
