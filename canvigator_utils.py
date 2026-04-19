@@ -45,6 +45,28 @@ def prompt_for_index(prompt_msg, max_index):
         return index - 1
 
 
+def find_latest_csv(data_path, pattern, exclude_substr=None):
+    """Return the Path of the newest CSV in data_path whose name contains `pattern` and ends with _YYYYMMDD.csv.
+
+    Files whose name contains `exclude_substr` (if given) are skipped — used to
+    exclude dry-run artifacts from sent-manifest lookups. Returns None when no
+    matching file exists so the caller can raise a task-specific FileNotFoundError.
+    """
+    matches = []
+    for f in os.listdir(data_path):
+        if exclude_substr and exclude_substr in f:
+            continue
+        m = re.search(r'(\d{8})\.csv$', f)
+        if m and pattern in f:
+            matches.append((m.group(1), f))
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda t: t[0])
+    return Path(data_path) / matches[-1][1]
+
+
 def selectCSVFromList(directory, keyword, prompt_msg, verbose=False):
     """
     List CSV files in directory matching keyword, prompt user to select one,
