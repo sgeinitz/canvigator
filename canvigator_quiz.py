@@ -472,7 +472,7 @@ class CanvigatorQuiz:
             "way to use the quiz as a learning tool is to try to answer the questions "
             "without going to outside references or AI tools. Trying to answer on your "
             "own, even if it feels like a struggle, is the best way to help learn this "
-            "material. Good luck! \n\nNOTE: This an auto-generated message, please let me know if you have any questions/concerns/suggestions about it."
+            "material. Good luck!"
         )
 
         imperfect_template = (
@@ -481,7 +481,7 @@ class CanvigatorQuiz:
             "quizzes are most effective as learning tools when you try to answer the "
             "questions on your own without using any other resources. Learning happens best "
             "when it feels challenging to recall concepts and ideas, so embrace the struggle."
-            " Good luck! \n\nNOTE: This an auto-generated message, please let me know if you have any questions/concerns/suggestions about it."
+            " Good luck!"
         )
 
         blur_template = (
@@ -490,7 +490,13 @@ class CanvigatorQuiz:
             "attempt. Remember, quizzes are most effective as learning tools when you try "
             "to answer the questions on your own without using any other resources. Learning "
             "happens best when it feels challenging to recall concepts and ideas, so embrace "
-            "the struggle. \n\nNOTE: This an auto-generated message, please let me know if you have any questions/concerns/suggestions about it."
+            "the struggle."
+        )
+
+        note_str = (
+            "\n\nNOTE: This is an auto-generated message that is currently being tested to see "
+            "whether it helps encourage students to (re)take a quiz, so please let me know if "
+            "you have any questions, concerns, or suggestions about it."
         )
 
         subject_str = f"Quiz Reminder - {quiz_name}"
@@ -520,7 +526,7 @@ class CanvigatorQuiz:
                 reminder = blur_template.format(quiz_name=quiz_name) + blur_bullets
                 reason = "page blur"
 
-            message_str = f"Hello {first_name}, {reminder}"
+            message_str = f"Hello {first_name}, {reminder}{note_str}"
             messages.append((student_id, student_name, message_str, reason))
 
         if dry_run:
