@@ -4,8 +4,38 @@ import json
 import logging
 import os
 import re
+import time
 
 logger = logging.getLogger(__name__)
+
+# Retry policy for transient upstream errors (e.g. Ollama cloud 5xx).
+_CHAT_MAX_ATTEMPTS = 4
+_CHAT_BACKOFF_BASE_SECS = 1.0
+
+
+def _chat_with_retry(client, **chat_kwargs):
+    """Call client.chat() with exponential-backoff retries on transient 5xx errors.
+
+    Retries only on HTTP 5xx (server-side hiccups); 4xx errors raise immediately
+    since those indicate a client-side problem (auth, bad model, malformed input).
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return client.chat(**chat_kwargs)
+        except Exception as e:
+            status_code = getattr(e, "status_code", None)
+            transient = status_code is not None and 500 <= status_code < 600
+            if not transient or attempt >= _CHAT_MAX_ATTEMPTS:
+                raise
+            delay = _CHAT_BACKOFF_BASE_SECS * (2 ** (attempt - 1))
+            logger.info(
+                f"Transient {status_code} from LLM; retrying in {delay:.1f}s "
+                f"(attempt {attempt + 1}/{_CHAT_MAX_ATTEMPTS})"
+            )
+            time.sleep(delay)
+
 
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:31b")
 DEFAULT_AUDIO_MODEL = os.environ.get("OLLAMA_AUDIO_MODEL", "gemma4:e4b")
@@ -184,7 +214,8 @@ def tag_question(row, client, model):
         row.get("answers"),
     )
     try:
-        resp = client.chat(
+        resp = _chat_with_retry(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": _TAG_SYSTEM_PROMPT},
@@ -287,7 +318,8 @@ def classify_question_mode(row, client, model):
         row.get("answers"),
     )
     try:
-        resp = client.chat(
+        resp = _chat_with_retry(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": _CLASSIFY_SYSTEM_PROMPT},
@@ -312,7 +344,8 @@ def generate_open_ended_candidates(row, client, model, mode, n=3):
     )
     system_prompt = _DRAW_SYSTEM_PROMPT if mode == "draw" else _EXPLAIN_SYSTEM_PROMPT
     try:
-        resp = client.chat(
+        resp = _chat_with_retry(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -357,7 +390,8 @@ def generate_assessment_guide(row, client, model, mode, open_ended_question):
         open_ended_question,
     )
     try:
-        resp = client.chat(
+        resp = _chat_with_retry(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": _ASSESSMENT_GUIDE_SYSTEM_PROMPT},
@@ -462,7 +496,8 @@ def _build_assessment_prompt(keywords, open_ended_question, original_question_te
 def transcribe_audio(audio_path, client, model):
     """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b)."""
     try:
-        resp = client.chat(
+        resp = _chat_with_retry(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": _TRANSCRIBE_SYSTEM_PROMPT},
@@ -483,7 +518,8 @@ def assess_explain(transcript, keywords, open_ended_question, original_question_
         transcript=transcript, assessment_guide=assessment_guide,
     )
     try:
-        resp = client.chat(
+        resp = _chat_with_retry(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": _ASSESS_EXPLAIN_SYSTEM_PROMPT},
@@ -504,7 +540,8 @@ def assess_draw(image_path, keywords, open_ended_question, original_question_tex
         assessment_guide=assessment_guide,
     )
     try:
-        resp = client.chat(
+        resp = _chat_with_retry(
+            client,
             model=model,
             messages=[
                 {"role": "system", "content": _ASSESS_DRAW_SYSTEM_PROMPT},
