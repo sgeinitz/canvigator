@@ -13,7 +13,7 @@ import os
 import re
 import json
 from pathlib import Path
-from canvigator_utils import today_str, selectCSVFromList, prompt_for_index
+from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv
 
 logger = logging.getLogger(__name__)
 
@@ -408,21 +408,12 @@ class CanvigatorQuiz:
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
         tagged_pattern = file_prefix + "questions_w_tags_"
 
-        all_files = os.listdir(self.config.data_path)
-        matching_dates = []
-        for f in all_files:
-            m = re.search(r'(\d{8})\.csv$', f)
-            if m and tagged_pattern in f:
-                matching_dates.append((m.group(1), f))
-
-        if not matching_dates:
+        latest_file = find_latest_csv(self.config.data_path, tagged_pattern)
+        if latest_file is None:
             raise FileNotFoundError(
                 f"No *_questions_w_tags_*.csv found for quiz '{self.quiz_name}'. "
                 f"Run 'python canvigator.py --crn <CRN> --tag get-quiz-questions' first."
             )
-
-        matching_dates.sort(key=lambda t: t[0])
-        latest_file = self.config.data_path / matching_dates[-1][1]
         print(f"  Using question data from: {latest_file.name}")
         dc_df = pd.read_csv(latest_file)
 
@@ -765,21 +756,12 @@ class CanvigatorQuiz:
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
         oe_pattern = file_prefix + "open_ended_"
 
-        all_files = os.listdir(self.config.data_path)
-        matching_dates = []
-        for f in all_files:
-            m = re.search(r'(\d{8})\.csv$', f)
-            if m and oe_pattern in f:
-                matching_dates.append((m.group(1), f))
-
-        if not matching_dates:
+        latest_file = find_latest_csv(self.config.data_path, oe_pattern)
+        if latest_file is None:
             raise FileNotFoundError(
                 f"No *_open_ended_*.csv found for quiz '{self.quiz_name}'. "
                 f"Run 'python canvigator.py generate-open-ended-questions' first."
             )
-
-        matching_dates.sort(key=lambda t: t[0])
-        latest_file = self.config.data_path / matching_dates[-1][1]
         print(f"  Using open-ended questions from: {latest_file.name}")
 
         df = pd.read_csv(latest_file)
@@ -966,24 +948,12 @@ class CanvigatorQuiz:
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
         manifest_pattern = file_prefix + "followup_sent_"
 
-        all_files = os.listdir(self.config.data_path)
-        matching_dates = []
-        for f in all_files:
-            # Skip dryrun manifests
-            if '_dryrun_' in f:
-                continue
-            m = re.search(r'(\d{8})\.csv$', f)
-            if m and manifest_pattern in f:
-                matching_dates.append((m.group(1), f))
-
-        if not matching_dates:
+        latest_file = find_latest_csv(self.config.data_path, manifest_pattern, exclude_substr='_dryrun_')
+        if latest_file is None:
             raise FileNotFoundError(
                 f"No *_followup_sent_*.csv found for quiz '{self.quiz_name}'. "
                 f"Run 'send-follow-up-question' first."
             )
-
-        matching_dates.sort(key=lambda t: t[0])
-        latest_file = self.config.data_path / matching_dates[-1][1]
         print(f"  Using follow-up manifest: {latest_file.name}")
 
         df = pd.read_csv(latest_file)
@@ -1136,21 +1106,12 @@ class CanvigatorQuiz:
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
         replies_pattern = file_prefix + "followup_replies_"
 
-        all_files = os.listdir(self.config.data_path)
-        matching_dates = []
-        for f in all_files:
-            m = re.search(r'(\d{8})\.csv$', f)
-            if m and replies_pattern in f:
-                matching_dates.append((m.group(1), f))
-
-        if not matching_dates:
+        latest_file = find_latest_csv(self.config.data_path, replies_pattern)
+        if latest_file is None:
             raise FileNotFoundError(
                 f"No *_followup_replies_*.csv found for quiz '{self.quiz_name}'. "
                 f"Run 'get-replies' first."
             )
-
-        matching_dates.sort(key=lambda t: t[0])
-        latest_file = self.config.data_path / matching_dates[-1][1]
         print(f"  Using replies from: {latest_file.name}")
         return pd.read_csv(latest_file)
 
