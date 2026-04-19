@@ -825,8 +825,8 @@ class CanvigatorQuiz:
 
     def _saveFollowUpManifest(self, messages, question_id, question_mode, subject_str, dry_run):
         """Save a CSV manifest of follow-up messages sent (or previewed in dry-run)."""
-        from datetime import datetime
-        sent_at = datetime.utcnow().isoformat() + 'Z'
+        from datetime import datetime, timezone
+        sent_at = datetime.now(timezone.utc).isoformat()
         manifest_rows = []
         for student_id, student_name, _, reason in messages:
             manifest_rows.append({
@@ -1317,7 +1317,7 @@ class CanvigatorQuiz:
         self.df_present = df_present_all[df_present_all['present'] == 1]
         print(f"  *** (double check there are {len(self.df_present)} students present today) ***")
 
-        self.df_quiz_scores_present = pd.merge(self.df_present[['name', 'id']], self.quiz_df, how='left')
+        self.df_quiz_scores_present = pd.merge(self.df_present[['name', 'id']], self.quiz_df.drop(columns=['name'], errors='ignore'), on='id', how='left')
         # replace missing vals with zero (for people who missed pre-quiz)
         with pd.option_context("future.no_silent_downcasting", True):
             self.df_quiz_scores_present = self.df_quiz_scores_present.fillna(0).infer_objects(copy=False)
