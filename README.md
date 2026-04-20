@@ -367,8 +367,28 @@ merges them, and saves a single CSV.
 | **Input** | _(none — data comes from the Canvas API)_ |
 | **Output** | `data/<course>/course_activity_YYYYMMDD.csv` |
 
-The output CSV contains columns: `name`, `id`, `page_views`, `missing`, `late`,
-`total_activity_mins`, `last_activity_at`.
+The output CSV contains columns: `name`, `id`, `page_views`, `page_views_level`,
+`participations`, `participations_level`, `missing`, `late`, `on_time`,
+`total_activity_mins`, `first_activity_at`, `last_activity_at`,
+`active_days_total`, `active_days_last_14`, `views_last_7d`,
+`messages_to_instructor`.
+
+The `*_level` columns are Canvas-computed 0–3 buckets summarizing the raw counts.
+`first_activity_at` / `last_activity_at` come from per-student page-view buckets
+(course-scoped analytics) — more accurate than the enrollment-level field, which
+Canvas often leaves stale. `messages_to_instructor` counts student-initiated
+messages in the course conversation thread.
+
+If the Canvas course has a `start_at` date set, additional columns
+`views_wk_01`, `views_wk_02`, … are appended (one per 7-day window from the
+course start, capped at 16 weeks). Useful for spotting an engagement drop
+mid-semester.
+
+If the Canvas token has admin-level permission to read user profiles / view
+usage reports, four further columns are appended: `top_browser`, `top_os`,
+`used_mobile_app`, `n_distinct_user_agents` — derived from per-user page-view
+records for this course. Most instructor tokens lack this permission, in which
+case these columns are simply omitted from the CSV.
 
 ---
 

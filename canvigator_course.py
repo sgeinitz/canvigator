@@ -1,9 +1,13 @@
 import hashlib
 import logging
 import shutil
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import canvigator_quiz as cq
 from canvigator_utils import today_str
+
+MAX_COURSE_WEEKS = 16
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +29,6 @@ class CanvigatorCourse:
                 student.user['total_activity_time'] = None
                 if hasattr(student, 'total_activity_time') and isinstance(student.total_activity_time, (int, float)):
                     student.user['total_activity_time'] = student.total_activity_time
-                student.user['last_activity_at'] = None
-                if hasattr(student, 'last_activity_at') and isinstance(student.last_activity_at, (int, float)):
-                    student.user['last_activity_at'] = student.last_activity_at
                 self.students.append(student.user)
         if verbose:
             print(self.students)
@@ -161,10 +162,16 @@ class CanvigatorCourse:
             summ_acts_data.append({
                 'id': s.id,
                 'page_views': s.page_views,
+                'page_views_level': getattr(s, 'page_views_level', None),
+                'participations': s.participations,
+                'participations_level': getattr(s, 'participations_level', None),
                 'missing': s.tardiness_breakdown['missing'],
-                'late': s.tardiness_breakdown['late']
+                'late': s.tardiness_breakdown['late'],
+                'on_time': s.tardiness_breakdown.get('on_time'),
             })
-        summ_acts = pd.DataFrame(summ_acts_data, columns=['id', 'page_views', 'missing', 'late'])
+        summ_cols = ['id', 'page_views', 'page_views_level', 'participations', 'participations_level',
+                     'missing', 'late', 'on_time']
+        summ_acts = pd.DataFrame(summ_acts_data, columns=summ_cols)
 
         acts_data = []
         for s in self.students:
@@ -172,17 +179,319 @@ class CanvigatorCourse:
                 'name': s['name'],
                 'id': s['id'],
                 'total_activity_mins': s['total_activity_time'] / 60.0 if s['total_activity_time'] is not None else None,
-                'last_activity_at': s['last_activity_at']
             })
-        acts = pd.DataFrame(acts_data, columns=['name', 'id', 'total_activity_mins', 'last_activity_at'])
+        acts = pd.DataFrame(acts_data, columns=['name', 'id', 'total_activity_mins'])
 
-        # do an outer join of summ_acts and acts on 'id' column and save to csv file
+        part_acts, week_cols = self._collectStudentParticipation()
+        device_acts = self._collectStudentDeviceInfo()
+
         merged_acts = pd.merge(summ_acts, acts, on='id', how='outer')
-        merged_acts = merged_acts[['name', 'id', 'page_views', 'missing', 'late', 'total_activity_mins', 'last_activity_at']]
+        merged_acts = pd.merge(merged_acts, part_acts, on='id', how='outer')
+        out_cols = [
+            'name', 'id',
+            'page_views', 'page_views_level',
+            'participations', 'participations_level',
+            'missing', 'late', 'on_time',
+            'total_activity_mins',
+            'first_activity_at', 'last_activity_at',
+            'active_days_total', 'active_days_last_14',
+            'views_last_7d', 'messages_to_instructor',
+        ] + week_cols
+        if device_acts is not None:
+            merged_acts = pd.merge(merged_acts, device_acts, on='id', how='outer')
+            out_cols += ['top_browser', 'top_os', 'used_mobile_app', 'n_distinct_user_agents']
+        merged_acts = merged_acts[out_cols]
         merged_acts_csv = data_path / f"course_activity_{today_str()}.csv"
         merged_acts.to_csv(merged_acts_csv, index=False)
         print(f"Saved student activity to {merged_acts_csv.name}")
         logger.info(f"Saved student activity to {merged_acts_csv}")
+
+    def _collectStudentParticipation(self, now_utc=None):
+        """Per-student historical activity from Canvas course-level analytics.
+
+        Calls two course-scoped analytics endpoints per student (both accessible
+        to instructor tokens, unlike the admin-only /users/:id/page_views):
+
+          - ``get_user_in_a_course_level_participation_data`` → hourly
+            page-view buckets and a list of participation events.
+          - ``get_user_in_a_course_level_messaging_data`` → per-day instructor/
+            student message counts.
+
+        Derives the following columns:
+          - ``first_activity_at``, ``last_activity_at`` (UTC ISO strings, from
+            actual page-view buckets — supersedes the enrollment field, which
+            Canvas often leaves stale).
+          - ``active_days_total`` — distinct calendar days with any activity.
+          - ``active_days_last_14`` — distinct active days in the last 14 days
+            (recency / disengagement signal).
+          - ``views_last_7d`` — total page views in the last 7 days.
+          - ``messages_to_instructor`` — sum of student-initiated messages.
+          - ``views_wk_01`` … ``views_wk_NN`` — page views bucketed into 7-day
+            windows from ``course.start_at``. Capped at ``MAX_COURSE_WEEKS``
+            (16) for typical semester length. Omitted entirely if the Canvas
+            course has no ``start_at`` set.
+
+        Failures on individual students are logged and leave that student's
+        derived columns as None; the rest of the roster is still processed.
+        """
+        now_utc = now_utc or datetime.now(timezone.utc)
+
+        course_start_dt = _parse_canvas_timestamp(getattr(self.canvas_course, 'start_at', None))
+        if course_start_dt is None:
+            logger.info("Canvas course.start_at is not set — per-week views_wk_NN columns will be omitted.")
+            print("  (course start date not set — skipping per-week columns)")
+            n_weeks = 0
+        else:
+            days_elapsed = (now_utc - course_start_dt).days
+            n_weeks = max(0, min(MAX_COURSE_WEEKS, days_elapsed // 7 + 1)) if days_elapsed >= 0 else 0
+
+        week_cols = [f"views_wk_{i:02d}" for i in range(1, n_weeks + 1)]
+        base_cols = ['id', 'first_activity_at', 'last_activity_at',
+                     'active_days_total', 'active_days_last_14',
+                     'views_last_7d', 'messages_to_instructor']
+        cutoff_7d = now_utc - timedelta(days=7)
+        cutoff_14d = now_utc - timedelta(days=14)
+
+        rows = []
+        print(f"Fetching per-student participation data for {len(self.students)} students...")
+        for i, s in enumerate(self.students, start=1):
+            sid = s['id']
+            print(f"  [{i}/{len(self.students)}] {s['name']}")
+            row = {c: None for c in base_cols + week_cols}
+            row['id'] = sid
+
+            try:
+                part = self.canvas_course.get_user_in_a_course_level_participation_data(sid)
+            except Exception as e:
+                logger.warning(f"Could not fetch participation data for id={sid}: {e}")
+                part = None
+
+            if isinstance(part, dict):
+                row.update(_summarize_participation(
+                    part.get('page_views') or {},
+                    course_start_dt, n_weeks, week_cols,
+                    cutoff_7d, cutoff_14d,
+                ))
+
+            try:
+                msgs = self.canvas_course.get_user_in_a_course_level_messaging_data(sid)
+            except Exception as e:
+                logger.warning(f"Could not fetch messaging data for id={sid}: {e}")
+                msgs = None
+            row['messages_to_instructor'] = _count_student_messages(msgs)
+
+            rows.append(row)
+
+        return pd.DataFrame(rows, columns=base_cols + week_cols), week_cols
+
+    def _collectStudentDeviceInfo(self):
+        """Aggregate browser/OS/mobile-app usage per student from Canvas page views.
+
+        Calls ``user.get_page_views()`` for each enrolled student, filters to
+        this course's context, and returns a DataFrame with columns
+        ``id, top_browser, top_os, used_mobile_app, n_distinct_user_agents``.
+
+        Permission model (important):
+            The underlying endpoints — ``GET /api/v1/users/:id`` and
+            ``GET /api/v1/users/:id/page_views`` — are gated by Canvas's
+            "read user profile" / "view usage reports" permissions, which are
+            typically granted only to **account admins**. Instructor-level
+            tokens at most institutions will get a 404 (Canvas returns 404
+            rather than 403 to avoid leaking user existence).
+
+            To avoid emitting one warning per student on every run when the
+            token is locked out, we do a single-student *permission probe*
+            up front. If it fails, we log one info-level message explaining
+            the likely cause and **return None** so the caller can omit the
+            four device columns from the output CSV entirely (cleaner than
+            showing a column of blanks to instructors who don't know about
+            this Canvas permission). If the probe succeeds we proceed with
+            the normal per-student loop and return a DataFrame.
+        """
+        if not self.students:
+            return None
+
+        # Permission probe — see docstring. A failure here (404 from Canvas)
+        # almost always means the token lacks admin-level access to the
+        # /users/:id endpoint, so the per-student page_views calls will fail
+        # identically for every student. Short-circuit instead of looping.
+        probe_sid = self.students[0]['id']
+        try:
+            self.canvas.get_user(probe_sid)
+        except Exception as e:
+            logger.info(
+                "Skipping browser/device detection: cannot access /api/v1/users/:id "
+                f"({e}). This usually means the Canvas token lacks the admin-level "
+                "permission to read user profiles / view usage reports; instructor "
+                "tokens are typically restricted from this endpoint. The four "
+                "device columns will be omitted from the output CSV."
+            )
+            print("  (skipping browser/device columns — token lacks page-view permissions)")
+            return None
+
+        course_id = self.canvas_course.id
+        rows = []
+        print(f"Fetching page view device data for {len(self.students)} students...")
+        for i, s in enumerate(self.students, start=1):
+            sid = s['id']
+            print(f"  [{i}/{len(self.students)}] {s['name']}")
+            browsers = Counter()
+            oses = Counter()
+            user_agents = set()
+            used_mobile_app = False
+            try:
+                user = self.canvas.get_user(sid)
+                for pv in user.get_page_views():
+                    if getattr(pv, 'context_type', None) != 'Course':
+                        continue
+                    if getattr(pv, 'context_id', None) != course_id:
+                        continue
+                    app = getattr(pv, 'app_name', None)
+                    if app and 'Canvas for' in app:
+                        used_mobile_app = True
+                    ua = getattr(pv, 'user_agent', None)
+                    if ua:
+                        user_agents.add(ua)
+                        browsers[_parse_browser(ua)] += 1
+                        oses[_parse_os(ua)] += 1
+            except Exception as e:
+                logger.warning(f"Could not fetch page views for student id={sid}: {e}")
+                rows.append({'id': sid, 'top_browser': None, 'top_os': None,
+                             'used_mobile_app': None, 'n_distinct_user_agents': None})
+                continue
+            rows.append({
+                'id': sid,
+                'top_browser': browsers.most_common(1)[0][0] if browsers else None,
+                'top_os': oses.most_common(1)[0][0] if oses else None,
+                'used_mobile_app': used_mobile_app,
+                'n_distinct_user_agents': len(user_agents) if user_agents else 0,
+            })
+        return pd.DataFrame(rows, columns=['id', 'top_browser', 'top_os',
+                                           'used_mobile_app', 'n_distinct_user_agents'])
+
+
+def _parse_canvas_timestamp(ts_str):
+    """Parse a Canvas ISO 8601 timestamp into a UTC-aware datetime, or None on failure."""
+    if not ts_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _bucket_week(timestamp_dt, course_start_dt, max_weeks=MAX_COURSE_WEEKS):
+    """Return the 1-indexed week number for a timestamp relative to course start.
+
+    Week 1 spans [course_start, course_start + 7 days); Week 2 the next 7 days,
+    and so on. Returns None for timestamps before the course start or beyond
+    ``max_weeks``.
+    """
+    if timestamp_dt is None or course_start_dt is None:
+        return None
+    if timestamp_dt < course_start_dt:
+        return None
+    days_in = (timestamp_dt - course_start_dt).days
+    wk = days_in // 7 + 1
+    if wk > max_weeks:
+        return None
+    return wk
+
+
+def _summarize_participation(page_views_dict, course_start_dt, n_weeks, week_cols, cutoff_7d, cutoff_14d):
+    """Reduce Canvas hourly page-view buckets into summary + per-week fields."""
+    first_ts = None
+    last_ts = None
+    active_days = set()
+    active_days_recent = set()
+    views_7d = 0
+    week_buckets = {col: 0 for col in week_cols}
+
+    for ts_str, count in page_views_dict.items():
+        if not count:
+            continue
+        ts = _parse_canvas_timestamp(ts_str)
+        if ts is None:
+            continue
+        if first_ts is None or ts < first_ts:
+            first_ts = ts
+        if last_ts is None or ts > last_ts:
+            last_ts = ts
+        day = ts.date()
+        active_days.add(day)
+        if ts >= cutoff_14d:
+            active_days_recent.add(day)
+        if ts >= cutoff_7d:
+            views_7d += count
+        wk = _bucket_week(ts, course_start_dt)
+        if wk is not None and wk <= n_weeks:
+            week_buckets[f"views_wk_{wk:02d}"] += count
+
+    out = {
+        'first_activity_at': first_ts.isoformat() if first_ts else None,
+        'last_activity_at': last_ts.isoformat() if last_ts else None,
+        'active_days_total': len(active_days),
+        'active_days_last_14': len(active_days_recent),
+        'views_last_7d': views_7d,
+    }
+    out.update(week_buckets)
+    return out
+
+
+def _count_student_messages(msgs):
+    """Sum the studentMessages field across Canvas messaging-data records."""
+    if msgs is None:
+        return None
+    total = 0
+    # Canvas typically returns a list of {date, instructorMessages, studentMessages};
+    # tolerate the dict-keyed-by-date variant some wrappers produce.
+    if isinstance(msgs, list):
+        records = msgs
+    elif isinstance(msgs, dict):
+        records = msgs.values()
+    else:
+        return None
+    for m in records:
+        if isinstance(m, dict):
+            total += m.get('studentMessages') or 0
+    return total
+
+
+def _parse_browser(user_agent):
+    """Extract a coarse browser label from a User-Agent string."""
+    if not user_agent:
+        return 'Unknown'
+    if 'Edg' in user_agent:
+        return 'Edge'
+    if 'OPR/' in user_agent or 'Opera' in user_agent:
+        return 'Opera'
+    if 'Chrome' in user_agent:
+        return 'Chrome'
+    if 'Firefox' in user_agent:
+        return 'Firefox'
+    if 'Safari' in user_agent:
+        return 'Safari'
+    return 'Other'
+
+
+def _parse_os(user_agent):
+    """Extract a coarse operating-system label from a User-Agent string."""
+    if not user_agent:
+        return 'Unknown'
+    if 'iPhone' in user_agent or 'iPad' in user_agent or 'iOS' in user_agent:
+        return 'iOS'
+    if 'Android' in user_agent:
+        return 'Android'
+    if 'Mac OS' in user_agent or 'Macintosh' in user_agent:
+        return 'macOS'
+    if 'Windows' in user_agent:
+        return 'Windows'
+    if 'Linux' in user_agent:
+        return 'Linux'
+    return 'Other'
 
 
 def _make_anon_id(student_id):
