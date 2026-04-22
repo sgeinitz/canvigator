@@ -566,55 +566,56 @@ class CanvigatorQuiz:
         logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)} for {quiz_name}")
 
     def sendFollowUpQuestions(self, dry_run=False):
-        """Send the most-missed open-ended follow-up question to students who missed it.
+        """Send the instructor-selected open-ended follow-up question to students who missed it.
 
-        Requires that get-quiz-questions --tag and generate-open-ended-questions
-        have both been run for this quiz. Auto-refreshes submission data to pick
-        up recent attempts.
+        Picks the first row in the *_open_ended_*.csv with `selected_question == 1`
+        as the question to send (the instructor curates the choice offline).
+        Recipients are still students who missed the corresponding original quiz
+        question on their latest attempt. Requires that get-quiz-questions --tag
+        and generate-open-ended-questions have both been run for this quiz.
+        Auto-refreshes submission data to pick up recent attempts.
         """
         quiz_name = self.canvas_quiz.title
 
         # Load question metadata (from *_questions_w_tags_*.csv)
         question_info = self._loadQuestionInfo()
 
-        # Load the open-ended questions CSV
+        # Load the open-ended questions CSV — already filtered to selected_question=1 rows
         open_ended_rows = self._loadOpenEndedQuestions()
-
-        # Refresh submission data for up-to-date per-question scores
-        print("\nFetching latest submissions for follow-up question targeting...")
-        self.getAllSubmissionsAndEvents()
-        subs_by_q_df = self.all_subs_by_question
-
-        if subs_by_q_df is None or subs_by_q_df.empty:
-            print("No submission data available — cannot determine missed questions.")
+        if not open_ended_rows:
+            print("No `selected_question=1` rows found in the open-ended CSV.")
+            print("Edit the CSV to mark exactly one row per group (or at least one row overall) and re-run.")
             return
 
-        # Find the most-missed question
-        most_missed_qid = self._findMostMissedQuestion(subs_by_q_df, question_info)
-        if most_missed_qid is None:
-            print("All students scored perfectly on all questions — no follow-up needed!")
-            return
+        # Pick the first selected question — instructor curates the choice via the CSV.
+        selected_qid = next(iter(open_ended_rows))
+        oe_row = open_ended_rows[selected_qid]
 
-        info = question_info[most_missed_qid]
+        info = question_info.get(selected_qid)
+        if info is None:
+            print(f"Question {selected_qid} from open-ended CSV not found in questions metadata — re-run 'get-quiz-questions --tag'.")
+            return
         position = info['position']
         keywords = info['keywords']
-
-        # Look up the open-ended question for this question_id
-        oe_row = open_ended_rows.get(most_missed_qid)
-        if oe_row is None:
-            print(f"No open-ended question found for question_id {most_missed_qid} (Q{position}: {keywords}).")
-            print("Re-run 'generate-open-ended-questions' to regenerate.")
-            return
 
         question_mode = oe_row.get('question_mode', 'explain')
         open_ended_text = oe_row['open_ended_question']
 
-        print(f"\nMost-missed question: Q{position} — {keywords}")
+        print(f"\nSelected follow-up: Q{position} — {keywords}")
         print(f"  Mode: {question_mode}")
         print(f"  Follow-up: {open_ended_text[:120]}{'...' if len(open_ended_text) > 120 else ''}")
 
+        # Refresh submission data so the recipient list reflects the latest attempts
+        print("\nFetching latest submissions to identify students who missed this question...")
+        self.getAllSubmissionsAndEvents()
+        subs_by_q_df = self.all_subs_by_question
+
+        if subs_by_q_df is None or subs_by_q_df.empty:
+            print("No submission data available — cannot determine recipients.")
+            return
+
         # Build the list of students who missed this question on their latest attempt
-        students_who_missed = self._findStudentsWhoMissed(most_missed_qid, subs_by_q_df, question_info)
+        students_who_missed = self._findStudentsWhoMissed(selected_qid, subs_by_q_df, question_info)
 
         if not students_who_missed:
             print("No students missed this question on their latest attempt — no follow-up needed!")
@@ -659,11 +660,11 @@ class CanvigatorQuiz:
 
         if dry_run:
             self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
-            self._saveFollowUpManifest(messages, most_missed_qid, question_mode, subject_str, dry_run)
+            self._saveFollowUpManifest(messages, selected_qid, question_mode, subject_str, dry_run)
         else:
             sent_messages = self._interactiveSend(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
             if sent_messages:
-                self._saveFollowUpManifest(sent_messages, most_missed_qid, question_mode, subject_str, dry_run)
+                self._saveFollowUpManifest(sent_messages, selected_qid, question_mode, subject_str, dry_run)
 
     def _interactiveSend(self, messages, subject_str, quiz_name, points_possible):
         """Interactively prompt the instructor to send or skip each message.
@@ -712,42 +713,6 @@ class CanvigatorQuiz:
         print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
         logger.info(f"Interactive send for {quiz_name}: {n_sent} sent, {n_skipped} skipped")
         return sent_messages
-
-    def _findMostMissedQuestion(self, subs_by_q_df, question_info):
-        """Return the question_id with the highest miss rate, or None if all are perfect.
-
-        Miss rate = fraction of students whose latest attempt scored below
-        points_possible for that question.
-        """
-        # Use only the latest attempt per student (each student has multiple rows — one per question)
-        max_attempt_per_student = subs_by_q_df.groupby('id')['attempt'].transform('max')
-        latest_attempts = subs_by_q_df[subs_by_q_df['attempt'] == max_attempt_per_student]
-
-        miss_rates = {}
-        for qid, info in question_info.items():
-            pp = info.get('points_possible')
-            if pp is None:
-                continue
-            q_rows = latest_attempts[latest_attempts['question_id'] == qid]
-            if q_rows.empty:
-                continue
-            n_total = len(q_rows)
-            n_missed = sum(1 for _, row in q_rows.iterrows()
-                           if pd.notna(row.get('points')) and float(row['points']) < float(pp))
-            miss_rates[qid] = n_missed / n_total if n_total > 0 else 0.0
-
-        if not miss_rates or max(miss_rates.values()) == 0:
-            return None
-
-        # Report top-5 miss rates for instructor visibility
-        sorted_rates = sorted(miss_rates.items(), key=lambda t: t[1], reverse=True)
-        print("\nQuestion miss rates (latest attempt):")
-        for qid, rate in sorted_rates[:5]:
-            info = question_info.get(qid, {})
-            label = f"Q{info.get('position', '?')} ({info.get('keywords', '')})"
-            print(f"  {label}: {rate:.0%}")
-
-        return sorted_rates[0][0]
 
     def _findStudentsWhoMissed(self, question_id, subs_by_q_df, question_info):
         """Return a list of student IDs who scored below points_possible on the given question in their latest attempt."""

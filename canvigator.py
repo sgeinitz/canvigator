@@ -15,7 +15,7 @@ task_descriptions = {
     'get-gradebook': 'Export course gradebook',
     'get-quiz-questions': 'Export quiz question content',
     'get-replies': 'Retrieve student replies to follow-up questions',
-    'send-follow-up-question': 'Send the most-missed open-ended follow-up question to students',
+    'send-follow-up-question': 'Send the instructor-selected open-ended follow-up question to students who missed it',
     'send-quiz-reminder': 'Send quiz reminder messages to students',
 }
 tasks = list(task_descriptions.keys())

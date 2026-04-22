@@ -139,7 +139,7 @@ end-to-end flow. Run them in this order for a given quiz:
 1. `python canvigator.py --tag get-quiz-questions` — export the quiz's question content and add LLM topic tags (cloud model, requires `OLLAMA_API_KEY`).
 2. `python canvigator.py generate-open-ended-questions` — generate 3 candidate open-ended follow-up questions per original question, with an assessment guide for each. **Review the output CSV and set `selected_question=1` on one row per question group before moving on.**
 3. _(optional)_ `python canvigator.py send-quiz-reminder` — nudge students who haven't attempted the quiz or who scored below perfect. Imperfect-score students get a bulleted list of the topics (from the tags) they missed.
-4. `python canvigator.py send-follow-up-question` — send the single most-missed question's open-ended counterpart to each student who missed it. Students reply via Canvas conversations with an audio recording ("explain") or a photo ("draw").
+4. `python canvigator.py send-follow-up-question` — send the instructor-selected open-ended question (the first row in the CSV with `selected_question=1`) to each student who missed the corresponding original quiz question. Students reply via Canvas conversations with an audio recording ("explain") or a photo ("draw").
 5. `python canvigator.py get-replies` — pull the students' replies (and attached audio/images) back from Canvas into a local CSV.
 6. `python canvigator.py assess-replies` — run the replies through the local `gemma4` models (transcription + assessment) to produce pass/fail + feedback for each student.
 
@@ -493,15 +493,15 @@ The output CSV contains columns: `student_id`, `student_name`, `question_id`,
 
 ---
 
-#### `send-follow-up-question` — Send the most-missed open-ended follow-up question to students
+#### `send-follow-up-question` — Send the instructor-selected open-ended follow-up question to students
 
-Identifies the single most-missed question on the quiz (highest miss rate
-across students' latest attempts), looks up its open-ended counterpart from
-the `*_open_ended_*.csv`, and sends it via a Canvas conversation message to
-each student who missed it. Each thread uses `force_new=True` so the
-follow-up exchange lives in its own dedicated conversation. The Canvas-assigned
-`conversation_id` is captured at send time and recorded in the manifest so
-`get-replies` can fetch each thread directly by ID.
+Reads the `*_open_ended_*.csv`, picks the first row marked
+`selected_question=1` as the question to send, and sends it via a Canvas
+conversation message to each student who missed the corresponding original
+quiz question on their latest attempt. Each thread uses `force_new=True` so
+the follow-up exchange lives in its own dedicated conversation. The
+Canvas-assigned `conversation_id` is captured at send time and recorded in
+the manifest so `get-replies` can fetch each thread directly by ID.
 
 The wording of the response instructions depends on the `question_mode` of
 the open-ended question: `explain` asks the student to record a short voice
@@ -511,7 +511,7 @@ When not in `--dry-run` mode, the instructor is prompted for each student
 with a full message preview and a `[send/SKIP]` choice (default: skip). Only
 messages the instructor approves are sent and recorded in the manifest.
 Submissions are auto-refreshed via `getAllSubmissionsAndEvents()` on every
-run so the most-missed question reflects the latest attempts.
+run so the recipient list reflects the latest attempts.
 
 **Prerequisite**: run `get-quiz-questions --tag` and then
 `generate-open-ended-questions` for the same quiz first so both the
