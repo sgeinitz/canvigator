@@ -280,8 +280,13 @@ def tag_question(row, client, model):
         return []
 
 
-def tag_questions(rows, model=None):
-    """Annotate each row dict in-place with a 'tags' key (comma-separated string)."""
+def tag_questions(rows, model=None, progress=None):
+    """Annotate each row dict in-place with a 'tags' key (comma-separated string).
+
+    `progress` is an optional `(spin, spin_done)` callback pair from canvigator_utils;
+    when provided, per-question status is shown as a single overwriting spinner line
+    instead of one printed line per question.
+    """
     try:
         import ollama  # noqa: F401
     except ImportError as e:
@@ -291,14 +296,22 @@ def tag_questions(rows, model=None):
 
     model = model or DEFAULT_TEXT_MODEL
     client = _make_client(cloud=True)
+    spin_fn, spin_done_fn = progress if progress else (None, None)
 
     total = len(rows)
     print(f"Tagging {total} questions with cloud model '{model}'...")
     for i, row in enumerate(rows, start=1):
-        print(f"  [{i}/{total}] {row.get('question_name') or row.get('question_id')}")
+        label = row.get('question_name') or row.get('question_id')
+        if spin_fn:
+            spin_fn(i, f"Tagging [{i}/{total}] {label}")
+        else:
+            print(f"  [{i}/{total}] {label}")
         tags = tag_question(row, client, model)
         row["keywords"] = ", ".join(tags)
-    print("Tagging complete.")
+    if spin_done_fn:
+        spin_done_fn(f"Tagged {total} questions")
+    else:
+        print("Tagging complete.")
 
 
 def _parse_candidates(response, n=3):
@@ -814,7 +827,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     return results
 
 
-def generate_open_ended_questions(rows, model=None, n=3):
+def generate_open_ended_questions(rows, model=None, n=3, progress=None):
     """Classify and generate n candidate open-ended questions per input row.
 
     Step 1: For each question, ask the LLM whether 'explain' or 'draw' is the
@@ -823,6 +836,10 @@ def generate_open_ended_questions(rows, model=None, n=3):
     Returns a flat list of result dicts — n rows per input row (padded with empty
     candidate strings if the LLM returned fewer). Each row has selected_question=0;
     the instructor reviews the output CSV and sets one row per group to 1.
+
+    `progress` is an optional `(spin, spin_done)` callback pair from canvigator_utils;
+    when provided, per-question stage status is rendered as a single overwriting
+    spinner line instead of one printed line per question.
     """
     try:
         import ollama  # noqa: F401
@@ -834,21 +851,36 @@ def generate_open_ended_questions(rows, model=None, n=3):
 
     model = model or DEFAULT_TEXT_MODEL
     client = _make_client(cloud=True)
+    spin_fn, spin_done_fn = progress if progress else (None, None)
 
     total = len(rows)
     print(f"Generating {n} candidate open-ended questions for each of {total} questions with cloud model '{model}'...")
     results = []
+    frame = 0
     for i, row in enumerate(rows, start=1):
         label = row.get('question_name') or row.get('question_id')
-        print(f"  [{i}/{total}] {label} — classifying...", end="", flush=True)
+        if spin_fn:
+            spin_fn(frame, f"[{i}/{total}] {label} — classifying")
+            frame += 1
+        else:
+            print(f"  [{i}/{total}] {label} — classifying...", end="", flush=True)
         mode = classify_question_mode(row, client, model)
-        print(f" {mode} — generating {n} candidates...", end="", flush=True)
+        if spin_fn:
+            spin_fn(frame, f"[{i}/{total}] {label} — {mode} — generating {n} candidates")
+            frame += 1
+        else:
+            print(f" {mode} — generating {n} candidates...", end="", flush=True)
         candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
         non_empty = len([c for c in candidates if c])
-        print(f" writing {non_empty} guide(s) + rubric(s)...", end="", flush=True)
+        if spin_fn:
+            spin_fn(frame, f"[{i}/{total}] {label} — writing {non_empty} guide(s) + rubric(s)")
+            frame += 1
+        else:
+            print(f" writing {non_empty} guide(s) + rubric(s)...", end="", flush=True)
         guides = [generate_assessment_guide(row, client, model, mode, cand) for cand in candidates]
         rubrics = [generate_structured_rubric(row, client, model, mode, cand) for cand in candidates]
-        print(" done")
+        if not spin_fn:
+            print(" done")
 
         if not candidates:
             logger.warning(f"No candidates generated for question {row.get('question_id')}")
@@ -871,5 +903,8 @@ def generate_open_ended_questions(rows, model=None, n=3):
                 'rubric_json': json.dumps(rubric, ensure_ascii=False),
                 'original_question_text': original_text,
             })
-    print("Generation complete.")
+    if spin_done_fn:
+        spin_done_fn(f"Generated open-ended questions for {total} originals")
+    else:
+        print("Generation complete.")
     return results

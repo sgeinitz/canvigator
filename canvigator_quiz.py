@@ -1,4 +1,3 @@
-import sys
 import time
 import random
 import logging
@@ -13,7 +12,7 @@ import os
 import re
 import json
 from pathlib import Path
-from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv
+from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv, spin, spin_done
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +172,7 @@ def generateOpenEndedQuestions(tagged_csv_path):
     rows = df.to_dict('records')
 
     import canvigator_llm
-    results = canvigator_llm.generate_open_ended_questions(rows)
+    results = canvigator_llm.generate_open_ended_questions(rows, progress=(spin, spin_done))
 
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',
@@ -307,7 +306,7 @@ class CanvigatorQuiz:
 
         if tag:
             import canvigator_llm
-            canvigator_llm.tag_questions(rows)
+            canvigator_llm.tag_questions(rows, progress=(spin, spin_done))
 
         columns = ['quiz_id', 'assignment_id', 'question_id', 'position', 'question_name', 'question_type']
         if tag:
@@ -1174,19 +1173,13 @@ class CanvigatorQuiz:
         print(f"  Using replies from: {latest_file.name}")
         return pd.read_csv(latest_file)
 
-    SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
     def _spin(self, frame, message, indent=2):
-        """Write a single spinner frame with a message to stdout, overwriting the current line."""
-        pad = ' ' * indent
-        sys.stdout.write(f"\r{pad}{self.SPINNER_FRAMES[frame % len(self.SPINNER_FRAMES)]} {message}  ")
-        sys.stdout.flush()
+        """Write a single spinner frame with a message — thin wrapper around canvigator_utils.spin."""
+        spin(frame, message, indent=indent)
 
     def _spin_done(self, message, indent=2):
-        """Clear the spinner line and write a completion message."""
-        pad = ' ' * indent
-        sys.stdout.write(f"\r{pad}✓ {message}                              \n")
-        sys.stdout.flush()
+        """Clear the spinner line and write a completion message — wrapper around canvigator_utils.spin_done."""
+        spin_done(message, indent=indent)
 
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""

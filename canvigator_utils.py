@@ -13,6 +13,23 @@ def today_str():
     return datetime.today().strftime('%Y%m%d')
 
 
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def spin(frame, message, indent=2):
+    """Write a single spinner frame with a message to stdout, overwriting the current line."""
+    pad = ' ' * indent
+    sys.stdout.write(f"\r{pad}{SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} {message}  ")
+    sys.stdout.flush()
+
+
+def spin_done(message, indent=2):
+    """Clear the spinner line and write a completion message."""
+    pad = ' ' * indent
+    sys.stdout.write(f"\r{pad}✓ {message}                              \n")
+    sys.stdout.flush()
+
+
 def setup_logging():
     """Configure logging to file and console (warnings only on console, all to file)."""
     root_logger = logging.getLogger()
