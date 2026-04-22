@@ -433,6 +433,46 @@ The output CSV contains columns: `name`, `sortable_name`, `user_id`,
 
 ---
 
+#### `get-roster` — Export the full course roster
+
+Iterates `canvas_course.get_enrollments()` with no role filter and writes a
+minimal CSV of every enrolled person — students, teachers, TAs, designers, and
+observers. Useful as a course-wide identity reference and as a stable input
+for scripts outside Canvigator.
+
+| | Files |
+|---|---|
+| **Input** | _(none — data comes from the Canvas API)_ |
+| **Output** | `data/<course>/roster_YYYYMMDD.csv` |
+
+The output CSV contains columns: `name`, `id`, `sis_id`, `enrollment_type`.
+`enrollment_type` is the Canvas type string (`StudentEnrollment`,
+`TeacherEnrollment`, `TaEnrollment`, `DesignerEnrollment`, `ObserverEnrollment`).
+
+---
+
+#### `get-conversations` — Export Canvas conversations involving course students
+
+Canvas conversations are not course-scoped, so this pulls the instructor's
+full inbox and sent folders via `canvas.get_conversations()` (default scope
+plus `scope='sent'`, deduped by `conversation_id`) and filters each
+conversation's participants list against the active-student roster for the
+selected course. Primary use case: back-fill the `conversation_id` for
+follow-up sends made before the per-send manifest was added, so `get-replies`
+can still fetch those threads by ID.
+
+| | Files |
+|---|---|
+| **Input** | _(none — data comes from the Canvas API)_ |
+| **Output** | `data/<course>/conversations_YYYYMMDD.csv` |
+
+The output CSV is sorted newest first and contains columns: `conversation_id`,
+`subject`, `last_message_at`, `message_count`, `workflow_state`, `student_ids`
+(comma-separated), `student_names` (semicolon-separated), `n_student_participants`,
+`last_message`.
+
+---
+
 #### `get-quiz-questions` — Export quiz question content
 
 Exports quiz metadata and question content to a CSV file. Skips downloading

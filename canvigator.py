@@ -12,9 +12,11 @@ task_descriptions = {
     'generate-open-ended-questions': 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)',
     'get-activity': 'Export student activity data',
     'get-all-subs': 'Export all quiz submissions and events',
+    'get-conversations': 'Export Canvas conversations involving students in the selected course',
     'get-gradebook': 'Export course gradebook',
     'get-quiz-questions': 'Export quiz question content',
     'get-replies': 'Retrieve student replies to follow-up questions',
+    'get-roster': 'Export the full course roster (name, id, sis_id, enrollment_type)',
     'send-follow-up-question': 'Send the instructor-selected open-ended follow-up question to students who missed it',
     'send-quiz-reminder': 'Send quiz reminder messages to students',
 }
@@ -208,6 +210,12 @@ elif task == 'create-quiz':
 
 elif task == 'get-gradebook':
     course.exportGradebook(canv_config.data_path)
+
+elif task == 'get-roster':
+    course.exportRoster(canv_config.data_path)
+
+elif task == 'get-conversations':
+    course.exportConversations(canv_config.data_path)
 
 elif task == 'generate-open-ended-questions':
     # Driven by a pre-selected tagged-questions CSV, not a Canvas quiz
