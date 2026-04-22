@@ -105,9 +105,11 @@ class CanvigatorCourse:
 
         Iterates the full ``get_enrollments()`` paginated list (no role filter)
         so the output matches what Canvas considers the course roster, including
-        non-student roles. Columns: name, id, sis_id, enrollment_type — where
-        enrollment_type is the Canvas type string (StudentEnrollment,
-        TeacherEnrollment, TaEnrollment, DesignerEnrollment, ObserverEnrollment).
+        non-student roles. Columns: name, id, sis_id, enrollment_type, state —
+        where enrollment_type is the Canvas type string (StudentEnrollment,
+        TeacherEnrollment, TaEnrollment, DesignerEnrollment, ObserverEnrollment)
+        and state is the enrollment_state (active, invited, inactive, completed,
+        rejected, deleted).
         """
         print("Fetching enrollments...")
         rows = []
@@ -118,9 +120,10 @@ class CanvigatorCourse:
                 'id': user.get('id', getattr(e, 'user_id', '')),
                 'sis_id': user.get('sis_user_id', getattr(e, 'sis_user_id', '')),
                 'enrollment_type': getattr(e, 'type', ''),
+                'state': getattr(e, 'enrollment_state', ''),
             })
 
-        df = pd.DataFrame(rows, columns=['name', 'id', 'sis_id', 'enrollment_type'])
+        df = pd.DataFrame(rows, columns=['name', 'id', 'sis_id', 'enrollment_type', 'state'])
         csv_path = data_path / f"roster_{today_str()}.csv"
         df.to_csv(csv_path, index=False)
         print(f"Saved {len(df)} enrollments to {csv_path.name}")

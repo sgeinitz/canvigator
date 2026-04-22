@@ -445,9 +445,11 @@ for scripts outside Canvigator.
 | **Input** | _(none — data comes from the Canvas API)_ |
 | **Output** | `data/<course>/roster_YYYYMMDD.csv` |
 
-The output CSV contains columns: `name`, `id`, `sis_id`, `enrollment_type`.
-`enrollment_type` is the Canvas type string (`StudentEnrollment`,
-`TeacherEnrollment`, `TaEnrollment`, `DesignerEnrollment`, `ObserverEnrollment`).
+The output CSV contains columns: `name`, `id`, `sis_id`, `enrollment_type`,
+`state`. `enrollment_type` is the Canvas type string (`StudentEnrollment`,
+`TeacherEnrollment`, `TaEnrollment`, `DesignerEnrollment`, `ObserverEnrollment`);
+`state` is the enrollment state (`active`, `invited`, `inactive`, `completed`,
+`rejected`, `deleted`).
 
 ---
 
