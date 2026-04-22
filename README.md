@@ -328,8 +328,15 @@ three steps:
    hand-drawn response.
 3. **Assessment guide** — For each candidate, the LLM writes a short
    `assessment_guide` describing the key concepts/elements a passing student
-   response must include. This guide is later used as the primary rubric in
-   `assess-replies`.
+   response must include. This guide is the human-readable summary shown in
+   the CSV and used as backup rubric material in `assess-replies`.
+4. **Structured rubric** — For each candidate, the LLM also emits a JSON
+   object in the `rubric_json` column with fields `canonical_answer`,
+   `pass_criteria`, `acceptable_alternatives`, `common_misconceptions`,
+   `fatal_errors` (plus `required_visual_elements` for draw questions). This
+   structured rubric is what the local Gemma grader uses during
+   `assess-replies`; edit the JSON blob if you want to tighten the criteria.
+   Do not open the CSV in Excel and save — Excel will mangle the JSON quoting.
 
 The output CSV is intended for instructor review. Three rows are written per
 original question (one per candidate) with `selected_question=0`; **the
@@ -348,7 +355,8 @@ see [Ollama setup](#ollama-setup-optional).
 
 The output CSV contains columns: `selected_question`, `question_id`,
 `position`, `question_name`, `keywords`, `question_mode` (`explain` or
-`draw`), `open_ended_question`, `assessment_guide`, `original_question_text`.
+`draw`), `open_ended_question`, `assessment_guide`, `rubric_json`,
+`original_question_text`.
 
 **Typical workflow:**
 1. Run `python canvigator.py --tag get-quiz-questions` and select the quiz.
@@ -491,8 +499,9 @@ Identifies the single most-missed question on the quiz (highest miss rate
 across students' latest attempts), looks up its open-ended counterpart from
 the `*_open_ended_*.csv`, and sends it via a Canvas conversation message to
 each student who missed it. Each thread uses `force_new=True` so the
-follow-up exchange lives in its own dedicated conversation, which lets
-`get-replies` find the thread later by subject.
+follow-up exchange lives in its own dedicated conversation. The Canvas-assigned
+`conversation_id` is captured at send time and recorded in the manifest so
+`get-replies` can fetch each thread directly by ID.
 
 The wording of the response instructions depends on the `question_mode` of
 the open-ended question: `explain` asks the student to record a short voice
@@ -541,6 +550,7 @@ up to the moment the reminder runs, so the task automatically invokes
 |---|---|
 | **Input** | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
 | **Output** | Fresh `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv`, `..._all_subs_by_question_YYYYMMDD.csv`, and `..._all_subs_and_events_YYYYMMDD.csv` (written automatically via `getAllSubmissionsAndEvents()`) |
+| | `data/<course>/<quiz>_<id>_reminder_sent_YYYYMMDD.csv` — audit log of approved sends (one row per student, with `conversation_id`); a `..._reminder_sent_dryrun_*.csv` is written in `--dry-run` mode |
 | **Canvas side-effect** | Sends a Canvas conversation message to each student who hasn't attempted or hasn't achieved a perfect score (skipped in `--dry-run` mode) |
 
 Example of the appended section for an imperfect-score student:

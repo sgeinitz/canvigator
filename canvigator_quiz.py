@@ -178,7 +178,7 @@ def generateOpenEndedQuestions(tagged_csv_path):
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',
         'keywords', 'question_mode', 'open_ended_question', 'assessment_guide',
-        'original_question_text',
+        'rubric_json', 'original_question_text',
     ])
     csv_name = tagged_csv_path.parent / f"{prefix}open_ended_{today_str()}.csv"
     out_df.to_csv(csv_name, index=False)
@@ -531,8 +531,11 @@ class CanvigatorQuiz:
 
         if dry_run:
             self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible)
+            self._saveReminderManifest(messages, subject_str, dry_run)
         else:
-            self._interactiveSend(messages, subject_str, quiz_name, points_possible)
+            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, points_possible)
+            if sent_messages:
+                self._saveReminderManifest(sent_messages, subject_str, dry_run)
 
     def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible):
         """Preview the collected messages in dry-run mode and print a summary."""
@@ -687,11 +690,21 @@ class CanvigatorQuiz:
 
             choice = input(f"  Send to {student_name}? [send/SKIP]: ").strip().lower()
             if choice == 'send':
-                self.canvas.create_conversation(
-                    [str(student_id)], message_str, subject=subject_str, force_new=True
-                )
-                print("  -> Sent!\n")
-                sent_messages.append((student_id, student_name, message_str, reason))
+                # Capture the conversation ID returned by Canvas so the manifest
+                # can record it. get-replies fetches each thread directly by ID
+                # rather than scanning the instructor's sent folder by subject —
+                # the sent scope can paginate / filter recent conversations away.
+                try:
+                    convos = self.canvas.create_conversation(
+                        [str(student_id)], message_str, subject=subject_str, force_new=True
+                    )
+                except Exception as e:
+                    print(f"  -> ERROR sending: {e}\n")
+                    logger.warning(f"create_conversation failed for student id={student_id}: {e}")
+                    continue
+                convo_id = convos[0].id if convos else None
+                print(f"  -> Sent! (conversation_id={convo_id})\n")
+                sent_messages.append((student_id, student_name, message_str, reason, convo_id))
             else:
                 print("  -> Skipped.\n")
 
@@ -812,16 +825,27 @@ class CanvigatorQuiz:
         return rows_by_qid
 
     def _saveFollowUpManifest(self, messages, question_id, question_mode, subject_str, dry_run):
-        """Save a CSV manifest of follow-up messages sent (or previewed in dry-run)."""
+        """Save a CSV manifest of follow-up messages sent (or previewed in dry-run).
+
+        Real sends populate ``conversation_id`` from the Canvas response; dry-run
+        rows leave it empty (get-replies skips dry-run manifests).
+        """
         from datetime import datetime, timezone
         sent_at = datetime.now(timezone.utc).isoformat()
         manifest_rows = []
-        for student_id, student_name, _, reason in messages:
+        for entry in messages:
+            # Real sends are 5-tuples (..., convo_id); dry-run previews are 4-tuples.
+            if len(entry) == 5:
+                student_id, student_name, _, reason, convo_id = entry
+            else:
+                student_id, student_name, _, reason = entry
+                convo_id = None
             manifest_rows.append({
                 'student_id': student_id,
                 'student_name': student_name,
                 'question_id': question_id,
                 'question_mode': question_mode,
+                'conversation_id': convo_id,
                 'conversation_subject': subject_str,
                 'sent_at': sent_at,
             })
@@ -834,6 +858,42 @@ class CanvigatorQuiz:
         manifest_df.to_csv(csv_name, index=False)
         print(f"  Manifest saved: {csv_name.name}")
         logger.info(f"Follow-up manifest saved: {csv_name}")
+
+    def _saveReminderManifest(self, messages, subject_str, dry_run):
+        """Save a CSV audit log of quiz-reminder messages sent (or previewed in dry-run).
+
+        Reminders have no downstream task that consumes the manifest (students
+        don't reply to a reminder), so this is purely an audit trail — useful
+        for confirming who was nudged on which day and which Canvas thread
+        carries the message.
+        """
+        from datetime import datetime, timezone
+        sent_at = datetime.now(timezone.utc).isoformat()
+        manifest_rows = []
+        for entry in messages:
+            # Real sends are 5-tuples (..., convo_id); dry-run previews are 4-tuples.
+            if len(entry) == 5:
+                student_id, student_name, _, reason, convo_id = entry
+            else:
+                student_id, student_name, _, reason = entry
+                convo_id = None
+            manifest_rows.append({
+                'student_id': student_id,
+                'student_name': student_name,
+                'reason': reason,
+                'conversation_id': convo_id,
+                'conversation_subject': subject_str,
+                'sent_at': sent_at,
+            })
+
+        manifest_df = pd.DataFrame(manifest_rows)
+        suffix = "_dryrun" if dry_run else ""
+        csv_name = self.config.data_path / (
+            f"{self.config.quiz_prefix}{self.canvas_quiz.id}_reminder_sent{suffix}_{today_str()}.csv"
+        )
+        manifest_df.to_csv(csv_name, index=False)
+        print(f"  Manifest saved: {csv_name.name}")
+        logger.info(f"Reminder manifest saved: {csv_name}")
 
     def getFollowUpReplies(self, reply_window_days=5):
         """Retrieve student replies to follow-up questions from Canvas conversations.
@@ -862,41 +922,41 @@ class CanvigatorQuiz:
             remaining = cutoff - now
             print(f"  Window still open — {remaining.days}d {remaining.seconds // 3600}h remaining")
 
-        # Build a set of student IDs we expect replies from
-        expected_students = set(manifest['student_id'].astype(int))
-        student_names = dict(zip(manifest['student_id'].astype(int), manifest['student_name']))
-
         # Get the instructor's user ID to filter out instructor messages
         instructor_id = self.canvas.get_current_user().id
-
-        # Search sent conversations for threads matching our subject
-        print("\n  Scanning sent conversations...")
-        matching_convos = self._findConversationsBySubject(subject_str)
-        print(f"  Found {len(matching_convos)} matching conversation(s)")
 
         # Ensure the replies directory exists
         replies_dir = self.config.data_path / "replies"
         replies_dir.mkdir(exist_ok=True)
 
-        # Extract replies from each matching conversation
+        # Iterate the manifest and fetch each conversation directly by its ID,
+        # which was captured at send time. This replaces the older approach of
+        # scanning the instructor's sent folder by subject — that scan proved
+        # unreliable when Canvas paginated or filtered recent conversations.
         all_replies = []
         n_with_reply = 0
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        expected_students = set(manifest['student_id'].astype(int))
 
-        for convo_summary in matching_convos:
-            # Get full conversation with messages (don't mark as read)
-            convo = self.canvas.get_conversation(convo_summary.id, auto_mark_as_read=False)
-            messages = getattr(convo, 'messages', [])
-            audience = set(getattr(convo, 'audience', []))
-
-            # Determine which student this conversation belongs to
-            student_ids_in_convo = audience & expected_students
-            if not student_ids_in_convo:
+        print(f"\n  Fetching {len(manifest)} conversation(s) by ID...")
+        for _, mrow in manifest.iterrows():
+            student_id = int(mrow['student_id'])
+            student_name = mrow['student_name']
+            convo_id_raw = mrow.get('conversation_id')
+            if pd.isna(convo_id_raw):
+                logger.warning(
+                    f"Manifest row for {student_name} (id={student_id}) has no "
+                    f"conversation_id — skipping (re-send the follow-up to capture one)."
+                )
                 continue
-            student_id = next(iter(student_ids_in_convo))
-            student_name = student_names.get(student_id, f"Unknown ({student_id})")
+            convo_id = int(convo_id_raw)
+            try:
+                convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
+            except Exception as e:
+                logger.warning(f"get_conversation({convo_id}) failed for {student_name}: {e}")
+                continue
 
-            # Collect student replies (messages not from the instructor)
+            messages = getattr(convo, 'messages', [])
             student_replies = self._extractStudentReplies(
                 messages, instructor_id, sent_at, cutoff
             )
@@ -963,19 +1023,12 @@ class CanvigatorQuiz:
         print(f"  Using follow-up manifest: {latest_file.name}")
 
         df = pd.read_csv(latest_file)
-        required_cols = {'student_id', 'student_name', 'question_id', 'question_mode', 'conversation_subject', 'sent_at'}
+        required_cols = {'student_id', 'student_name', 'question_id', 'question_mode',
+                         'conversation_id', 'conversation_subject', 'sent_at'}
         missing = required_cols - set(df.columns)
         if missing:
             raise RuntimeError(f"Manifest {latest_file.name} is missing columns: {missing}")
         return df
-
-    def _findConversationsBySubject(self, subject_str):
-        """Return a list of Conversation objects from sent conversations matching the given subject."""
-        matching = []
-        for convo in self.canvas.get_conversations(scope='sent'):
-            if getattr(convo, 'subject', '') == subject_str:
-                matching.append(convo)
-        return matching
 
     def _extractStudentReplies(self, messages, instructor_id, sent_at, cutoff):
         """Filter conversation messages to only student replies within the reply window.

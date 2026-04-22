@@ -125,6 +125,56 @@ _DRAW_SYSTEM_PROMPT = (
     "No preamble, no explanation, no quotation marks."
 )
 
+_RUBRIC_COMMON_SCHEMA = (
+    '  "canonical_answer": "<concise 1-2 sentence model answer that represents a strong response>",\n'
+    '  "pass_criteria": ["<2-5 concrete must-haves a passing response must demonstrate>"],\n'
+    '  "acceptable_alternatives": ["<equivalent framings, synonyms, or alternative correct approaches that should still count as passing>"],\n'
+    '  "common_misconceptions": ["<wrong-but-plausible answers that should NOT count as passing, each with a brief reason>"],\n'
+    '  "fatal_errors": ["<statements or content so incorrect they force an automatic fail regardless of other criteria>"]'
+)
+
+_RUBRIC_EXPLAIN_SYSTEM_PROMPT = (
+    "You are an expert university instructor producing a structured grading rubric for an "
+    "open-ended verbal-explanation follow-up question. The rubric will be consumed by a "
+    "smaller AI grader and by a human instructor, so it must be concrete, specific to the "
+    "question, and free of filler.\n\n"
+    "Return ONLY a single JSON object with exactly the schema below — no prose before or "
+    "after, no markdown code fences, no commentary.\n\n"
+    "{\n" +
+    _RUBRIC_COMMON_SCHEMA + "\n" +
+    "}\n\n"
+    "Rules:\n"
+    "- Each list must have 2-5 items. Each item must be a short string (ideally under 20 words).\n"
+    "- Do not repeat the same idea across lists. Pass criteria are what MUST be present; "
+    "alternatives are equivalent framings; misconceptions are wrong answers; fatal errors "
+    "are auto-fails.\n"
+    "- Focus on conceptual substance, not stylistic polish. The student is speaking, so "
+    "informal language is fine — criteria should be about understanding, not phrasing.\n"
+    "- All strings must be valid JSON (escape quotes, no trailing commas)."
+)
+
+_RUBRIC_DRAW_SYSTEM_PROMPT = (
+    "You are an expert university instructor producing a structured grading rubric for an "
+    "open-ended hand-drawn-diagram follow-up question. The rubric will be consumed by a "
+    "smaller AI grader and by a human instructor, so it must be concrete, specific to the "
+    "question, and free of filler.\n\n"
+    "Return ONLY a single JSON object with exactly the schema below — no prose before or "
+    "after, no markdown code fences, no commentary.\n\n"
+    "{\n" +
+    _RUBRIC_COMMON_SCHEMA + ",\n" +
+    '  "required_visual_elements": ["<key shapes, labels, arrows, or structural relationships that must appear in the drawing>"]\n' +
+    "}\n\n"
+    "Rules:\n"
+    "- Each list must have 2-5 items. Each item must be a short string (ideally under 20 words).\n"
+    "- Do not repeat the same idea across lists. Pass criteria cover correctness of structure "
+    "or relationships; required_visual_elements are concrete things that should literally "
+    "appear in the picture (nodes, edges, labels, arrows, regions).\n"
+    "- Focus on structural correctness, not artistic quality. Hand-drawn, rough, or "
+    "imperfectly-proportioned drawings are fine — criteria should be about the idea being "
+    "communicated.\n"
+    "- All strings must be valid JSON (escape quotes, no trailing commas)."
+)
+
 _ASSESSMENT_GUIDE_SYSTEM_PROMPT = (
     "You are an expert university instructor writing a short assessment guide for a specific "
     "open-ended follow-up question. The guide will be used by another instructor (or an AI "
@@ -406,6 +456,105 @@ def generate_assessment_guide(row, client, model, mode, open_ended_question):
     except Exception as e:
         logger.warning(f"LLM assessment-guide generation failed for question {row.get('question_id')}: {e}")
         return ""
+
+
+def _empty_rubric(mode):
+    """Return the canonical empty rubric shape for the given mode."""
+    base = {
+        'canonical_answer': '',
+        'pass_criteria': [],
+        'acceptable_alternatives': [],
+        'common_misconceptions': [],
+        'fatal_errors': [],
+    }
+    if mode == 'draw':
+        base['required_visual_elements'] = []
+    return base
+
+
+def _parse_structured_rubric(response, mode):
+    """Parse the JSON rubric from an LLM response, always returning a well-formed dict.
+
+    Tolerates responses wrapped in ```json fences or with stray whitespace. On any
+    parse failure returns the empty-shaped rubric so downstream callers don't need
+    to defensive-check individual keys.
+    """
+    out = _empty_rubric(mode)
+    if not response:
+        return out
+
+    text = response.strip()
+    # Strip an opening fence like ```json or ```
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```\s*$', '', text)
+    # If the model emitted any prose before the JSON object, take the largest
+    # {...} slice we can find.
+    brace_start = text.find('{')
+    brace_end = text.rfind('}')
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        text = text[brace_start:brace_end + 1]
+
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        logger.warning(f"Rubric JSON parse failed; raw response starts with: {response[:200]!r}")
+        return out
+    if not isinstance(data, dict):
+        return out
+
+    for key in out:
+        val = data.get(key)
+        if key == 'canonical_answer':
+            out[key] = str(val).strip() if val else ''
+        elif isinstance(val, list):
+            out[key] = [str(v).strip() for v in val if v is not None and str(v).strip()]
+    return out
+
+
+def _build_structured_rubric_prompt(keywords, original_question_text, answers_json, mode, open_ended_question):
+    """Build the user-side prompt for structured-rubric generation."""
+    clean_text = _strip_html(original_question_text)
+    labels = _answer_labels(answers_json)
+    parts = []
+    if keywords:
+        parts.append(f"Topic keywords: {keywords}")
+    if clean_text:
+        parts.append(f"Original quiz question: {clean_text}")
+    if labels:
+        joined = " | ".join(labels[:6])
+        parts.append(f"Answer choices from the original: {joined}")
+    parts.append(f"Question type: {'draw (hand-drawn diagram)' if mode == 'draw' else 'explain (verbal explanation)'}")
+    parts.append(f"Open-ended question the student will answer: {open_ended_question}")
+    parts.append("Rubric JSON:")
+    return "\n".join(parts)
+
+
+def generate_structured_rubric(row, client, model, mode, open_ended_question):
+    """Call the LLM to produce a structured JSON rubric for one open-ended question."""
+    if not open_ended_question:
+        return _empty_rubric(mode)
+    prompt = _build_structured_rubric_prompt(
+        row.get("keywords"),
+        row.get("question_text"),
+        row.get("answers"),
+        mode,
+        open_ended_question,
+    )
+    system_prompt = _RUBRIC_DRAW_SYSTEM_PROMPT if mode == 'draw' else _RUBRIC_EXPLAIN_SYSTEM_PROMPT
+    try:
+        resp = _chat_with_retry(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.3},
+        )
+        return _parse_structured_rubric(resp["message"]["content"], mode)
+    except Exception as e:
+        logger.warning(f"LLM structured-rubric generation failed for question {row.get('question_id')}: {e}")
+        return _empty_rubric(mode)
 
 
 _TRANSCRIBE_SYSTEM_PROMPT = (
@@ -695,8 +844,10 @@ def generate_open_ended_questions(rows, model=None, n=3):
         mode = classify_question_mode(row, client, model)
         print(f" {mode} — generating {n} candidates...", end="", flush=True)
         candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
-        print(f" writing {len([c for c in candidates if c])} assessment guide(s)...", end="", flush=True)
+        non_empty = len([c for c in candidates if c])
+        print(f" writing {non_empty} guide(s) + rubric(s)...", end="", flush=True)
         guides = [generate_assessment_guide(row, client, model, mode, cand) for cand in candidates]
+        rubrics = [generate_structured_rubric(row, client, model, mode, cand) for cand in candidates]
         print(" done")
 
         if not candidates:
@@ -705,8 +856,9 @@ def generate_open_ended_questions(rows, model=None, n=3):
         # Always emit exactly n rows per question so every group has a predictable shape.
         padded_candidates = (candidates + [''] * n)[:n]
         padded_guides = (guides + [''] * n)[:n]
+        padded_rubrics = (rubrics + [_empty_rubric(mode)] * n)[:n]
         original_text = _strip_html(row.get('question_text'))
-        for cand, guide in zip(padded_candidates, padded_guides):
+        for cand, guide, rubric in zip(padded_candidates, padded_guides, padded_rubrics):
             results.append({
                 'selected_question': 0,
                 'question_id': row.get('question_id'),
@@ -716,6 +868,7 @@ def generate_open_ended_questions(rows, model=None, n=3):
                 'question_mode': mode,
                 'open_ended_question': cand,
                 'assessment_guide': guide,
+                'rubric_json': json.dumps(rubric, ensure_ascii=False),
                 'original_question_text': original_text,
             })
     print("Generation complete.")
