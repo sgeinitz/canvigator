@@ -23,7 +23,7 @@ task_groups = [
         ('create-quiz', 'Create an unpublished placeholder quiz on Canvas'),
         ('export-anon-data', 'Export anonymized course data (no Canvas API needed)'),
         ('get-activity', 'Export student activity data'),
-        ('get-all-subs', 'Export all quiz submissions and events'),
+        ('get-quiz-submission-events', 'Export quiz submissions and events for a selected quiz (use --all for every quiz)'),
         ('get-conversations', 'Export Canvas conversations involving students in the selected course'),
         ('get-gradebook', 'Export course gradebook'),
         ('get-roster', 'Export the full course roster (name, id, sis_id, enrollment_type)'),
@@ -40,7 +40,7 @@ def print_help():
     print("Options:")
     print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, follow-up, and feedback tasks)")
     print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
-    print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions only)")
+    print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions and get-quiz-submission-events only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
     print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
     max_name = max(len(t) for t in tasks)
@@ -59,6 +59,10 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
     """Dispatch a quiz-level task to the appropriate method."""
     if task == 'get-quiz-questions':
         quiz.getQuizQuestions(tag=tag)
+    elif task == 'get-quiz-submission-events':
+        quiz.generateQuestionHistograms()
+        quiz.getAllSubmissionsAndEvents()
+        quiz.generateFirstAttemptHistograms()
     elif task == 'assess-replies':
         quiz.assessFollowUpReplies(reply_window_days=reply_window_days)
     elif task == 'send-quiz-reminder':
@@ -214,7 +218,7 @@ course = cc.CanvigatorCourse(canvas, course_choice, canv_config, verbose=False)
 if task == 'get-activity':
     course.saveStudentActivity(canv_config.data_path)
 
-elif task == 'get-all-subs':
+elif task == 'get-quiz-submission-events' and all_quizzes_flag:
     course.getAllQuizzesAndSubmissions()
 
 elif task == 'create-quiz':
