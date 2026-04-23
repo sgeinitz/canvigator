@@ -707,7 +707,8 @@ def assess_draw(image_path, keywords, open_ended_question, original_question_tex
             model=model,
             messages=[
                 {"role": "system", "content": _ASSESS_DRAW_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt, "images": [image_path]},
+                {"role": "user", "content": "", "images": [image_path]},
+                {"role": "user", "content": prompt},
             ],
             options={"temperature": 0.3},
         )

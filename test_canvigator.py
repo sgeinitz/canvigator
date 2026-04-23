@@ -1070,6 +1070,84 @@ class TestExtractStudentReplies:
         assert result[1]['id'] == 1
 
 
+class TestAssessmentsMerge:
+    """Tests for CanvigatorQuiz._mergeAssessments and _indexAssessments."""
+
+    COLS = [
+        'student_id', 'student_name', 'question_id', 'question_mode',
+        'conversation_id', 'result', 'feedback', 'transcript',
+        'assessed_at', 'sent_feedback', 'sent_at',
+    ]
+
+    def _stub(self):
+        """Return a CanvigatorQuiz stand-in carrying just ASSESSMENTS_COLUMNS."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        class _Stub:
+            ASSESSMENTS_COLUMNS = CanvigatorQuiz.ASSESSMENTS_COLUMNS
+            _mergeAssessments = CanvigatorQuiz._mergeAssessments
+            _indexAssessments = CanvigatorQuiz._indexAssessments
+
+        return _Stub()
+
+    def _row(self, sid, qid, **overrides):
+        """Build a canonical assessments row dict."""
+        base = {
+            'student_id': sid, 'student_name': f's{sid}', 'question_id': qid,
+            'question_mode': 'explain', 'conversation_id': 100 + sid,
+            'result': 'pass', 'feedback': 'fb', 'transcript': '',
+            'assessed_at': '2026-04-22T00:00:00Z', 'sent_feedback': 0, 'sent_at': '',
+        }
+        base.update(overrides)
+        return base
+
+    def test_merge_into_empty(self):
+        """Merging into an empty DataFrame produces all new rows."""
+        import pandas as pd
+        stub = self._stub()
+        new = [self._row(1, 10), self._row(2, 10)]
+        out = stub._mergeAssessments(pd.DataFrame(columns=self.COLS), new)
+        assert len(out) == 2
+        assert set(out.columns) == set(self.COLS)
+
+    def test_merge_replaces_existing_match(self):
+        """Rows with matching (student_id, question_id) are replaced, not duplicated."""
+        import pandas as pd
+        stub = self._stub()
+        existing = pd.DataFrame([self._row(1, 10, feedback='OLD')], columns=self.COLS)
+        new = [self._row(1, 10, feedback='NEW')]
+        out = stub._mergeAssessments(existing, new)
+        assert len(out) == 1
+        assert out.iloc[0]['feedback'] == 'NEW'
+
+    def test_merge_preserves_unrelated_rows(self):
+        """Rows with non-matching keys are kept as-is."""
+        import pandas as pd
+        stub = self._stub()
+        existing = pd.DataFrame(
+            [self._row(1, 10, feedback='keep'), self._row(2, 10, feedback='also keep')],
+            columns=self.COLS,
+        )
+        new = [self._row(3, 10, feedback='new')]
+        out = stub._mergeAssessments(existing, new)
+        assert len(out) == 3
+        feedback_by_sid = dict(zip(out['student_id'], out['feedback']))
+        assert feedback_by_sid[1] == 'keep'
+        assert feedback_by_sid[2] == 'also keep'
+        assert feedback_by_sid[3] == 'new'
+
+    def test_index_keys_by_student_and_question(self):
+        """_indexAssessments returns a dict keyed by (student_id, question_id)."""
+        import pandas as pd
+        stub = self._stub()
+        df = pd.DataFrame(
+            [self._row(1, 10), self._row(1, 11), self._row(2, 10)],
+            columns=self.COLS,
+        )
+        index = stub._indexAssessments(df)
+        assert set(index.keys()) == {(1, 10), (1, 11), (2, 10)}
+
+
 # ---------------------------------------------------------------------------
 # canvigator_llm: assessment helper tests
 # ---------------------------------------------------------------------------

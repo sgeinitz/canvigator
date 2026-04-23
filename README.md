@@ -121,7 +121,7 @@ The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 get-activity`.
 
-Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-open-ended-questions`, `get-activity`, `get-all-subs`, `get-gradebook`, `get-quiz-questions`, `get-replies`, `send-follow-up-question`, `send-quiz-reminder`
+Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-open-ended-questions`, `get-activity`, `get-all-subs`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-replies`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -141,9 +141,11 @@ end-to-end flow. Run them in this order for a given quiz:
 3. _(optional)_ `python canvigator.py send-quiz-reminder` — nudge students who haven't attempted the quiz or who scored below perfect. Imperfect-score students get a bulleted list of the topics (from the tags) they missed.
 4. `python canvigator.py send-follow-up-question` — send the instructor-selected open-ended question (the first row in the CSV with `selected_question=1`) to each student who missed the corresponding original quiz question. Students reply via Canvas conversations with an audio recording ("explain") or a photo ("draw").
 5. `python canvigator.py get-replies` — pull the students' replies (and attached audio/images) back from Canvas into a local CSV.
-6. `python canvigator.py assess-replies` — run the replies through the local `gemma4` models (transcription + assessment) to produce pass/fail + feedback for each student.
+6. `python canvigator.py assess-replies` — run the replies through the local `gemma4` models (transcription + assessment) to produce pass/fail + feedback. Results are merged into a single persistent `*_followup_assessments.csv` (no date suffix); rows where `sent_feedback=1` are preserved verbatim across re-runs.
+7. **Edit the `feedback` column** in `*_followup_assessments.csv` for any student where the LLM's assessment needs correction.
+8. `python canvigator.py send-follow-up-assessments` — post the (curated) `feedback` text back to each student as a reply on the existing follow-up conversation thread; sets `sent_feedback=1`.
 
-Steps 4–6 can be repeated as students keep replying: `get-replies` picks up new messages, and `assess-replies` reassesses against the latest reply per student.
+Steps 4–8 can be repeated as students keep replying: `get-replies` picks up new messages, `assess-replies` reassesses against the latest reply per student (skipping rows already sent), and `send-follow-up-assessments` only sends rows that haven't been sent yet.
 
 ---
 
@@ -171,11 +173,39 @@ on disk. Requires a running Ollama server with both models pulled.
 | **Input** | `data/<course>/<quiz>_<id>_followup_replies_YYYYMMDD.csv` (from `get-replies`) |
 | | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (for question context) |
 | | Audio/image files referenced by the replies CSV (under `data/<course>/replies/`) |
-| **Output** | `data/<course>/<quiz>_<id>_followup_assessments_YYYYMMDD.csv` |
+| **Output** | `data/<course>/<quiz>_<id>_followup_assessments.csv` (persistent — merged across runs) |
 
 The output CSV contains columns: `student_id`, `student_name`, `question_id`,
-`question_mode`, `result` (`pass` or `fail`), `feedback`, `transcript` (for
-`explain` mode), `assessed_at`.
+`question_mode`, `conversation_id`, `result` (`pass` or `fail`), `feedback`,
+`transcript` (for `explain` mode), `assessed_at`, `sent_feedback`
+(`0` until `send-follow-up-assessments` posts the row, then `1`), `sent_at`.
+
+Re-running this task is safe: rows with `sent_feedback=1` are skipped and
+preserved verbatim, so previously sent feedback is never overwritten. Rows
+with `sent_feedback=0` are re-assessed in place. On the first run, an existing
+dated `*_followup_assessments_YYYYMMDD.csv` is migrated forward into the
+non-dated file.
+
+#### `send-follow-up-assessments` — Send instructor-curated feedback back to students
+
+Reads `*_followup_assessments.csv` and, for every row with `sent_feedback=0`
+and a non-empty `feedback` value, posts the feedback text as a reply on the
+existing follow-up conversation thread (`Conversation.add_message`). On
+success, sets `sent_feedback=1` and stamps `sent_at`, then rewrites the file
+in place. The `--dry-run` flag previews what would be sent without touching
+Canvas.
+
+The expected workflow is to **edit the `feedback` column** between
+`assess-replies` and `send-follow-up-assessments` for any rows where the LLM
+assessment needs correction; the curated text is what the student sees.
+
+**Prerequisite**: run `assess-replies` first.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/<quiz>_<id>_followup_assessments.csv` (from `assess-replies`, edited by instructor) |
+| | `data/<course>/<quiz>_<id>_followup_sent_*.csv` (fallback for `conversation_id` lookup) |
+| **Output** | The same `*_followup_assessments.csv`, with `sent_feedback` and `sent_at` updated |
 
 ---
 

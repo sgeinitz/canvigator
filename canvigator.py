@@ -17,6 +17,7 @@ task_descriptions = {
     'get-quiz-questions': 'Export quiz question content',
     'get-replies': 'Retrieve student replies to follow-up questions',
     'get-roster': 'Export the full course roster (name, id, sis_id, enrollment_type)',
+    'send-follow-up-assessments': 'Send instructor-curated assessment feedback back to students (requires assess-replies)',
     'send-follow-up-question': 'Send the instructor-selected open-ended follow-up question to students who missed it',
     'send-quiz-reminder': 'Send quiz reminder messages to students',
 }
@@ -27,7 +28,7 @@ def print_help():
     """Print usage information with task descriptions."""
     print("Usage: canvigator.py [--dry-run] [--tag] [--all] [--crn <CRN>] <task>\n")
     print("Options:")
-    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)")
+    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, follow-up, and feedback tasks)")
     print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
     print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
@@ -55,6 +56,8 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
         quiz.sendQuizReminders(dry_run=dry_run)
     elif task == 'send-follow-up-question':
         quiz.sendFollowUpQuestions(dry_run=dry_run)
+    elif task == 'send-follow-up-assessments':
+        quiz.sendFollowUpAssessments(dry_run=dry_run)
     elif task == 'create-pairs':
         quiz.openPresentCSV()
         quiz.generateDistanceMatrix(only_present=True)
@@ -238,7 +241,7 @@ else:
     # All remaining tasks require quiz selection
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
-    skip = task in ('get-quiz-questions', 'get-replies', 'assess-replies')
+    skip = task in ('get-quiz-questions', 'get-replies', 'assess-replies', 'send-follow-up-assessments')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
     _run_quiz_task(task, quiz, dry_run, tag, reply_window_days)
 
