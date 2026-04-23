@@ -39,7 +39,7 @@ def print_help():
     print("Usage: canvigator.py [--dry-run] [--tag] [--all] [--crn <CRN>] <task>\n")
     print("Options:")
     print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, follow-up, and feedback tasks)")
-    print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
+    print("  --tag          Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
     print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions and get-quiz-submission-events only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
     print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
@@ -49,7 +49,7 @@ def print_help():
         for name, desc in items:
             print(f"  {name:<{max_name}}  {desc}")
     print("\nNotes:")
-    print("  generate-follow-up-questions uses a local LLM (via Ollama) in two steps:")
+    print("  generate-follow-up-questions uses a cloud LLM (via Ollama) in two steps:")
     print("    1. Classifies each question as 'explain' (oral) or 'draw' (visual)")
     print("    2. Generates a mode-appropriate open-ended question for instructor review")
     print("  Output CSV includes a question_mode column so the instructor can override choices.")
