@@ -560,11 +560,12 @@ the follow-up exchange lives in its own dedicated conversation. The
 Canvas-assigned `conversation_id` is captured at send time and recorded in
 the manifest so `assess-replies` can fetch each thread directly by ID.
 
-The subject line includes the Canvas course code, course name, quiz name, and
-the specific question number (e.g. `CSI-3300-001-12345 Discrete Math - Quiz 1 - Q3 Follow-Up`).
-This makes it easy to triage conversations across multiple classes/quizzes/questions;
-the thread is still tracked internally by `conversation_id`, so the richer subject
-has no effect on reply collection.
+The subject line includes a compact course code (prefix-number-CRN, with the
+section dropped), the quiz name, and the specific question number — e.g.
+`CSI-3300-12345 - Quiz 1 - Q3 Follow-Up`. This makes it easy to triage
+conversations across multiple classes/quizzes/questions; the thread is still
+tracked internally by `conversation_id`, so the subject format has no effect
+on reply collection.
 
 The wording of the response instructions depends on the `question_mode` of
 the open-ended question: `explain` asks the student to record a short voice

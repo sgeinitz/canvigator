@@ -77,18 +77,22 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
-def _composeConversationSubject(course_name, course_code, quiz_name, suffix):
+def _composeConversationSubject(course_code, quiz_name, suffix):
     """Build a Canvas Conversation subject that includes course identity, quiz, and a per-message suffix.
 
-    Format: ``<course_code> <course_name> - <quiz_name> - <suffix>``. Missing
-    course fields are omitted gracefully so the subject still renders. The
+    The course code is compacted to ``<prefix>-<number>-<CRN>`` by dropping the
+    middle section component when it's present (Canvas codes typically look
+    like ``CSI-3300-001-12345``); shorter codes pass through unchanged. The
     suffix is the per-message tail (e.g. ``"Q3 Follow-Up"`` or ``"Reminder"``).
     The richer subject lets students/instructors group conversations across
     classes, quizzes, and questions; threads themselves are still tracked
     internally by ``conversation_id``, so subject changes are safe.
     """
-    course_parts = [str(p).strip() for p in (course_code, course_name) if p and str(p).strip()]
-    course_label = ' '.join(course_parts) if course_parts else 'Course'
+    code = str(course_code).strip() if course_code else ''
+    code_parts = [p for p in code.split('-') if p]
+    if len(code_parts) == 4:
+        code_parts = [code_parts[0], code_parts[1], code_parts[3]]
+    course_label = '-'.join(code_parts) if code_parts else 'Course'
     parts = [course_label, str(quiz_name).strip()]
     if suffix and str(suffix).strip():
         parts.append(str(suffix).strip())
@@ -542,7 +546,6 @@ class CanvigatorQuiz:
         )
 
         subject_str = _composeConversationSubject(
-            self.canvas_course.canvas_course.name,
             self.canvas_course.canvas_course.course_code,
             quiz_name,
             "Reminder",
@@ -684,7 +687,6 @@ class CanvigatorQuiz:
             )
 
         subject_str = _composeConversationSubject(
-            self.canvas_course.canvas_course.name,
             self.canvas_course.canvas_course.course_code,
             quiz_name,
             f"Q{position} Follow-Up",
