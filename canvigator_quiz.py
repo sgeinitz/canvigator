@@ -77,6 +77,31 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
+def _composeFollowUpFeedbackMessage(student_name, feedback, result):
+    """Build the message body sent by send-follow-up-assessments.
+
+    Wraps the instructor-curated `feedback` text with a friendly greeting
+    (using the student's first name) and a closing line that depends on
+    `result`: 'pass' gets an encouraging "Nice work!"; anything else (incl.
+    'fail', empty, or unknown) gets a gentle nudge to try again.
+    """
+    name = (student_name or '').strip()
+    if ',' in name:
+        # Sortable form "Last, First" -> use the part after the comma.
+        first_name = name.split(',', 1)[1].strip().split()[0] if name.split(',', 1)[1].strip() else 'there'
+    elif name:
+        first_name = name.split()[0]
+    else:
+        first_name = 'there'
+
+    feedback = (feedback or '').strip()
+    if (result or '').strip().lower() == 'pass':
+        closing = "Nice work!"
+    else:
+        closing = "Please give it another try when you get a chance."
+    return f"Hi {first_name},\n\n{feedback}\n\n{closing}"
+
+
 def _render_blur_bullets(blurred_question_ids, question_info):
     """Render the 'questions with window focus change' bullet section.
 
@@ -572,7 +597,7 @@ class CanvigatorQuiz:
         as the question to send (the instructor curates the choice offline).
         Recipients are still students who missed the corresponding original quiz
         question on their latest attempt. Requires that get-quiz-questions --tag
-        and generate-open-ended-questions have both been run for this quiz.
+        and generate-follow-up-questions have both been run for this quiz.
         Auto-refreshes submission data to pick up recent attempts.
         """
         quiz_name = self.canvas_quiz.title
@@ -743,7 +768,7 @@ class CanvigatorQuiz:
         if latest_file is None:
             raise FileNotFoundError(
                 f"No *_open_ended_*.csv found for quiz '{self.quiz_name}'. "
-                f"Run 'python canvigator.py generate-open-ended-questions' first."
+                f"Run 'python canvigator.py generate-follow-up-questions' first."
             )
         print(f"  Using open-ended questions from: {latest_file.name}")
 
@@ -751,7 +776,7 @@ class CanvigatorQuiz:
         if 'open_ended_question' not in df.columns:
             raise RuntimeError(
                 f"The file {latest_file.name} has no 'open_ended_question' column. "
-                f"Re-run 'generate-open-ended-questions'."
+                f"Re-run 'generate-follow-up-questions'."
             )
 
         if 'selected_question' in df.columns:
@@ -1264,8 +1289,6 @@ class CanvigatorQuiz:
         flip ``sent_feedback`` to ``1`` and stamp ``sent_at``; the file is then
         rewritten in place.
         """
-        from datetime import datetime, timezone
-
         path = self._assessmentsPath()
         if not path.exists():
             raise FileNotFoundError(
@@ -1279,6 +1302,34 @@ class CanvigatorQuiz:
 
         convo_lookup = self._buildConversationLookup()
 
+        to_send = self._collectAssessmentsToSend(df, convo_lookup)
+
+        if not to_send:
+            print("\nNo unsent feedback to send.")
+            return
+
+        print(f"\n{'[DRY-RUN] ' if dry_run else ''}Sending feedback for {len(to_send)} student(s).")
+        n_sent = 0
+        for idx, convo_id, row in to_send:
+            if self._sendOneAssessment(df, idx, convo_id, row, dry_run):
+                n_sent += 1
+
+        if dry_run:
+            print(f"\n[DRY-RUN] Would have sent {len(to_send)} feedback message(s). No changes written.")
+            return
+
+        df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
+        print(f"\nSent {n_sent} feedback message(s); updated {path.name}.")
+        logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
+
+    def _collectAssessmentsToSend(self, df, convo_lookup):
+        """Filter the assessments DataFrame to rows that should be sent now.
+
+        Returns a list of ``(row_index, conversation_id, row_dict)`` tuples,
+        one per row with ``sent_feedback=0``, non-empty ``feedback``, and a
+        resolvable ``conversation_id`` (from the row itself or the manifest
+        lookup as a fallback).
+        """
         to_send = []
         for idx, row in df.iterrows():
             if int(row.get('sent_feedback', 0) or 0) == 1:
@@ -1297,39 +1348,35 @@ class CanvigatorQuiz:
                     )
                     continue
             to_send.append((idx, int(convo_id), row))
+        return to_send
 
-        if not to_send:
-            print("\nNo unsent feedback to send.")
-            return
+    def _sendOneAssessment(self, df, idx, convo_id, row, dry_run):
+        """Send (or preview) feedback for a single assessment row.
 
-        print(f"\n{'[DRY-RUN] ' if dry_run else ''}Sending feedback for {len(to_send)} student(s).")
-        n_sent = 0
-        for idx, convo_id, row in to_send:
-            student_name = row.get('student_name', '?')
-            feedback = str(row['feedback']).strip()
-            preview = feedback if len(feedback) <= 200 else feedback[:200] + '...'
-            print(f"\n  -> {student_name} (conversation_id={convo_id})")
-            print(f"     {preview}")
-            if dry_run:
-                continue
-            try:
-                convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
-                convo.add_message(feedback)
-            except Exception as e:
-                logger.warning(f"add_message({convo_id}) failed for {student_name}: {e}")
-                print(f"     ERROR: {e}")
-                continue
-            df.at[idx, 'sent_feedback'] = 1
-            df.at[idx, 'sent_at'] = datetime.now(timezone.utc).isoformat()
-            n_sent += 1
-
+        Updates ``df`` in place on a successful real send and returns True;
+        returns False on dry-run or send failure.
+        """
+        from datetime import datetime, timezone
+        student_name = row.get('student_name', '?')
+        feedback = str(row['feedback']).strip()
+        result = row.get('result', '')
+        message_body = _composeFollowUpFeedbackMessage(student_name, feedback, result)
+        preview = message_body if len(message_body) <= 300 else message_body[:300] + '...'
+        print(f"\n  -> {student_name} (conversation_id={convo_id})")
+        for line in preview.splitlines():
+            print(f"     {line}")
         if dry_run:
-            print(f"\n[DRY-RUN] Would have sent {len(to_send)} feedback message(s). No changes written.")
-            return
-
-        df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
-        print(f"\nSent {n_sent} feedback message(s); updated {path.name}.")
-        logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
+            return False
+        try:
+            convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
+            convo.add_message(message_body)
+        except Exception as e:
+            logger.warning(f"add_message({convo_id}) failed for {student_name}: {e}")
+            print(f"     ERROR: {e}")
+            return False
+        df.at[idx, 'sent_feedback'] = 1
+        df.at[idx, 'sent_at'] = datetime.now(timezone.utc).isoformat()
+        return True
 
     def _spin(self, frame, message, indent=2):
         """Write a single spinner frame with a message — thin wrapper around canvigator_utils.spin."""

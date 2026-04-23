@@ -1148,6 +1148,48 @@ class TestAssessmentsMerge:
         assert set(index.keys()) == {(1, 10), (1, 11), (2, 10)}
 
 
+class TestComposeFollowUpFeedbackMessage:
+    """Tests for canvigator_quiz._composeFollowUpFeedbackMessage."""
+
+    def _call(self, name, feedback, result):
+        """Invoke the module-level helper."""
+        from canvigator_quiz import _composeFollowUpFeedbackMessage
+        return _composeFollowUpFeedbackMessage(name, feedback, result)
+
+    def test_pass_uses_first_name_and_nice_work(self):
+        """Pass result uses 'Nice work!' closing with the first name greeting."""
+        out = self._call('Victor Salazar', 'Solid Venn diagram.', 'pass')
+        assert out.startswith('Hi Victor,\n\n')
+        assert 'Solid Venn diagram.' in out
+        assert out.endswith('Nice work!')
+
+    def test_fail_uses_try_again_closing(self):
+        """Fail result uses the 'try again' closing."""
+        out = self._call('Landon Strong', 'Missing the union step.', 'fail')
+        assert out.startswith('Hi Landon,\n\n')
+        assert out.endswith('Please give it another try when you get a chance.')
+
+    def test_unknown_result_defaults_to_try_again(self):
+        """Empty/unknown result falls through to the 'try again' closing."""
+        out = self._call('Sam Lee', 'Some feedback.', '')
+        assert out.endswith('Please give it another try when you get a chance.')
+
+    def test_sortable_name_uses_part_after_comma(self):
+        """A 'Last, First' style name extracts the first name from after the comma."""
+        out = self._call('Salazar, Victor', 'fb', 'pass')
+        assert out.startswith('Hi Victor,\n\n')
+
+    def test_empty_name_falls_back_to_there(self):
+        """An empty name produces a generic 'Hi there,' greeting."""
+        out = self._call('', 'fb', 'pass')
+        assert out.startswith('Hi there,\n\n')
+
+    def test_pass_is_case_insensitive(self):
+        """Result matching is case-insensitive."""
+        out = self._call('Sam', 'fb', 'PASS')
+        assert out.endswith('Nice work!')
+
+
 # ---------------------------------------------------------------------------
 # canvigator_llm: assessment helper tests
 # ---------------------------------------------------------------------------

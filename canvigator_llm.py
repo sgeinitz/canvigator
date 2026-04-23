@@ -846,7 +846,7 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
         import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
-            "The 'ollama' package is required for generate-open-ended-questions. "
+            "The 'ollama' package is required for generate-follow-up-questions. "
             "Install with: pip install ollama"
         ) from e
 

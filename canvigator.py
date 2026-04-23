@@ -14,7 +14,7 @@ task_groups = [
     ]),
     ('Quiz Follow-up Questions', [
         ('get-quiz-questions', 'Export quiz question content'),
-        ('generate-open-ended-questions', 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)'),
+        ('generate-follow-up-questions', 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)'),
         ('send-follow-up-question', 'Send the instructor-selected open-ended follow-up question to students who missed it'),
         ('get-replies', 'Retrieve student replies to follow-up questions'),
         ('assess-replies', 'Assess student follow-up replies using local LLM (requires get-replies)'),
@@ -50,7 +50,7 @@ def print_help():
         for name, desc in items:
             print(f"  {name:<{max_name}}  {desc}")
     print("\nNotes:")
-    print("  generate-open-ended-questions uses a local LLM (via Ollama) in two steps:")
+    print("  generate-follow-up-questions uses a local LLM (via Ollama) in two steps:")
     print("    1. Classifies each question as 'explain' (oral) or 'draw' (visual)")
     print("    2. Generates a mode-appropriate open-ended question for instructor review")
     print("  Output CSV includes a question_mode column so the instructor can override choices.")
@@ -232,7 +232,7 @@ elif task == 'get-roster':
 elif task == 'get-conversations':
     course.exportConversations(canv_config.data_path)
 
-elif task == 'generate-open-ended-questions':
+elif task == 'generate-follow-up-questions':
     # Driven by a pre-selected tagged-questions CSV, not a Canvas quiz
     tagged_csv = cu.selectCSVFromList(
         canv_config.data_path,

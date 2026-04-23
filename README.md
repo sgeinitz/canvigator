@@ -83,7 +83,7 @@ This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 
 ### Ollama setup (optional)
 
-Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) to tag questions, generate open-ended follow-ups, transcribe student audio, and assess student replies. You can skip this section if you will not be running any of these tasks (`get-quiz-questions --tag`, `generate-open-ended-questions`, `send-quiz-reminder`, `send-follow-up-question`, `assess-replies`).
+Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) to tag questions, generate open-ended follow-ups, transcribe student audio, and assess student replies. You can skip this section if you will not be running any of these tasks (`get-quiz-questions --tag`, `generate-follow-up-questions`, `send-quiz-reminder`, `send-follow-up-question`, `assess-replies`).
 
 Canvigator uses two kinds of models:
 
@@ -121,7 +121,7 @@ The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 get-activity`.
 
-Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-open-ended-questions`, `get-activity`, `get-all-subs`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-replies`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
+Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-all-subs`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-replies`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -137,7 +137,7 @@ Several of the newer tasks are designed to chain together into a single
 end-to-end flow. Run them in this order for a given quiz:
 
 1. `python canvigator.py --tag get-quiz-questions` — export the quiz's question content and add LLM topic tags (cloud model, requires `OLLAMA_API_KEY`).
-2. `python canvigator.py generate-open-ended-questions` — generate 3 candidate open-ended follow-up questions per original question, with an assessment guide for each. **Review the output CSV and set `selected_question=1` on one row per question group before moving on.**
+2. `python canvigator.py generate-follow-up-questions` — generate 3 candidate open-ended follow-up questions per original question, with an assessment guide for each. **Review the output CSV and set `selected_question=1` on one row per question group before moving on.**
 3. _(optional)_ `python canvigator.py send-quiz-reminder` — nudge students who haven't attempted the quiz or who scored below perfect. Imperfect-score students get a bulleted list of the topics (from the tags) they missed.
 4. `python canvigator.py send-follow-up-question` — send the instructor-selected open-ended question (the first row in the CSV with `selected_question=1`) to each student who missed the corresponding original quiz question. Students reply via Canvas conversations with an audio recording ("explain") or a photo ("draw").
 5. `python canvigator.py get-replies` — pull the students' replies (and attached audio/images) back from Canvas into a local CSV.
@@ -339,7 +339,7 @@ subdirectories (by `--crn` or interactively).
 
 ---
 
-#### `generate-open-ended-questions` — Generate open-ended questions from a tagged quiz
+#### `generate-follow-up-questions` — Generate open-ended questions from a tagged quiz
 
 Reads the tagged questions CSV for a selected quiz and uses a cloud-hosted LLM
 (via Ollama's hosted endpoint, default `gemini-3-flash-preview`) to produce
@@ -390,7 +390,7 @@ The output CSV contains columns: `selected_question`, `question_id`,
 
 **Typical workflow:**
 1. Run `python canvigator.py --tag get-quiz-questions` and select the quiz.
-2. Run `python canvigator.py generate-open-ended-questions` and select the tagged questions CSV.
+2. Run `python canvigator.py generate-follow-up-questions` and select the tagged questions CSV.
 3. Open the `*_open_ended_*.csv`, review the 3 candidates per question, and set `selected_question=1` on the single row you want to use per question group (edit the question text, `question_mode`, or `assessment_guide` as desired).
 
 ---
@@ -586,13 +586,13 @@ Submissions are auto-refreshed via `getAllSubmissionsAndEvents()` on every
 run so the recipient list reflects the latest attempts.
 
 **Prerequisite**: run `get-quiz-questions --tag` and then
-`generate-open-ended-questions` for the same quiz first so both the
+`generate-follow-up-questions` for the same quiz first so both the
 `*_questions_w_tags_*.csv` and `*_open_ended_*.csv` are on disk.
 
 | | Files |
 |---|---|
 | **Input** | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
-| | `data/<course>/<quiz>_<id>_open_ended_YYYYMMDD.csv` (from `generate-open-ended-questions`) |
+| | `data/<course>/<quiz>_<id>_open_ended_YYYYMMDD.csv` (from `generate-follow-up-questions`) |
 | **Output** | Fresh `*_all_submissions_*.csv`, `*_all_subs_by_question_*.csv`, and `*_all_subs_and_events_*.csv` (auto-refreshed via `getAllSubmissionsAndEvents()`) |
 | | `data/<course>/<quiz>_<id>_followup_sent_YYYYMMDD.csv` — manifest of approved sends (for use by `get-replies`) |
 | **Canvas side-effect** | Sends a Canvas conversation message (in a dedicated thread) to each approved student (skipped in `--dry-run` mode) |
