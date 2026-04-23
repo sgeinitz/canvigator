@@ -716,7 +716,7 @@ class CanvigatorQuiz:
             choice = input(f"  Send to {student_name}? [send/SKIP]: ").strip().lower()
             if choice == 'send':
                 # Capture the conversation ID returned by Canvas so the manifest
-                # can record it. get-replies fetches each thread directly by ID
+                # can record it. assess-replies fetches each thread directly by ID
                 # rather than scanning the instructor's sent folder by subject —
                 # the sent scope can paginate / filter recent conversations away.
                 try:
@@ -817,7 +817,7 @@ class CanvigatorQuiz:
         """Save a CSV manifest of follow-up messages sent (or previewed in dry-run).
 
         Real sends populate ``conversation_id`` from the Canvas response; dry-run
-        rows leave it empty (get-replies skips dry-run manifests).
+        rows leave it empty (assess-replies skips dry-run manifests).
         """
         from datetime import datetime, timezone
         sent_at = datetime.now(timezone.utc).isoformat()
@@ -1094,16 +1094,18 @@ class CanvigatorQuiz:
 
         return attachment_path, audio_path
 
-    def assessFollowUpReplies(self):
-        """Assess student replies using the local LLM.
+    def assessFollowUpReplies(self, reply_window_days=5):
+        """Fetch the latest student replies, then assess them with the local LLM.
 
-        Loads the latest followup_replies CSV, filters to only the latest reply
+        First refreshes replies from Canvas (writing the
+        ``*_followup_replies_*.csv``), then filters to only the latest reply
         per student, loads the open-ended question context, and calls the LLM
         to produce a pass/fail assessment with feedback. Merges results into a
         single persistent followup_assessments CSV (no date suffix); rows where
-        ``sent_feedback=1`` are preserved verbatim so previously sent feedback
+        ``sent_assessment=1`` are preserved verbatim so previously sent feedback
         is never overwritten by re-runs.
         """
+        self.getFollowUpReplies(reply_window_days=reply_window_days)
         replies_df = self._loadFollowUpReplies()
         latest_replies = replies_df[replies_df['latest'] == True].to_dict('records')  # noqa: E712
 
@@ -1131,7 +1133,7 @@ class CanvigatorQuiz:
         for r in latest_replies:
             key = (int(r['student_id']), int(r['question_id']))
             existing = existing_index.get(key)
-            if existing is not None and int(existing.get('sent_feedback', 0) or 0) == 1:
+            if existing is not None and int(existing.get('sent_assessment', 0) or 0) == 1:
                 skipped_sent += 1
                 continue
             to_assess.append(r)
@@ -1168,7 +1170,7 @@ class CanvigatorQuiz:
             if convo_id is None or pd.isna(convo_id):
                 convo_id = convo_lookup.get(key)
             res['conversation_id'] = int(convo_id) if convo_id else ''
-            res['sent_feedback'] = 0
+            res['sent_assessment'] = 0
 
         merged_df = self._mergeAssessments(existing_df, results)
         self._writeAssessmentsCsv(merged_df)
@@ -1190,7 +1192,7 @@ class CanvigatorQuiz:
         if latest_file is None:
             raise FileNotFoundError(
                 f"No *_followup_replies_*.csv found for quiz '{self.quiz_name}'. "
-                f"Run 'get-replies' first."
+                f"Run 'assess-replies' first."
             )
         print(f"  Using replies from: {latest_file.name}")
         return pd.read_csv(latest_file)
@@ -1198,7 +1200,7 @@ class CanvigatorQuiz:
     ASSESSMENTS_COLUMNS = [
         'student_id', 'student_name', 'question_id', 'question_mode',
         'conversation_id', 'result', 'feedback', 'transcript',
-        'assessed_at', 'sent_feedback', 'sent_at',
+        'assessed_at', 'sent_assessment', 'sent_at',
     ]
 
     def _assessmentsPath(self):
@@ -1225,8 +1227,8 @@ class CanvigatorQuiz:
         # Ensure all canonical columns exist (older files may be missing some).
         for col in self.ASSESSMENTS_COLUMNS:
             if col not in df.columns:
-                df[col] = 0 if col == 'sent_feedback' else ''
-        df['sent_feedback'] = df['sent_feedback'].fillna(0).astype(int)
+                df[col] = 0 if col == 'sent_assessment' else ''
+        df['sent_assessment'] = df['sent_assessment'].fillna(0).astype(int)
         return df
 
     def _indexAssessments(self, df):
@@ -1283,10 +1285,10 @@ class CanvigatorQuiz:
         """Send instructor-curated feedback back to students on their follow-up threads.
 
         Reads the persistent ``*_followup_assessments.csv`` for this quiz and, for
-        every row with ``sent_feedback=0`` and a non-empty ``feedback`` value,
+        every row with ``sent_assessment=0`` and a non-empty ``feedback`` value,
         posts the feedback text as a reply to the existing Canvas conversation
         (using the ``conversation_id`` captured at send time). Successful sends
-        flip ``sent_feedback`` to ``1`` and stamp ``sent_at``; the file is then
+        flip ``sent_assessment`` to ``1`` and stamp ``sent_at``; the file is then
         rewritten in place.
         """
         path = self._assessmentsPath()
@@ -1297,8 +1299,8 @@ class CanvigatorQuiz:
         df = pd.read_csv(path)
         for col in self.ASSESSMENTS_COLUMNS:
             if col not in df.columns:
-                df[col] = 0 if col == 'sent_feedback' else ''
-        df['sent_feedback'] = df['sent_feedback'].fillna(0).astype(int)
+                df[col] = 0 if col == 'sent_assessment' else ''
+        df['sent_assessment'] = df['sent_assessment'].fillna(0).astype(int)
 
         convo_lookup = self._buildConversationLookup()
 
@@ -1326,13 +1328,13 @@ class CanvigatorQuiz:
         """Filter the assessments DataFrame to rows that should be sent now.
 
         Returns a list of ``(row_index, conversation_id, row_dict)`` tuples,
-        one per row with ``sent_feedback=0``, non-empty ``feedback``, and a
+        one per row with ``sent_assessment=0``, non-empty ``feedback``, and a
         resolvable ``conversation_id`` (from the row itself or the manifest
         lookup as a fallback).
         """
         to_send = []
         for idx, row in df.iterrows():
-            if int(row.get('sent_feedback', 0) or 0) == 1:
+            if int(row.get('sent_assessment', 0) or 0) == 1:
                 continue
             feedback = row.get('feedback', '')
             if pd.isna(feedback) or not str(feedback).strip():
@@ -1374,7 +1376,7 @@ class CanvigatorQuiz:
             logger.warning(f"add_message({convo_id}) failed for {student_name}: {e}")
             print(f"     ERROR: {e}")
             return False
-        df.at[idx, 'sent_feedback'] = 1
+        df.at[idx, 'sent_assessment'] = 1
         df.at[idx, 'sent_at'] = datetime.now(timezone.utc).isoformat()
         return True
 

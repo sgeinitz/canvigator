@@ -16,8 +16,7 @@ task_groups = [
         ('get-quiz-questions', 'Export quiz question content'),
         ('generate-follow-up-questions', 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)'),
         ('send-follow-up-question', 'Send the instructor-selected open-ended follow-up question to students who missed it'),
-        ('get-replies', 'Retrieve student replies to follow-up questions'),
-        ('assess-replies', 'Assess student follow-up replies using local LLM (requires get-replies)'),
+        ('assess-replies', 'Fetch the latest student follow-up replies from Canvas and assess them with a local LLM'),
         ('send-follow-up-assessments', 'Send instructor-curated assessment feedback back to students (requires assess-replies)'),
     ]),
     ('Miscellaneous tasks', [
@@ -43,7 +42,7 @@ def print_help():
     print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
     print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
-    print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, get-replies only)")
+    print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
     max_name = max(len(t) for t in tasks)
     for header, items in task_groups:
         print(f"\n{header}")
@@ -60,10 +59,8 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
     """Dispatch a quiz-level task to the appropriate method."""
     if task == 'get-quiz-questions':
         quiz.getQuizQuestions(tag=tag)
-    elif task == 'get-replies':
-        quiz.getFollowUpReplies(reply_window_days=reply_window_days)
     elif task == 'assess-replies':
-        quiz.assessFollowUpReplies()
+        quiz.assessFollowUpReplies(reply_window_days=reply_window_days)
     elif task == 'send-quiz-reminder':
         quiz.sendQuizReminders(dry_run=dry_run)
     elif task == 'send-follow-up-question':
@@ -253,7 +250,7 @@ else:
     # All remaining tasks require quiz selection
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
-    skip = task in ('get-quiz-questions', 'get-replies', 'assess-replies', 'send-follow-up-assessments')
+    skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
     _run_quiz_task(task, quiz, dry_run, tag, reply_window_days)
 

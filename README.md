@@ -114,14 +114,14 @@ python canvigator.py <task>                  # run a task (prompts for course se
 python canvigator.py --crn <CRN> <task>      # select course by CRN (last 5 digits of course code)
 python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)
 python canvigator.py --tag get-quiz-questions     # add LLM-generated topic tags to the quiz questions export
-python canvigator.py --reply-window-days N <task>  # set the days-after-send window for get-replies (default: 5)
+python canvigator.py --reply-window-days N <task>  # set the days-after-send window for assess-replies (default: 5)
 ```
 
 The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 get-activity`.
 
-Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-all-subs`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-replies`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
+Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-all-subs`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -140,20 +140,26 @@ end-to-end flow. Run them in this order for a given quiz:
 2. `python canvigator.py generate-follow-up-questions` — generate 3 candidate open-ended follow-up questions per original question, with an assessment guide for each. **Review the output CSV and set `selected_question=1` on one row per question group before moving on.**
 3. _(optional)_ `python canvigator.py send-quiz-reminder` — nudge students who haven't attempted the quiz or who scored below perfect. Imperfect-score students get a bulleted list of the topics (from the tags) they missed.
 4. `python canvigator.py send-follow-up-question` — send the instructor-selected open-ended question (the first row in the CSV with `selected_question=1`) to each student who missed the corresponding original quiz question. Students reply via Canvas conversations with an audio recording ("explain") or a photo ("draw").
-5. `python canvigator.py get-replies` — pull the students' replies (and attached audio/images) back from Canvas into a local CSV.
-6. `python canvigator.py assess-replies` — run the replies through the local `gemma4` models (transcription + assessment) to produce pass/fail + feedback. Results are merged into a single persistent `*_followup_assessments.csv` (no date suffix); rows where `sent_feedback=1` are preserved verbatim across re-runs.
-7. **Edit the `feedback` column** in `*_followup_assessments.csv` for any student where the LLM's assessment needs correction.
-8. `python canvigator.py send-follow-up-assessments` — post the (curated) `feedback` text back to each student as a reply on the existing follow-up conversation thread; sets `sent_feedback=1`.
+5. `python canvigator.py assess-replies` — pull the students' replies (and attached audio/images) back from Canvas, then run them through the local `gemma4` models (transcription + assessment) to produce pass/fail + feedback. Results are merged into a single persistent `*_followup_assessments.csv` (no date suffix); rows where `sent_assessment=1` are preserved verbatim across re-runs.
+6. **Edit the `feedback` column** in `*_followup_assessments.csv` for any student where the LLM's assessment needs correction.
+7. `python canvigator.py send-follow-up-assessments` — post the (curated) `feedback` text back to each student as a reply on the existing follow-up conversation thread; sets `sent_assessment=1`.
 
-Steps 4–8 can be repeated as students keep replying: `get-replies` picks up new messages, `assess-replies` reassesses against the latest reply per student (skipping rows already sent), and `send-follow-up-assessments` only sends rows that haven't been sent yet.
+Steps 4–7 can be repeated as students keep replying: `assess-replies` picks up new messages and reassesses against the latest reply per student (skipping rows already sent), and `send-follow-up-assessments` only sends rows that haven't been sent yet.
 
 ---
 
-#### `assess-replies` — Assess student follow-up replies with a local LLM
+#### `assess-replies` — Fetch and assess student follow-up replies with a local LLM
 
-Loads the latest reply per student from the follow-up replies CSV (produced by
-`get-replies`) and uses local LLMs via Ollama to evaluate each one against the
-original question. Two model pipelines are used depending on `question_mode`:
+First fetches the latest student replies from Canvas (loading the manifest
+written by `send-follow-up-question`, finding matching sent conversations by
+subject, downloading image attachments and audio recordings to
+`data/<course>/replies/`, and writing a dated `*_followup_replies_*.csv`).
+Only replies received within the configured window after the follow-up was
+sent are accepted (default 5 days; override with `--reply-window-days N`).
+
+Then loads the latest reply per student from that CSV and uses local LLMs via
+Ollama to evaluate each one against the original question. Two model pipelines
+are used depending on `question_mode`:
 
 - **`explain` mode**: `OLLAMA_AUDIO_MODEL` (default `gemma4:e4b`) transcribes
   the student's audio recording, then `OLLAMA_MODEL` (default `gemma4:31b`)
@@ -162,38 +168,45 @@ original question. Two model pipelines are used depending on `question_mode`:
   image against the question context.
 
 Each assessment yields a pass/fail result plus 2–3 sentences of feedback.
-Re-running this task after `get-replies` picks up new student replies will
-re-assess against the latest response per student.
+Re-running this task picks up any new student replies and re-assesses against
+the latest response per student.
 
-**Prerequisite**: run `get-replies` first so the `*_followup_replies_*.csv` is
-on disk. Requires a running Ollama server with both models pulled.
+**Prerequisite**: run `send-follow-up-question` first so the
+`*_followup_sent_*.csv` manifest is on disk. Requires a running Ollama server
+with both models pulled.
 
 | | Files |
 |---|---|
-| **Input** | `data/<course>/<quiz>_<id>_followup_replies_YYYYMMDD.csv` (from `get-replies`) |
+| **Input** | `data/<course>/<quiz>_<id>_followup_sent_YYYYMMDD.csv` (from `send-follow-up-question`) |
 | | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (for question context) |
-| | Audio/image files referenced by the replies CSV (under `data/<course>/replies/`) |
-| **Output** | `data/<course>/<quiz>_<id>_followup_assessments.csv` (persistent — merged across runs) |
+| **Output** | `data/<course>/<quiz>_<id>_followup_replies_YYYYMMDD.csv` |
+| | `data/<course>/replies/` — downloaded image attachments and audio recordings |
+| | `data/<course>/<quiz>_<id>_followup_assessments.csv` (persistent — merged across runs) |
 
-The output CSV contains columns: `student_id`, `student_name`, `question_id`,
+The replies CSV contains columns: `student_id`, `student_name`, `question_id`,
+`question_mode`, `message_id`, `reply_text`, `has_attachment`, `attachment_path`,
+`has_audio`, `audio_path`, `replied_at`, `latest`, `conversation_id`. The
+`latest` flag marks the most recent reply per student (used for assessment).
+
+The assessments CSV contains columns: `student_id`, `student_name`, `question_id`,
 `question_mode`, `conversation_id`, `result` (`pass` or `fail`), `feedback`,
-`transcript` (for `explain` mode), `assessed_at`, `sent_feedback`
+`transcript` (for `explain` mode), `assessed_at`, `sent_assessment`
 (`0` until `send-follow-up-assessments` posts the row, then `1`), `sent_at`.
 
-Re-running this task is safe: rows with `sent_feedback=1` are skipped and
+Re-running this task is safe: rows with `sent_assessment=1` are skipped and
 preserved verbatim, so previously sent feedback is never overwritten. Rows
-with `sent_feedback=0` are re-assessed in place. On the first run, an existing
+with `sent_assessment=0` are re-assessed in place. On the first run, an existing
 dated `*_followup_assessments_YYYYMMDD.csv` is migrated forward into the
 non-dated file.
 
 #### `send-follow-up-assessments` — Send instructor-curated feedback back to students
 
-Reads `*_followup_assessments.csv` and, for every row with `sent_feedback=0`
+Reads `*_followup_assessments.csv` and, for every row with `sent_assessment=0`
 and a non-empty `feedback` value, posts the feedback text as a reply on the
 existing follow-up conversation thread (`Conversation.add_message`). On
-success, sets `sent_feedback=1` and stamps `sent_at`, then rewrites the file
+success, sets `sent_assessment=1` and stamps `sent_at`, then rewrites the file
 in place. The `--dry-run` flag previews what would be sent without touching
-Canvas.
+Canvas (and leaves `sent_assessment=0`).
 
 The expected workflow is to **edit the `feedback` column** between
 `assess-replies` and `send-follow-up-assessments` for any rows where the LLM
@@ -205,7 +218,7 @@ assessment needs correction; the curated text is what the student sees.
 |---|---|
 | **Input** | `data/<course>/<quiz>_<id>_followup_assessments.csv` (from `assess-replies`, edited by instructor) |
 | | `data/<course>/<quiz>_<id>_followup_sent_*.csv` (fallback for `conversation_id` lookup) |
-| **Output** | The same `*_followup_assessments.csv`, with `sent_feedback` and `sent_at` updated |
+| **Output** | The same `*_followup_assessments.csv`, with `sent_assessment` and `sent_at` updated |
 
 ---
 
@@ -490,7 +503,7 @@ full inbox and sent folders via `canvas.get_conversations()` (default scope
 plus `scope='sent'`, deduped by `conversation_id`) and filters each
 conversation's participants list against the active-student roster for the
 selected course. Primary use case: back-fill the `conversation_id` for
-follow-up sends made before the per-send manifest was added, so `get-replies`
+follow-up sends made before the per-send manifest was added, so `assess-replies`
 can still fetch those threads by ID.
 
 | | Files |
@@ -537,34 +550,6 @@ selected course — one CSV per quiz, using each quiz's own filename prefix.
 
 ---
 
-#### `get-replies` — Retrieve student replies to follow-up questions
-
-Loads the manifest written by `send-follow-up-question`, finds the matching
-sent conversations on Canvas by subject, and extracts each student's reply.
-Instructor messages and system-generated messages are filtered out. Image
-attachments and audio/media recordings are downloaded to
-`data/<course>/replies/`.
-
-Only replies received within the configured window after the follow-up was
-sent are accepted (default 5 days; override with `--reply-window-days N`).
-The `latest` flag in the output CSV marks the most recent reply per student
-and is what `assess-replies` uses for evaluation.
-
-**Prerequisite**: run `send-follow-up-question` first so the
-`*_followup_sent_*.csv` manifest is on disk.
-
-| | Files |
-|---|---|
-| **Input** | `data/<course>/<quiz>_<id>_followup_sent_YYYYMMDD.csv` (from `send-follow-up-question`) |
-| **Output** | `data/<course>/<quiz>_<id>_followup_replies_YYYYMMDD.csv` |
-| | `data/<course>/replies/` — downloaded image attachments and audio recordings |
-
-The output CSV contains columns: `student_id`, `student_name`, `question_id`,
-`question_mode`, `message_id`, `reply_text`, `has_attachment`,
-`attachment_path`, `has_audio`, `audio_path`, `replied_at`, `latest`.
-
----
-
 #### `send-follow-up-question` — Send the instructor-selected open-ended follow-up question to students
 
 Reads the `*_open_ended_*.csv`, picks the first row marked
@@ -573,7 +558,7 @@ conversation message to each student who missed the corresponding original
 quiz question on their latest attempt. Each thread uses `force_new=True` so
 the follow-up exchange lives in its own dedicated conversation. The
 Canvas-assigned `conversation_id` is captured at send time and recorded in
-the manifest so `get-replies` can fetch each thread directly by ID.
+the manifest so `assess-replies` can fetch each thread directly by ID.
 
 The wording of the response instructions depends on the `question_mode` of
 the open-ended question: `explain` asks the student to record a short voice
@@ -594,7 +579,7 @@ run so the recipient list reflects the latest attempts.
 | **Input** | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
 | | `data/<course>/<quiz>_<id>_open_ended_YYYYMMDD.csv` (from `generate-follow-up-questions`) |
 | **Output** | Fresh `*_all_submissions_*.csv`, `*_all_subs_by_question_*.csv`, and `*_all_subs_and_events_*.csv` (auto-refreshed via `getAllSubmissionsAndEvents()`) |
-| | `data/<course>/<quiz>_<id>_followup_sent_YYYYMMDD.csv` — manifest of approved sends (for use by `get-replies`) |
+| | `data/<course>/<quiz>_<id>_followup_sent_YYYYMMDD.csv` — manifest of approved sends (for use by `assess-replies`) |
 | **Canvas side-effect** | Sends a Canvas conversation message (in a dedicated thread) to each approved student (skipped in `--dry-run` mode) |
 
 Use `--dry-run` to preview every candidate message without sending anything

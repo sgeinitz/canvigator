@@ -137,7 +137,7 @@ class CanvigatorCourse:
         each conversation's participants list against the active-student roster
         for this course. Useful for picking up follow-up threads sent before the
         per-send conversation_id manifest was added (i.e. for back-filling
-        get-replies on older sends).
+        assess-replies on older sends).
 
         Output columns: conversation_id, subject, last_message_at,
         message_count, workflow_state, student_ids, student_names,

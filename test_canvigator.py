@@ -1076,7 +1076,7 @@ class TestAssessmentsMerge:
     COLS = [
         'student_id', 'student_name', 'question_id', 'question_mode',
         'conversation_id', 'result', 'feedback', 'transcript',
-        'assessed_at', 'sent_feedback', 'sent_at',
+        'assessed_at', 'sent_assessment', 'sent_at',
     ]
 
     def _stub(self):
@@ -1096,7 +1096,7 @@ class TestAssessmentsMerge:
             'student_id': sid, 'student_name': f's{sid}', 'question_id': qid,
             'question_mode': 'explain', 'conversation_id': 100 + sid,
             'result': 'pass', 'feedback': 'fb', 'transcript': '',
-            'assessed_at': '2026-04-22T00:00:00Z', 'sent_feedback': 0, 'sent_at': '',
+            'assessed_at': '2026-04-22T00:00:00Z', 'sent_assessment': 0, 'sent_at': '',
         }
         base.update(overrides)
         return base
