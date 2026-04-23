@@ -77,6 +77,24 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
+def _composeConversationSubject(course_name, course_code, quiz_name, suffix):
+    """Build a Canvas Conversation subject that includes course identity, quiz, and a per-message suffix.
+
+    Format: ``<course_code> <course_name> - <quiz_name> - <suffix>``. Missing
+    course fields are omitted gracefully so the subject still renders. The
+    suffix is the per-message tail (e.g. ``"Q3 Follow-Up"`` or ``"Reminder"``).
+    The richer subject lets students/instructors group conversations across
+    classes, quizzes, and questions; threads themselves are still tracked
+    internally by ``conversation_id``, so subject changes are safe.
+    """
+    course_parts = [str(p).strip() for p in (course_code, course_name) if p and str(p).strip()]
+    course_label = ' '.join(course_parts) if course_parts else 'Course'
+    parts = [course_label, str(quiz_name).strip()]
+    if suffix and str(suffix).strip():
+        parts.append(str(suffix).strip())
+    return ' - '.join(parts)
+
+
 def _composeFollowUpFeedbackMessage(student_name, feedback, result):
     """Build the message body sent by send-follow-up-assessments.
 
@@ -523,7 +541,12 @@ class CanvigatorQuiz:
             "you have any questions, concerns, or suggestions about it."
         )
 
-        subject_str = f"Quiz Reminder - {quiz_name}"
+        subject_str = _composeConversationSubject(
+            self.canvas_course.canvas_course.name,
+            self.canvas_course.canvas_course.course_code,
+            quiz_name,
+            "Reminder",
+        )
         messages = []
 
         for student in enrolled:
@@ -660,7 +683,12 @@ class CanvigatorQuiz:
                 "message editor to record your response."
             )
 
-        subject_str = f"Follow-Up Question - {quiz_name} - Q{position}"
+        subject_str = _composeConversationSubject(
+            self.canvas_course.canvas_course.name,
+            self.canvas_course.canvas_course.course_code,
+            quiz_name,
+            f"Q{position} Follow-Up",
+        )
         enrolled = self.canvas_course.students
         enrolled_map = {s['id']: s['name'] for s in enrolled}
 

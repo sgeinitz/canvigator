@@ -1190,6 +1190,45 @@ class TestComposeFollowUpFeedbackMessage:
         assert out.endswith('Nice work!')
 
 
+class TestComposeConversationSubject:
+    """Tests for canvigator_quiz._composeConversationSubject."""
+
+    def _call(self, course_name, course_code, quiz_name, suffix):
+        """Invoke the module-level helper."""
+        from canvigator_quiz import _composeConversationSubject
+        return _composeConversationSubject(course_name, course_code, quiz_name, suffix)
+
+    def test_includes_course_code_name_quiz_and_suffix(self):
+        """Subject embeds course code, course name, quiz name, and the suffix in order."""
+        out = self._call('Discrete Mathematics', 'CSI-3300-001-12345', 'Quiz 1', 'Q3 Follow-Up')
+        assert out == 'CSI-3300-001-12345 Discrete Mathematics - Quiz 1 - Q3 Follow-Up'
+
+    def test_reminder_suffix(self):
+        """Reminder subjects use the 'Reminder' suffix without a Q-number."""
+        out = self._call('Discrete Mathematics', 'CSI-3300-001-12345', 'Quiz 2', 'Reminder')
+        assert out == 'CSI-3300-001-12345 Discrete Mathematics - Quiz 2 - Reminder'
+
+    def test_missing_course_name_omits_gracefully(self):
+        """A missing course name leaves the course code as the sole course label."""
+        out = self._call('', 'CSI-3300', 'Quiz 1', 'Reminder')
+        assert out == 'CSI-3300 - Quiz 1 - Reminder'
+
+    def test_missing_course_code_omits_gracefully(self):
+        """A missing course code leaves the course name as the sole course label."""
+        out = self._call('Discrete Mathematics', None, 'Quiz 1', 'Reminder')
+        assert out == 'Discrete Mathematics - Quiz 1 - Reminder'
+
+    def test_no_course_info_falls_back_to_course_label(self):
+        """If both course fields are empty, the subject still includes a 'Course' placeholder."""
+        out = self._call('', '', 'Quiz 1', 'Reminder')
+        assert out == 'Course - Quiz 1 - Reminder'
+
+    def test_empty_suffix_is_omitted(self):
+        """An empty suffix drops the trailing separator instead of leaving a dangling dash."""
+        out = self._call('Discrete Math', 'CSI-3300', 'Quiz 1', '')
+        assert out == 'CSI-3300 Discrete Math - Quiz 1'
+
+
 # ---------------------------------------------------------------------------
 # canvigator_llm: assessment helper tests
 # ---------------------------------------------------------------------------
