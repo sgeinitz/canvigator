@@ -1193,10 +1193,10 @@ class TestComposeFollowUpFeedbackMessage:
 class TestComposeConversationSubject:
     """Tests for canvigator_quiz._composeConversationSubject."""
 
-    def _call(self, course_code, quiz_name, suffix):
+    def _call(self, course_code, quiz_name, suffix, short_code=False):
         """Invoke the module-level helper."""
         from canvigator_quiz import _composeConversationSubject
-        return _composeConversationSubject(course_code, quiz_name, suffix)
+        return _composeConversationSubject(course_code, quiz_name, suffix, short_code=short_code)
 
     def test_drops_section_from_four_part_code(self):
         """A four-part Canvas code drops the section component (3rd part)."""
@@ -1222,6 +1222,26 @@ class TestComposeConversationSubject:
         """An empty suffix drops the trailing separator instead of leaving a dangling dash."""
         out = self._call('CSI-3300-12345', 'Quiz 1', '')
         assert out == 'CSI-3300-12345 - Quiz 1'
+
+    def test_short_code_truncates_four_part_code(self):
+        """short_code=True truncates CSI-3300-001-12345 to CSI-3300 (up to the second hyphen)."""
+        out = self._call('CSI-3300-001-12345', 'Quiz 1', 'Q3 Follow-Up', short_code=True)
+        assert out == 'CSI-3300 - Quiz 1 - Q3 Follow-Up'
+
+    def test_short_code_truncates_three_part_code(self):
+        """short_code=True truncates CSI-3300-12345 to CSI-3300."""
+        out = self._call('CSI-3300-12345', 'Quiz 2', 'Q1 Follow-Up', short_code=True)
+        assert out == 'CSI-3300 - Quiz 2 - Q1 Follow-Up'
+
+    def test_short_code_preserves_single_hyphen_code(self):
+        """A code with only one hyphen is unchanged (still only two parts)."""
+        out = self._call('MATH-101', 'Quiz 1', 'Q1 Follow-Up', short_code=True)
+        assert out == 'MATH-101 - Quiz 1 - Q1 Follow-Up'
+
+    def test_short_code_preserves_hyphenless_code(self):
+        """A code with no hyphens passes through entirely."""
+        out = self._call('MATH101', 'Quiz 1', 'Q1 Follow-Up', short_code=True)
+        assert out == 'MATH101 - Quiz 1 - Q1 Follow-Up'
 
 
 # ---------------------------------------------------------------------------

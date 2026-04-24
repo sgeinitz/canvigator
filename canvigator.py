@@ -25,6 +25,7 @@ task_groups = [
         ('get-activity', 'Export student activity data'),
         ('get-quiz-submission-events', 'Export quiz submissions and events for a selected quiz (use --all for every quiz)'),
         ('get-conversations', 'Export Canvas conversations involving students in the selected course'),
+        ('delete-old-conversations', 'Delete Canvas conversations older than N months (account-wide; default 6, override with --m; use --dry-run first)'),
         ('get-gradebook', 'Export course gradebook'),
         ('get-roster', 'Export the full course roster (name, id, sis_id, enrollment_type)'),
         ('send-quiz-reminder', 'Send quiz reminder messages to students'),
@@ -36,12 +37,13 @@ tasks = list(task_descriptions.keys())
 
 def print_help():
     """Print usage information with grouped task descriptions."""
-    print("Usage: canvigator.py [--dry-run] [--tag] [--all] [--crn <CRN>] <task>\n")
+    print("Usage: canvigator.py [--dry-run] [--tag] [--all] [--crn <CRN>] [--m <months>] <task>\n")
     print("Options:")
-    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, follow-up, and feedback tasks)")
+    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, follow-up, feedback, and delete-old-conversations tasks)")
     print("  --tag          Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
     print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions and get-quiz-submission-events only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
+    print("  --m <months>   Age threshold in months for delete-old-conversations (default: 6)")
     print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
     max_name = max(len(t) for t in tasks)
     for header, items in task_groups:
@@ -114,6 +116,22 @@ if '--crn' in args:
     args.pop(crn_idx)  # remove '--crn'
     args.pop(crn_idx)  # remove the CRN value
 
+n_months = 6
+if '--m' in args:
+    m_idx = args.index('--m')
+    if m_idx + 1 >= len(args):
+        print("Error: --m requires a numeric value (number of months)")
+        sys.exit(1)
+    try:
+        n_months = int(args[m_idx + 1])
+        if n_months < 1:
+            raise ValueError
+    except ValueError:
+        print(f"Error: --m must be a positive integer, got '{args[m_idx + 1]}'")
+        sys.exit(1)
+    args.pop(m_idx)  # remove '--m'
+    args.pop(m_idx)  # remove the value
+
 reply_window_days = 5
 if '--reply-window-days' in args:
     rw_idx = args.index('--reply-window-days')
@@ -179,6 +197,28 @@ if task == 'export-anon-data':
 
     print(f"\nSelected: {course_data_path.name}")
     cc.exportAnonymizedData(course_data_path)
+    print("\n*** Done ***\n")
+    sys.exit(0)
+
+# delete-old-conversations is account-wide (Canvas conversations aren't course-scoped)
+if task == 'delete-old-conversations':
+    import os
+    import logging
+    import canvasapi
+    import canvigator_utils as cu
+    import canvigator_course as cc
+
+    cu.setup_logging()
+    logger = logging.getLogger(__name__)
+
+    API_URL = os.environ.get("CANVAS_URL")
+    API_KEY = os.environ.get("CANVAS_TOKEN")
+    if not API_URL or not API_KEY:
+        print("Error: CANVAS_URL and CANVAS_TOKEN must be set. Run 'source set_env.sh' first.")
+        sys.exit(1)
+
+    canvas = canvasapi.Canvas(API_URL, API_KEY)
+    cc.deleteOldConversations(canvas, dry_run=dry_run, max_age_months=n_months)
     print("\n*** Done ***\n")
     sys.exit(0)
 

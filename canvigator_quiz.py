@@ -77,20 +77,26 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
-def _composeConversationSubject(course_code, quiz_name, suffix):
+def _composeConversationSubject(course_code, quiz_name, suffix, short_code=False):
     """Build a Canvas Conversation subject that includes course identity, quiz, and a per-message suffix.
 
-    The course code is compacted to ``<prefix>-<number>-<CRN>`` by dropping the
-    middle section component when it's present (Canvas codes typically look
-    like ``CSI-3300-001-12345``); shorter codes pass through unchanged. The
-    suffix is the per-message tail (e.g. ``"Q3 Follow-Up"`` or ``"Reminder"``).
-    The richer subject lets students/instructors group conversations across
-    classes, quizzes, and questions; threads themselves are still tracked
-    internally by ``conversation_id``, so subject changes are safe.
+    By default the course code is compacted to ``<prefix>-<number>-<CRN>`` by
+    dropping the middle section component when it's present (Canvas codes
+    typically look like ``CSI-3300-001-12345``); shorter codes pass through
+    unchanged. When ``short_code=True``, the code is further truncated to the
+    portion before the second hyphen (``<prefix>-<number>``), and codes with
+    zero or one hyphen pass through unchanged — used for follow-up question
+    subjects where the CRN is noise. The suffix is the per-message tail (e.g.
+    ``"Q3 Follow-Up"`` or ``"Reminder"``). The richer subject lets
+    students/instructors group conversations across classes, quizzes, and
+    questions; threads themselves are still tracked internally by
+    ``conversation_id``, so subject changes are safe.
     """
     code = str(course_code).strip() if course_code else ''
     code_parts = [p for p in code.split('-') if p]
-    if len(code_parts) == 4:
+    if short_code:
+        code_parts = code_parts[:2]
+    elif len(code_parts) == 4:
         code_parts = [code_parts[0], code_parts[1], code_parts[3]]
     course_label = '-'.join(code_parts) if code_parts else 'Course'
     parts = [course_label, str(quiz_name).strip()]
@@ -690,6 +696,7 @@ class CanvigatorQuiz:
             self.canvas_course.canvas_course.course_code,
             quiz_name,
             f"Q{position} Follow-Up",
+            short_code=True,
         )
         enrolled = self.canvas_course.students
         enrolled_map = {s['id']: s['name'] for s in enrolled}
