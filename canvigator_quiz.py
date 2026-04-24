@@ -3,6 +3,8 @@ import random
 import logging
 import csv
 import requests
+import math
+import numpy as np
 import pandas as pd
 import scipy.spatial.distance as distance
 import matplotlib.pyplot as plt
@@ -37,6 +39,69 @@ def _parse_points_possible_from_student_analysis(csv_path):
         except (TypeError, ValueError):
             continue
     return points_possible
+
+
+def _annotate_stats(ax, mean, std):
+    """Render a small mean/sd text box in the upper-left of a matplotlib axis."""
+    text = f'mean: {_fmt_stat(mean)}\nsd: {_fmt_stat(std)}'
+    ax.text(
+        0.04, 0.96, text,
+        transform=ax.transAxes, va='top', ha='left', fontsize=8,
+        bbox=dict(facecolor='white', alpha=0.75, edgecolor='none', pad=2),
+    )
+
+
+def _fmt_stat(x):
+    """Format a number with at most 2 decimal places, trimming trailing zeros.
+
+    Returns '—' for None or NaN. Examples: 0.5 → '0.5', 0.123 → '0.12',
+    1.0 → '1', 0.0 → '0', None → '—'.
+    """
+    if x is None:
+        return '—'
+    try:
+        if math.isnan(x):
+            return '—'
+    except TypeError:
+        return '—'
+    s = f'{x:.2f}'
+    if '.' in s:
+        s = s.rstrip('0').rstrip('.')
+    return s or '0'
+
+
+def _scoreHistogramBins(max_pts):
+    """Return bin edges for a score histogram with fixed width based on ``max_pts``.
+
+    Width is 0.1 when max_pts ≤ 1.5, 0.2 when ≤ 2.5, 0.5 when > 2.5. Uses
+    ``np.linspace`` (not arange) to avoid float-precision issues at the upper
+    edge. Falls back to ``10`` (a plain bin count) when ``max_pts`` is missing
+    or non-positive.
+    """
+    if not max_pts or max_pts <= 0:
+        return 10
+    if max_pts <= 1.5:
+        width = 0.1
+    elif max_pts <= 2.5:
+        width = 0.2
+    else:
+        width = 0.5
+    n_bins = max(1, round(max_pts / width))
+    return list(np.linspace(0, max_pts, n_bins + 1))
+
+
+def _integerAlignedBins(data_by_q):
+    """Return integer-aligned bin edges covering 0..ceil(overall_max)+1.
+
+    Used by the timing (1-minute) and blur (1-count) histograms so every
+    subplot shares the same x-axis and bar count. Returns ``None`` when
+    there is no data across any question.
+    """
+    all_vals = [v for vals in data_by_q.values() for v in vals]
+    if not all_vals:
+        return None
+    overall_max = max(all_vals)
+    return list(range(0, math.ceil(overall_max) + 2))
 
 
 def _render_missed_bullets(missed_rows, question_info):
@@ -77,20 +142,26 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
-def _composeConversationSubject(course_code, quiz_name, suffix):
+def _composeConversationSubject(course_code, quiz_name, suffix, short_code=False):
     """Build a Canvas Conversation subject that includes course identity, quiz, and a per-message suffix.
 
-    The course code is compacted to ``<prefix>-<number>-<CRN>`` by dropping the
-    middle section component when it's present (Canvas codes typically look
-    like ``CSI-3300-001-12345``); shorter codes pass through unchanged. The
-    suffix is the per-message tail (e.g. ``"Q3 Follow-Up"`` or ``"Reminder"``).
-    The richer subject lets students/instructors group conversations across
-    classes, quizzes, and questions; threads themselves are still tracked
-    internally by ``conversation_id``, so subject changes are safe.
+    By default the course code is compacted to ``<prefix>-<number>-<CRN>`` by
+    dropping the middle section component when it's present (Canvas codes
+    typically look like ``CSI-3300-001-12345``); shorter codes pass through
+    unchanged. When ``short_code=True``, the code is further truncated to the
+    portion before the second hyphen (``<prefix>-<number>``), and codes with
+    zero or one hyphen pass through unchanged — used for follow-up question
+    subjects where the CRN is noise. The suffix is the per-message tail (e.g.
+    ``"Q3 Follow-Up"`` or ``"Reminder"``). The richer subject lets
+    students/instructors group conversations across classes, quizzes, and
+    questions; threads themselves are still tracked internally by
+    ``conversation_id``, so subject changes are safe.
     """
     code = str(course_code).strip() if course_code else ''
     code_parts = [p for p in code.split('-') if p]
-    if len(code_parts) == 4:
+    if short_code:
+        code_parts = code_parts[:2]
+    elif len(code_parts) == 4:
         code_parts = [code_parts[0], code_parts[1], code_parts[3]]
     course_label = '-'.join(code_parts) if code_parts else 'Course'
     parts = [course_label, str(quiz_name).strip()]
@@ -690,6 +761,7 @@ class CanvigatorQuiz:
             self.canvas_course.canvas_course.course_code,
             quiz_name,
             f"Q{position} Follow-Up",
+            short_code=True,
         )
         enrolled = self.canvas_course.students
         enrolled_map = {s['id']: s['name'] for s in enrolled}
@@ -1432,20 +1504,29 @@ class CanvigatorQuiz:
         figure.set_size_inches(13, 3)
         for i, q in enumerate(self.quiz_question_ids):
             score_col = q + '_score'
-            col_data = self.quiz_df[score_col]
-            axis[i].hist(col_data, bins=6, facecolor='#00447c', edgecolor='black', alpha=0.8)
+            col_data = self.quiz_df[score_col].dropna()
+            max_pts = self.question_points_possible.get(int(q))
+            bins = _scoreHistogramBins(max_pts)
+            axis[i].hist(col_data, bins=bins, facecolor='#00447c', edgecolor='black', alpha=0.8)
             axis[i].axvline(col_data.mean(), color='black', linestyle='dashed', linewidth=1)
             axis[i].set_xlabel('score')
-            axis[i].set_title('question: ' + q.split('_')[0])
-        axis[0].set_ylabel('# of people')
+            axis[i].set_title(f'Q{i + 1}')
+            if len(col_data) >= 2:
+                _annotate_stats(axis[i], col_data.mean(), col_data.std())
+        axis[0].set_ylabel('# of students')
         plt.tight_layout()  # Or try plt.subplots_adjust(left=0.05, right=0.98, bottom=0.15, top=0.9)
-        fig_path = self.figurePath("histograms")
+        fig_path = self.figurePath("score_histograms")
         figure.savefig(fig_path, dpi=200)
         plt.close('all')
         print(f"  ✓ Saved: {fig_path.name}")
 
-    def _plotPerQuestionHistogram(self, data_by_q, xlabel, facecolor, figure_name):
-        """Plot a row of per-question histograms and save the figure."""
+    def _plotPerQuestionHistogram(self, data_by_q, xlabel, facecolor, figure_name, bins=None):
+        """Plot a row of per-question histograms and save the figure.
+
+        When ``bins`` is provided (a list of edges), every subplot shares it
+        so bar widths and the x-axis match across questions. Falls back to
+        ``bins=10`` per subplot when ``bins`` is None (e.g., no data at all).
+        """
         question_ids = self.quiz_question_ids
         n_questions = len(question_ids)
         mpl.style.use('seaborn-v0_8')
@@ -1456,9 +1537,11 @@ class CanvigatorQuiz:
         for i, qid in enumerate(question_ids):
             data = data_by_q[qid]
             if data:
-                bins = range(0, max(data) + 2) if all(isinstance(v, int) for v in data) else 10
-                axes[i].hist(data, bins=bins, facecolor=facecolor, edgecolor='black', alpha=0.8)
+                subplot_bins = bins if bins is not None else 10
+                axes[i].hist(data, bins=subplot_bins, facecolor=facecolor, edgecolor='black', alpha=0.8)
                 axes[i].axvline(sum(data) / len(data), color='black', linestyle='dashed', linewidth=1)
+                if len(data) >= 2:
+                    _annotate_stats(axes[i], float(np.mean(data)), float(np.std(data, ddof=1)))
             axes[i].set_xlabel(xlabel)
             axes[i].set_title(f'Q{i + 1}')
         axes[0].set_ylabel('# of students')
@@ -1501,8 +1584,10 @@ class CanvigatorQuiz:
             print("  (No per-question event data available for timing/blur histograms)")
             return
 
-        self._plotPerQuestionHistogram(timing_by_q, 'minutes', '#00447c', 'timing_first_attempt')
-        self._plotPerQuestionHistogram(blurs_by_q, '# of page blurs', '#c44e52', 'blurs_first_attempt')
+        timing_bins = _integerAlignedBins(timing_by_q)
+        blur_bins = _integerAlignedBins(blurs_by_q)
+        self._plotPerQuestionHistogram(timing_by_q, 'minutes', '#00447c', 'timing_first_attempt', bins=timing_bins)
+        self._plotPerQuestionHistogram(blurs_by_q, '# of page blurs', '#c44e52', 'blurs_first_attempt', bins=blur_bins)
 
     def generateDistanceMatrix(self, only_present, distance_type='euclid'):
         """Calculate vector distance between all possible student pairs."""

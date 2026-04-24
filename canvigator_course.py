@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import canvigator_quiz as cq
-from canvigator_utils import today_str
+from canvigator_utils import today_str, spin, spin_done
 
 MAX_COURSE_WEEKS = 16
 
@@ -140,8 +140,19 @@ class CanvigatorCourse:
         assess-replies on older sends).
 
         Output columns: conversation_id, subject, last_message_at,
-        message_count, workflow_state, student_ids, student_names,
-        n_student_participants, last_message.
+        first_message_at, message_count, workflow_state, student_ids,
+        student_names, n_student_participants, last_message.
+
+        ``first_message_at`` is derived by fetching each matched conversation
+        and taking the earliest ``created_at`` across its messages. When
+        ``last_message_at`` is missing (occasionally empty on the list
+        endpoint for older/archived threads), ``first_message_at`` is used in
+        its place so sorting stays meaningful.
+
+        Conversations whose ``last_message_at`` predates the course start
+        date are excluded — prior-term threads would otherwise pollute the
+        back-fill. The start date is read from ``course.get_settings()``
+        (key ``start_date``), falling back to ``course.start_at``.
         """
         student_ids = {s['id'] for s in self.students}
         student_names = {s['id']: s['name'] for s in self.students}
@@ -149,14 +160,21 @@ class CanvigatorCourse:
             print("No active students on the course roster — nothing to filter conversations against.")
             return
 
+        course_start_dt = _resolveCourseStart(self.canvas_course)
+        if course_start_dt is None:
+            print("Course has no start date — skipping the pre-course filter.")
+        else:
+            print(f"Course start date: {course_start_dt.date().isoformat()} — older conversations will be excluded.")
+
+        # First pass: collect matched conversations from the list endpoints so the
+        # per-conversation fetch loop (below) can show a sized "N/M" spinner.
+        matched_convos = []
         seen = set()
-        rows = []
         # 'inbox' scope (default) excludes archived; 'sent' is needed for conversations
         # the instructor opened that haven't received a reply (and therefore aren't in
         # the inbox view). Dedupe by conversation_id when scopes overlap.
         for scope in (None, 'sent'):
             label = scope or 'inbox'
-            print(f"Fetching {label} conversations...")
             try:
                 convos = self.canvas.get_conversations(scope=scope) if scope else self.canvas.get_conversations()
                 for c in convos:
@@ -167,27 +185,54 @@ class CanvigatorCourse:
                     matched = [p for p in participants if p.get('id') in student_ids]
                     if not matched:
                         continue
+                    last_at = getattr(c, 'last_message_at', '') or ''
+                    last_dt = _parse_canvas_timestamp(last_at)
+                    if course_start_dt is not None and last_dt is not None and last_dt < course_start_dt:
+                        continue
                     seen.add(cid)
-                    matched_ids = [p['id'] for p in matched]
-                    matched_names = [student_names.get(pid, '') for pid in matched_ids]
-                    rows.append({
-                        'conversation_id': cid,
-                        'subject': getattr(c, 'subject', '') or '',
-                        'last_message_at': getattr(c, 'last_message_at', '') or '',
-                        'message_count': getattr(c, 'message_count', 0),
-                        'workflow_state': getattr(c, 'workflow_state', '') or '',
-                        'student_ids': ','.join(str(i) for i in matched_ids),
-                        'student_names': '; '.join(matched_names),
-                        'n_student_participants': len(matched_ids),
-                        'last_message': (getattr(c, 'last_message', '') or '').strip(),
-                    })
+                    matched_convos.append((c, matched, last_at))
             except Exception as e:
                 logger.warning(f"Failed to fetch conversations with scope={label}: {e}")
                 print(f"  (failed: {e})")
 
+        # Second pass: fetch each matched conversation to derive first_message_at.
+        # This is one extra API call per conversation, so surface progress via spinner.
+        rows = []
+        total = len(matched_convos)
+        skipped_pre_start = 0
+        for idx, (c, matched, last_at) in enumerate(matched_convos, start=1):
+            cid = getattr(c, 'id', None)
+            spin(idx - 1, f"Fetching conversation {idx}/{total} (id={cid})")
+            matched_ids = [p['id'] for p in matched]
+            matched_names = [student_names.get(pid, '') for pid in matched_ids]
+            first_at = _fetchFirstMessageAt(self.canvas, cid)
+            if not last_at:
+                last_at = first_at
+                # Re-check the start-date filter now that we have a timestamp to compare.
+                last_dt = _parse_canvas_timestamp(last_at)
+                if course_start_dt is not None and last_dt is not None and last_dt < course_start_dt:
+                    skipped_pre_start += 1
+                    continue
+            rows.append({
+                'conversation_id': cid,
+                'subject': getattr(c, 'subject', '') or '',
+                'last_message_at': last_at,
+                'first_message_at': first_at,
+                'message_count': getattr(c, 'message_count', 0),
+                'workflow_state': getattr(c, 'workflow_state', '') or '',
+                'student_ids': ','.join(str(i) for i in matched_ids),
+                'student_names': '; '.join(matched_names),
+                'n_student_participants': len(matched_ids),
+                'last_message': (getattr(c, 'last_message', '') or '').strip(),
+            })
+        if total:
+            spin_done(f"Fetched {total} conversation(s).")
+        if skipped_pre_start:
+            print(f"Skipped {skipped_pre_start} conversation(s) older than the course start date.")
+
         df = pd.DataFrame(rows, columns=[
-            'conversation_id', 'subject', 'last_message_at', 'message_count',
-            'workflow_state', 'student_ids', 'student_names',
+            'conversation_id', 'subject', 'last_message_at', 'first_message_at',
+            'message_count', 'workflow_state', 'student_ids', 'student_names',
             'n_student_participants', 'last_message',
         ])
         df = df.sort_values('last_message_at', ascending=False, na_position='last')
@@ -464,6 +509,152 @@ class CanvigatorCourse:
             })
         return pd.DataFrame(rows, columns=['id', 'top_browser', 'top_os',
                                            'used_mobile_app', 'n_distinct_user_agents'])
+
+
+def _collectOldConversations(canvas, cutoff_dt, current_user_id):
+    """Return a list of conversation dicts with last_message_at older than ``cutoff_dt``.
+
+    Sweeps the 'inbox', 'sent', and 'archived' scopes, dedupes by
+    conversation_id, and filters to conversations older than the cutoff.
+    Falls back to ``last_authored_message_at`` when ``last_message_at`` is
+    empty (sent-only threads where the student never replied). Each entry
+    has keys: id, obj, subject, last_message_at, participant_names.
+    """
+    results = []
+    seen = set()
+    scope_counts = {}
+    for scope in (None, 'sent', 'archived'):
+        label = scope or 'inbox'
+        seen_this_scope = 0
+        kept_this_scope = 0
+        try:
+            convos = canvas.get_conversations(scope=scope) if scope else canvas.get_conversations()
+            for c in convos:
+                seen_this_scope += 1
+                cid = getattr(c, 'id', None)
+                if cid is None or cid in seen:
+                    continue
+                # For sent-only conversations (instructor authored the only message), Canvas
+                # often leaves last_message_at empty on the list endpoint and populates
+                # last_authored_message_at instead. Fall back to that so those threads are
+                # still considered.
+                last_at = getattr(c, 'last_message_at', '') or ''
+                if not last_at:
+                    last_at = getattr(c, 'last_authored_message_at', '') or ''
+                last_dt = _parse_canvas_timestamp(last_at)
+                if last_dt is None or last_dt >= cutoff_dt:
+                    continue
+                seen.add(cid)
+                kept_this_scope += 1
+                participants = getattr(c, 'participants', []) or []
+                others = [p for p in participants if p.get('id') != current_user_id]
+                names = '; '.join(p.get('name', '') or str(p.get('id', '')) for p in others)
+                results.append({
+                    'id': cid,
+                    'obj': c,
+                    'subject': getattr(c, 'subject', '') or '',
+                    'last_message_at': last_at,
+                    'participant_names': names,
+                })
+        except Exception as e:
+            logger.warning(f"Failed to fetch conversations with scope={label}: {e}")
+            print(f"  (failed: {e})")
+        scope_counts[label] = (seen_this_scope, kept_this_scope)
+    parts = [f"{label}: {k}/{s} match" for label, (s, k) in scope_counts.items()]
+    print("Scanned — " + "; ".join(parts))
+    return results
+
+
+def deleteOldConversations(canvas, dry_run=False, max_age_months=6):
+    """Delete the instructor's Canvas conversations older than ``max_age_months`` months.
+
+    Canvas conversations are not course-scoped, so this sweeps the instructor's
+    inbox, sent, and archived scopes (deduped by conversation_id) and deletes
+    each conversation whose ``last_message_at`` is at least ``max_age_months``
+    months (approximated as 30 days/month) before today. In dry-run mode, prints the
+    target conversations (last_message_at, subject, participant names) instead
+    of deleting. In live mode, prints the same list and asks for an explicit
+    'yes' confirmation before deleting.
+
+    Uses ``Conversation.delete()`` (``DELETE /api/v1/conversations/:id``) —
+    not ``delete_messages()``, which only removes specific messages.
+    """
+    try:
+        current_user_id = canvas.get_current_user().id
+    except Exception as e:
+        logger.warning(f"Failed to identify current user: {e}")
+        current_user_id = None
+
+    max_age_days = max_age_months * 30
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    print(f"Cutoff date: {cutoff_dt.date().isoformat()} "
+          f"(~{max_age_months} month{'s' if max_age_months != 1 else ''}) "
+          f"— conversations with last_message_at before this will be deleted.")
+
+    to_delete = _collectOldConversations(canvas, cutoff_dt, current_user_id)
+
+    total = len(to_delete)
+    if total == 0:
+        print(f"No conversations older than {max_age_months} month(s) found.")
+        return
+
+    to_delete.sort(key=lambda x: x['last_message_at'])
+    action = "Would delete" if dry_run else "Deleting"
+    print(f"\n{action} {total} conversation(s):")
+    for item in to_delete:
+        print(f"  [{item['last_message_at']}] {item['participant_names']} — {item['subject']}")
+
+    if dry_run:
+        print("\n--dry-run: no conversations were deleted.")
+        return
+
+    resp = input(f"\nConfirm deletion of {total} conversation(s)? Type 'yes' to proceed: ").strip().lower()
+    if resp != 'yes':
+        print("Aborted — no conversations deleted.")
+        return
+
+    deleted = 0
+    failed = 0
+    for idx, item in enumerate(to_delete, start=1):
+        spin(idx - 1, f"Deleting conversation {idx}/{total} (id={item['id']})")
+        try:
+            item['obj'].delete()
+            deleted += 1
+        except Exception as e:
+            logger.warning(f"Failed to delete conversation {item['id']}: {e}")
+            failed += 1
+    summary = f"Deleted {deleted} conversation(s)"
+    if failed:
+        summary += f"; {failed} failed (see log)"
+    spin_done(summary + ".")
+
+
+def _resolveCourseStart(canvas_course):
+    """Return the course start as a UTC datetime, or None if unavailable.
+
+    Prefers ``course.get_settings()['start_date']`` (the instructor-set
+    override), falling back to ``course.start_at``.
+    """
+    try:
+        settings = canvas_course.get_settings() or {}
+        dt = _parse_canvas_timestamp(settings.get('start_date'))
+        if dt is not None:
+            return dt
+    except Exception as e:
+        logger.warning(f"course.get_settings() failed: {e}")
+    return _parse_canvas_timestamp(getattr(canvas_course, 'start_at', None))
+
+
+def _fetchFirstMessageAt(canvas, cid):
+    """Return the earliest message ``created_at`` for a conversation, or ''."""
+    try:
+        full = canvas.get_conversation(cid, auto_mark_as_read=False)
+    except Exception as e:
+        logger.warning(f"get_conversation({cid}) failed while computing first_message_at: {e}")
+        return ''
+    messages = getattr(full, 'messages', []) or []
+    timestamps = [m.get('created_at', '') for m in messages if m.get('created_at')]
+    return min(timestamps) if timestamps else ''
 
 
 def _parse_canvas_timestamp(ts_str):
