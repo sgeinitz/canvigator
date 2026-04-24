@@ -1245,6 +1245,102 @@ class TestComposeConversationSubject:
 
 
 # ---------------------------------------------------------------------------
+# canvigator_quiz: histogram bin helpers
+# ---------------------------------------------------------------------------
+
+class TestFmtStat:
+    """Tests for canvigator_quiz._fmt_stat."""
+
+    def test_trims_trailing_zeros(self):
+        """0.50 renders as '0.5', not '0.50'."""
+        from canvigator_quiz import _fmt_stat
+        assert _fmt_stat(0.5) == '0.5'
+
+    def test_caps_at_two_decimals(self):
+        """0.1234 rounds to '0.12'."""
+        from canvigator_quiz import _fmt_stat
+        assert _fmt_stat(0.1234) == '0.12'
+
+    def test_integer_value_drops_decimal(self):
+        """1.0 renders as '1', not '1.0' or '1.00'."""
+        from canvigator_quiz import _fmt_stat
+        assert _fmt_stat(1.0) == '1'
+
+    def test_zero(self):
+        """0.0 renders as '0'."""
+        from canvigator_quiz import _fmt_stat
+        assert _fmt_stat(0.0) == '0'
+
+    def test_nan_and_none(self):
+        """Renders NaN and None as an em-dash placeholder."""
+        from canvigator_quiz import _fmt_stat
+        import math as _m
+        assert _fmt_stat(float('nan')) == '—'
+        assert _fmt_stat(None) == '—'
+        assert _fmt_stat(_m.nan) == '—'
+
+
+class TestScoreHistogramBins:
+    """Tests for canvigator_quiz._scoreHistogramBins."""
+
+    def test_width_0_1_when_max_pts_1(self):
+        """1-point question uses 0.1-wide bins across [0, 1]."""
+        from canvigator_quiz import _scoreHistogramBins
+        bins = _scoreHistogramBins(1.0)
+        assert len(bins) == 11
+        assert bins[0] == 0
+        assert bins[-1] == 1.0
+        assert abs(bins[1] - 0.1) < 1e-9
+
+    def test_width_0_1_at_threshold_1_5(self):
+        """max_pts = 1.5 still uses 0.1-wide bins (≤ 1.5 rule)."""
+        from canvigator_quiz import _scoreHistogramBins
+        bins = _scoreHistogramBins(1.5)
+        assert len(bins) == 16
+
+    def test_width_0_2_when_max_pts_2(self):
+        """2-point question uses 0.2-wide bins."""
+        from canvigator_quiz import _scoreHistogramBins
+        bins = _scoreHistogramBins(2.0)
+        assert len(bins) == 11
+        assert bins[-1] == 2.0
+
+    def test_width_0_5_when_max_pts_3(self):
+        """3-point question uses 0.5-wide bins."""
+        from canvigator_quiz import _scoreHistogramBins
+        bins = _scoreHistogramBins(3.0)
+        assert len(bins) == 7
+        assert bins[-1] == 3.0
+
+    def test_fallback_when_max_pts_missing(self):
+        """None max_pts falls back to the integer bin count 10."""
+        from canvigator_quiz import _scoreHistogramBins
+        assert _scoreHistogramBins(None) == 10
+        assert _scoreHistogramBins(0) == 10
+
+
+class TestIntegerAlignedBins:
+    """Tests for canvigator_quiz._integerAlignedBins."""
+
+    def test_spans_zero_to_ceil_max_plus_one(self):
+        """Edges cover [0, ceil(max)+1] so every integer value has a bucket."""
+        from canvigator_quiz import _integerAlignedBins
+        bins = _integerAlignedBins({'q1': [0, 1, 2], 'q2': [5]})
+        assert bins == [0, 1, 2, 3, 4, 5, 6]
+
+    def test_ceils_float_values(self):
+        """Non-integer timing values round up so the max is covered."""
+        from canvigator_quiz import _integerAlignedBins
+        bins = _integerAlignedBins({'q1': [0.3, 2.7]})
+        assert bins == [0, 1, 2, 3, 4]
+
+    def test_returns_none_when_empty(self):
+        """Empty data across all questions returns None."""
+        from canvigator_quiz import _integerAlignedBins
+        assert _integerAlignedBins({'q1': [], 'q2': []}) is None
+
+
+# ---------------------------------------------------------------------------
 # canvigator_llm: assessment helper tests
 # ---------------------------------------------------------------------------
 
