@@ -100,6 +100,102 @@ class CanvigatorCourse:
         print(f"\nQuiz '{title}' created with {n_questions} placeholder question{'s' if n_questions != 1 else ''}.")
         logger.info(f"Quiz '{title}' complete: {n_questions} questions")
 
+    def exportRoster(self, data_path):
+        """Export all enrolled people in the course (students, teachers, TAs, etc.) to a CSV file.
+
+        Iterates the full ``get_enrollments()`` paginated list (no role filter)
+        so the output matches what Canvas considers the course roster, including
+        non-student roles. Columns: name, id, sis_id, enrollment_type, state —
+        where enrollment_type is the Canvas type string (StudentEnrollment,
+        TeacherEnrollment, TaEnrollment, DesignerEnrollment, ObserverEnrollment)
+        and state is the enrollment_state (active, invited, inactive, completed,
+        rejected, deleted).
+        """
+        print("Fetching enrollments...")
+        rows = []
+        for e in self.canvas_course.get_enrollments():
+            user = getattr(e, 'user', {}) or {}
+            rows.append({
+                'name': user.get('name', getattr(e, 'name', '')),
+                'id': user.get('id', getattr(e, 'user_id', '')),
+                'sis_id': user.get('sis_user_id', getattr(e, 'sis_user_id', '')),
+                'enrollment_type': getattr(e, 'type', ''),
+                'state': getattr(e, 'enrollment_state', ''),
+            })
+
+        df = pd.DataFrame(rows, columns=['name', 'id', 'sis_id', 'enrollment_type', 'state'])
+        csv_path = data_path / f"roster_{today_str()}.csv"
+        df.to_csv(csv_path, index=False)
+        print(f"Saved {len(df)} enrollments to {csv_path.name}")
+        logger.info(f"Saved roster to {csv_path}")
+
+    def exportConversations(self, data_path):
+        """Export Canvas conversations involving any student in the selected course.
+
+        Canvas conversations are not course-scoped, so we pull the instructor's
+        full inbox and sent folders via ``canvas.get_conversations()`` and filter
+        each conversation's participants list against the active-student roster
+        for this course. Useful for picking up follow-up threads sent before the
+        per-send conversation_id manifest was added (i.e. for back-filling
+        assess-replies on older sends).
+
+        Output columns: conversation_id, subject, last_message_at,
+        message_count, workflow_state, student_ids, student_names,
+        n_student_participants, last_message.
+        """
+        student_ids = {s['id'] for s in self.students}
+        student_names = {s['id']: s['name'] for s in self.students}
+        if not student_ids:
+            print("No active students on the course roster — nothing to filter conversations against.")
+            return
+
+        seen = set()
+        rows = []
+        # 'inbox' scope (default) excludes archived; 'sent' is needed for conversations
+        # the instructor opened that haven't received a reply (and therefore aren't in
+        # the inbox view). Dedupe by conversation_id when scopes overlap.
+        for scope in (None, 'sent'):
+            label = scope or 'inbox'
+            print(f"Fetching {label} conversations...")
+            try:
+                convos = self.canvas.get_conversations(scope=scope) if scope else self.canvas.get_conversations()
+                for c in convos:
+                    cid = getattr(c, 'id', None)
+                    if cid is None or cid in seen:
+                        continue
+                    participants = getattr(c, 'participants', []) or []
+                    matched = [p for p in participants if p.get('id') in student_ids]
+                    if not matched:
+                        continue
+                    seen.add(cid)
+                    matched_ids = [p['id'] for p in matched]
+                    matched_names = [student_names.get(pid, '') for pid in matched_ids]
+                    rows.append({
+                        'conversation_id': cid,
+                        'subject': getattr(c, 'subject', '') or '',
+                        'last_message_at': getattr(c, 'last_message_at', '') or '',
+                        'message_count': getattr(c, 'message_count', 0),
+                        'workflow_state': getattr(c, 'workflow_state', '') or '',
+                        'student_ids': ','.join(str(i) for i in matched_ids),
+                        'student_names': '; '.join(matched_names),
+                        'n_student_participants': len(matched_ids),
+                        'last_message': (getattr(c, 'last_message', '') or '').strip(),
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to fetch conversations with scope={label}: {e}")
+                print(f"  (failed: {e})")
+
+        df = pd.DataFrame(rows, columns=[
+            'conversation_id', 'subject', 'last_message_at', 'message_count',
+            'workflow_state', 'student_ids', 'student_names',
+            'n_student_participants', 'last_message',
+        ])
+        df = df.sort_values('last_message_at', ascending=False, na_position='last')
+        csv_path = data_path / f"conversations_{today_str()}.csv"
+        df.to_csv(csv_path, index=False)
+        print(f"Saved {len(df)} conversations to {csv_path.name}")
+        logger.info(f"Saved conversations to {csv_path}")
+
     def exportGradebook(self, data_path):
         """Export the current gradebook for all graded assignments to a CSV file.
 

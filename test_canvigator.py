@@ -946,61 +946,9 @@ def _make_subs_by_question_df(rows):
 
 
 def _make_quiz_stub():
-    """Create a minimal mock object with the methods _findMostMissedQuestion and _findStudentsWhoMissed."""
+    """Return the CanvigatorQuiz class so unbound helper methods can be called with self=None."""
     from canvigator_quiz import CanvigatorQuiz
-    # We only need the unbound methods — call them with an explicit self=None
-    # since they don't use self at all (only their arguments).
     return CanvigatorQuiz
-
-
-class TestFindMostMissedQuestion:
-    """Tests for CanvigatorQuiz._findMostMissedQuestion."""
-
-    def _call(self, subs_rows, question_info):
-        """Helper to call _findMostMissedQuestion without a full quiz instance."""
-        cls = _make_quiz_stub()
-        df = _make_subs_by_question_df(subs_rows)
-        return cls._findMostMissedQuestion(None, df, question_info)
-
-    def test_returns_most_missed(self):
-        """Question with higher miss rate is returned."""
-        question_info = {
-            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
-            200: {'position': 2, 'keywords': 'topic b', 'points_possible': 1.0},
-        }
-        rows = [
-            ('A', 1, 1, 1, 100, 1.0, 1.0, True),   # student 1 got Q100 right
-            ('A', 1, 1, 2, 200, 0.0, 1.0, False),   # student 1 missed Q200
-            ('B', 2, 1, 1, 100, 0.0, 1.0, False),   # student 2 missed Q100
-            ('B', 2, 1, 2, 200, 0.0, 1.0, False),   # student 2 missed Q200
-        ]
-        result = self._call(rows, question_info)
-        assert result == 200  # both students missed Q200, only one missed Q100
-
-    def test_returns_none_when_all_perfect(self):
-        """Returns None when no questions are missed."""
-        question_info = {
-            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
-        }
-        rows = [
-            ('A', 1, 1, 1, 100, 1.0, 1.0, True),
-            ('B', 2, 1, 1, 100, 1.0, 1.0, True),
-        ]
-        result = self._call(rows, question_info)
-        assert result is None
-
-    def test_uses_latest_attempt(self):
-        """Only the latest attempt per student counts toward miss rate."""
-        question_info = {
-            100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0},
-        }
-        rows = [
-            # Student 1: missed on attempt 1, got it right on attempt 2
-            ('A', 1, 1, 1, 100, 0.0, 1.0, False),
-            ('A', 1, 2, 1, 100, 1.0, 1.0, True),
-        ]
-        result = self._call(rows, question_info)
-        assert result is None  # latest attempt is perfect
 
 
 class TestFindStudentsWhoMissed:
@@ -1120,6 +1068,160 @@ class TestExtractStudentReplies:
         result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
         assert result[0]['id'] == 2
         assert result[1]['id'] == 1
+
+
+class TestAssessmentsMerge:
+    """Tests for CanvigatorQuiz._mergeAssessments and _indexAssessments."""
+
+    COLS = [
+        'student_id', 'student_name', 'question_id', 'question_mode',
+        'conversation_id', 'result', 'feedback', 'transcript',
+        'assessed_at', 'sent_assessment', 'sent_at',
+    ]
+
+    def _stub(self):
+        """Return a CanvigatorQuiz stand-in carrying just ASSESSMENTS_COLUMNS."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        class _Stub:
+            ASSESSMENTS_COLUMNS = CanvigatorQuiz.ASSESSMENTS_COLUMNS
+            _mergeAssessments = CanvigatorQuiz._mergeAssessments
+            _indexAssessments = CanvigatorQuiz._indexAssessments
+
+        return _Stub()
+
+    def _row(self, sid, qid, **overrides):
+        """Build a canonical assessments row dict."""
+        base = {
+            'student_id': sid, 'student_name': f's{sid}', 'question_id': qid,
+            'question_mode': 'explain', 'conversation_id': 100 + sid,
+            'result': 'pass', 'feedback': 'fb', 'transcript': '',
+            'assessed_at': '2026-04-22T00:00:00Z', 'sent_assessment': 0, 'sent_at': '',
+        }
+        base.update(overrides)
+        return base
+
+    def test_merge_into_empty(self):
+        """Merging into an empty DataFrame produces all new rows."""
+        import pandas as pd
+        stub = self._stub()
+        new = [self._row(1, 10), self._row(2, 10)]
+        out = stub._mergeAssessments(pd.DataFrame(columns=self.COLS), new)
+        assert len(out) == 2
+        assert set(out.columns) == set(self.COLS)
+
+    def test_merge_replaces_existing_match(self):
+        """Rows with matching (student_id, question_id) are replaced, not duplicated."""
+        import pandas as pd
+        stub = self._stub()
+        existing = pd.DataFrame([self._row(1, 10, feedback='OLD')], columns=self.COLS)
+        new = [self._row(1, 10, feedback='NEW')]
+        out = stub._mergeAssessments(existing, new)
+        assert len(out) == 1
+        assert out.iloc[0]['feedback'] == 'NEW'
+
+    def test_merge_preserves_unrelated_rows(self):
+        """Rows with non-matching keys are kept as-is."""
+        import pandas as pd
+        stub = self._stub()
+        existing = pd.DataFrame(
+            [self._row(1, 10, feedback='keep'), self._row(2, 10, feedback='also keep')],
+            columns=self.COLS,
+        )
+        new = [self._row(3, 10, feedback='new')]
+        out = stub._mergeAssessments(existing, new)
+        assert len(out) == 3
+        feedback_by_sid = dict(zip(out['student_id'], out['feedback']))
+        assert feedback_by_sid[1] == 'keep'
+        assert feedback_by_sid[2] == 'also keep'
+        assert feedback_by_sid[3] == 'new'
+
+    def test_index_keys_by_student_and_question(self):
+        """_indexAssessments returns a dict keyed by (student_id, question_id)."""
+        import pandas as pd
+        stub = self._stub()
+        df = pd.DataFrame(
+            [self._row(1, 10), self._row(1, 11), self._row(2, 10)],
+            columns=self.COLS,
+        )
+        index = stub._indexAssessments(df)
+        assert set(index.keys()) == {(1, 10), (1, 11), (2, 10)}
+
+
+class TestComposeFollowUpFeedbackMessage:
+    """Tests for canvigator_quiz._composeFollowUpFeedbackMessage."""
+
+    def _call(self, name, feedback, result):
+        """Invoke the module-level helper."""
+        from canvigator_quiz import _composeFollowUpFeedbackMessage
+        return _composeFollowUpFeedbackMessage(name, feedback, result)
+
+    def test_pass_uses_first_name_and_nice_work(self):
+        """Pass result uses 'Nice work!' closing with the first name greeting."""
+        out = self._call('Victor Salazar', 'Solid Venn diagram.', 'pass')
+        assert out.startswith('Hi Victor,\n\n')
+        assert 'Solid Venn diagram.' in out
+        assert out.endswith('Nice work!')
+
+    def test_fail_uses_try_again_closing(self):
+        """Fail result uses the 'try again' closing."""
+        out = self._call('Landon Strong', 'Missing the union step.', 'fail')
+        assert out.startswith('Hi Landon,\n\n')
+        assert out.endswith('Please give it another try when you get a chance.')
+
+    def test_unknown_result_defaults_to_try_again(self):
+        """Empty/unknown result falls through to the 'try again' closing."""
+        out = self._call('Sam Lee', 'Some feedback.', '')
+        assert out.endswith('Please give it another try when you get a chance.')
+
+    def test_sortable_name_uses_part_after_comma(self):
+        """A 'Last, First' style name extracts the first name from after the comma."""
+        out = self._call('Salazar, Victor', 'fb', 'pass')
+        assert out.startswith('Hi Victor,\n\n')
+
+    def test_empty_name_falls_back_to_there(self):
+        """An empty name produces a generic 'Hi there,' greeting."""
+        out = self._call('', 'fb', 'pass')
+        assert out.startswith('Hi there,\n\n')
+
+    def test_pass_is_case_insensitive(self):
+        """Result matching is case-insensitive."""
+        out = self._call('Sam', 'fb', 'PASS')
+        assert out.endswith('Nice work!')
+
+
+class TestComposeConversationSubject:
+    """Tests for canvigator_quiz._composeConversationSubject."""
+
+    def _call(self, course_code, quiz_name, suffix):
+        """Invoke the module-level helper."""
+        from canvigator_quiz import _composeConversationSubject
+        return _composeConversationSubject(course_code, quiz_name, suffix)
+
+    def test_drops_section_from_four_part_code(self):
+        """A four-part Canvas code drops the section component (3rd part)."""
+        out = self._call('CSI-3300-001-12345', 'Quiz 1', 'Q3 Follow-Up')
+        assert out == 'CSI-3300-12345 - Quiz 1 - Q3 Follow-Up'
+
+    def test_reminder_suffix(self):
+        """Reminder subjects use the 'Reminder' suffix without a Q-number."""
+        out = self._call('CSI-3300-001-12345', 'Quiz 2', 'Reminder')
+        assert out == 'CSI-3300-12345 - Quiz 2 - Reminder'
+
+    def test_three_part_code_passes_through(self):
+        """A code that already lacks a section component is preserved as-is."""
+        out = self._call('CSI-3300-12345', 'Quiz 1', 'Reminder')
+        assert out == 'CSI-3300-12345 - Quiz 1 - Reminder'
+
+    def test_missing_course_code_falls_back_to_course_label(self):
+        """An empty course code still produces a sensible subject with a 'Course' placeholder."""
+        out = self._call('', 'Quiz 1', 'Reminder')
+        assert out == 'Course - Quiz 1 - Reminder'
+
+    def test_empty_suffix_is_omitted(self):
+        """An empty suffix drops the trailing separator instead of leaving a dangling dash."""
+        out = self._call('CSI-3300-12345', 'Quiz 1', '')
+        assert out == 'CSI-3300-12345 - Quiz 1'
 
 
 # ---------------------------------------------------------------------------

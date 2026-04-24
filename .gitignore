@@ -6,6 +6,7 @@ __pycache__/
 AGENTS.md
 GEMINI.md
 CLAUDE.md
+AUDIT.md
 
 visualize_events.ipynb
 check4_3subs_cs3120.ipynb

@@ -1,41 +1,55 @@
 #!/usr/bin/env python3
 import sys
 
-task_descriptions = {
-    'assess-replies': 'Assess student follow-up replies using local LLM (requires get-replies)',
-    'award-bonus': 'Award partner + retake bonus points for a quiz',
-    'award-bonus-partner-only': 'Award only the partner bonus points',
-    'award-bonus-retake-only': 'Award only the retake bonus points',
-    'create-pairs': 'Create student pairings from quiz scores',
-    'create-quiz': 'Create an unpublished placeholder quiz on Canvas',
-    'export-anon-data': 'Export anonymized course data (no Canvas API needed)',
-    'generate-open-ended-questions': 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)',
-    'get-activity': 'Export student activity data',
-    'get-all-subs': 'Export all quiz submissions and events',
-    'get-gradebook': 'Export course gradebook',
-    'get-quiz-questions': 'Export quiz question content',
-    'get-replies': 'Retrieve student replies to follow-up questions',
-    'send-follow-up-question': 'Send the most-missed open-ended follow-up question to students',
-    'send-quiz-reminder': 'Send quiz reminder messages to students',
-}
+# Tasks are organized into groups for the --help output. Within each group,
+# tasks are ordered by their typical run order / dependency chain so an
+# instructor reading the list top-to-bottom sees prerequisites before the
+# tasks that depend on them.
+task_groups = [
+    ('Tasks for quizzes with peer instruction and retake incentives', [
+        ('create-pairs', 'Create student pairings from quiz scores'),
+        ('award-bonus', 'Award partner + retake bonus points for a quiz'),
+        ('award-bonus-partner-only', 'Award only the partner bonus points'),
+        ('award-bonus-retake-only', 'Award only the retake bonus points'),
+    ]),
+    ('Quiz Follow-up Questions', [
+        ('get-quiz-questions', 'Export quiz question content'),
+        ('generate-follow-up-questions', 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)'),
+        ('send-follow-up-question', 'Send the instructor-selected open-ended follow-up question to students who missed it'),
+        ('assess-replies', 'Fetch the latest student follow-up replies from Canvas and assess them with a local LLM'),
+        ('send-follow-up-assessments', 'Send instructor-curated assessment feedback back to students (requires assess-replies)'),
+    ]),
+    ('Miscellaneous tasks', [
+        ('create-quiz', 'Create an unpublished placeholder quiz on Canvas'),
+        ('export-anon-data', 'Export anonymized course data (no Canvas API needed)'),
+        ('get-activity', 'Export student activity data'),
+        ('get-quiz-submission-events', 'Export quiz submissions and events for a selected quiz (use --all for every quiz)'),
+        ('get-conversations', 'Export Canvas conversations involving students in the selected course'),
+        ('get-gradebook', 'Export course gradebook'),
+        ('get-roster', 'Export the full course roster (name, id, sis_id, enrollment_type)'),
+        ('send-quiz-reminder', 'Send quiz reminder messages to students'),
+    ]),
+]
+task_descriptions = {name: desc for _, items in task_groups for name, desc in items}
 tasks = list(task_descriptions.keys())
 
 
 def print_help():
-    """Print usage information with task descriptions."""
+    """Print usage information with grouped task descriptions."""
     print("Usage: canvigator.py [--dry-run] [--tag] [--all] [--crn <CRN>] <task>\n")
     print("Options:")
-    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)")
-    print("  --tag          Use a local LLM via Ollama to tag questions (get-quiz-questions only)")
-    print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions only)")
+    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, follow-up, and feedback tasks)")
+    print("  --tag          Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
+    print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions and get-quiz-submission-events only)")
     print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
-    print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, get-replies only)\n")
-    print("Tasks:")
+    print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
     max_name = max(len(t) for t in tasks)
-    for name, desc in task_descriptions.items():
-        print(f"  {name:<{max_name}}  {desc}")
+    for header, items in task_groups:
+        print(f"\n{header}")
+        for name, desc in items:
+            print(f"  {name:<{max_name}}  {desc}")
     print("\nNotes:")
-    print("  generate-open-ended-questions uses a local LLM (via Ollama) in two steps:")
+    print("  generate-follow-up-questions uses a cloud LLM (via Ollama) in two steps:")
     print("    1. Classifies each question as 'explain' (oral) or 'draw' (visual)")
     print("    2. Generates a mode-appropriate open-ended question for instructor review")
     print("  Output CSV includes a question_mode column so the instructor can override choices.")
@@ -45,14 +59,18 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
     """Dispatch a quiz-level task to the appropriate method."""
     if task == 'get-quiz-questions':
         quiz.getQuizQuestions(tag=tag)
-    elif task == 'get-replies':
-        quiz.getFollowUpReplies(reply_window_days=reply_window_days)
+    elif task == 'get-quiz-submission-events':
+        quiz.generateQuestionHistograms()
+        quiz.getAllSubmissionsAndEvents()
+        quiz.generateFirstAttemptHistograms()
     elif task == 'assess-replies':
-        quiz.assessFollowUpReplies()
+        quiz.assessFollowUpReplies(reply_window_days=reply_window_days)
     elif task == 'send-quiz-reminder':
         quiz.sendQuizReminders(dry_run=dry_run)
     elif task == 'send-follow-up-question':
         quiz.sendFollowUpQuestions(dry_run=dry_run)
+    elif task == 'send-follow-up-assessments':
+        quiz.sendFollowUpAssessments(dry_run=dry_run)
     elif task == 'create-pairs':
         quiz.openPresentCSV()
         quiz.generateDistanceMatrix(only_present=True)
@@ -200,7 +218,7 @@ course = cc.CanvigatorCourse(canvas, course_choice, canv_config, verbose=False)
 if task == 'get-activity':
     course.saveStudentActivity(canv_config.data_path)
 
-elif task == 'get-all-subs':
+elif task == 'get-quiz-submission-events' and all_quizzes_flag:
     course.getAllQuizzesAndSubmissions()
 
 elif task == 'create-quiz':
@@ -209,7 +227,13 @@ elif task == 'create-quiz':
 elif task == 'get-gradebook':
     course.exportGradebook(canv_config.data_path)
 
-elif task == 'generate-open-ended-questions':
+elif task == 'get-roster':
+    course.exportRoster(canv_config.data_path)
+
+elif task == 'get-conversations':
+    course.exportConversations(canv_config.data_path)
+
+elif task == 'generate-follow-up-questions':
     # Driven by a pre-selected tagged-questions CSV, not a Canvas quiz
     tagged_csv = cu.selectCSVFromList(
         canv_config.data_path,
@@ -230,7 +254,7 @@ else:
     # All remaining tasks require quiz selection
     quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
-    skip = task in ('get-quiz-questions', 'get-replies', 'assess-replies')
+    skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
     _run_quiz_task(task, quiz, dry_run, tag, reply_window_days)
 

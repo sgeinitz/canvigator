@@ -1,4 +1,3 @@
-import sys
 import time
 import random
 import logging
@@ -13,7 +12,7 @@ import os
 import re
 import json
 from pathlib import Path
-from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv
+from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv, spin, spin_done
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +75,53 @@ def _render_missed_bullets(missed_rows, question_info):
         for r in rendered
     ]
     return header + "\n".join(lines)
+
+
+def _composeConversationSubject(course_code, quiz_name, suffix):
+    """Build a Canvas Conversation subject that includes course identity, quiz, and a per-message suffix.
+
+    The course code is compacted to ``<prefix>-<number>-<CRN>`` by dropping the
+    middle section component when it's present (Canvas codes typically look
+    like ``CSI-3300-001-12345``); shorter codes pass through unchanged. The
+    suffix is the per-message tail (e.g. ``"Q3 Follow-Up"`` or ``"Reminder"``).
+    The richer subject lets students/instructors group conversations across
+    classes, quizzes, and questions; threads themselves are still tracked
+    internally by ``conversation_id``, so subject changes are safe.
+    """
+    code = str(course_code).strip() if course_code else ''
+    code_parts = [p for p in code.split('-') if p]
+    if len(code_parts) == 4:
+        code_parts = [code_parts[0], code_parts[1], code_parts[3]]
+    course_label = '-'.join(code_parts) if code_parts else 'Course'
+    parts = [course_label, str(quiz_name).strip()]
+    if suffix and str(suffix).strip():
+        parts.append(str(suffix).strip())
+    return ' - '.join(parts)
+
+
+def _composeFollowUpFeedbackMessage(student_name, feedback, result):
+    """Build the message body sent by send-follow-up-assessments.
+
+    Wraps the instructor-curated `feedback` text with a friendly greeting
+    (using the student's first name) and a closing line that depends on
+    `result`: 'pass' gets an encouraging "Nice work!"; anything else (incl.
+    'fail', empty, or unknown) gets a gentle nudge to try again.
+    """
+    name = (student_name or '').strip()
+    if ',' in name:
+        # Sortable form "Last, First" -> use the part after the comma.
+        first_name = name.split(',', 1)[1].strip().split()[0] if name.split(',', 1)[1].strip() else 'there'
+    elif name:
+        first_name = name.split()[0]
+    else:
+        first_name = 'there'
+
+    feedback = (feedback or '').strip()
+    if (result or '').strip().lower() == 'pass':
+        closing = "Nice work!"
+    else:
+        closing = "Please give it another try when you get a chance."
+    return f"Hi {first_name},\n\n{feedback}\n\n{closing}"
 
 
 def _render_blur_bullets(blurred_question_ids, question_info):
@@ -173,12 +219,12 @@ def generateOpenEndedQuestions(tagged_csv_path):
     rows = df.to_dict('records')
 
     import canvigator_llm
-    results = canvigator_llm.generate_open_ended_questions(rows)
+    results = canvigator_llm.generate_open_ended_questions(rows, progress=(spin, spin_done))
 
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',
         'keywords', 'question_mode', 'open_ended_question', 'assessment_guide',
-        'original_question_text',
+        'rubric_json', 'original_question_text',
     ])
     csv_name = tagged_csv_path.parent / f"{prefix}open_ended_{today_str()}.csv"
     out_df.to_csv(csv_name, index=False)
@@ -307,7 +353,7 @@ class CanvigatorQuiz:
 
         if tag:
             import canvigator_llm
-            canvigator_llm.tag_questions(rows)
+            canvigator_llm.tag_questions(rows, progress=(spin, spin_done))
 
         columns = ['quiz_id', 'assignment_id', 'question_id', 'position', 'question_name', 'question_type']
         if tag:
@@ -499,7 +545,11 @@ class CanvigatorQuiz:
             "you have any questions, concerns, or suggestions about it."
         )
 
-        subject_str = f"Quiz Reminder - {quiz_name}"
+        subject_str = _composeConversationSubject(
+            self.canvas_course.canvas_course.course_code,
+            quiz_name,
+            "Reminder",
+        )
         messages = []
 
         for student in enrolled:
@@ -531,8 +581,11 @@ class CanvigatorQuiz:
 
         if dry_run:
             self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible)
+            self._saveReminderManifest(messages, subject_str, dry_run)
         else:
-            self._interactiveSend(messages, subject_str, quiz_name, points_possible)
+            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, points_possible)
+            if sent_messages:
+                self._saveReminderManifest(sent_messages, subject_str, dry_run)
 
     def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible):
         """Preview the collected messages in dry-run mode and print a summary."""
@@ -564,55 +617,56 @@ class CanvigatorQuiz:
         logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)} for {quiz_name}")
 
     def sendFollowUpQuestions(self, dry_run=False):
-        """Send the most-missed open-ended follow-up question to students who missed it.
+        """Send the instructor-selected open-ended follow-up question to students who missed it.
 
-        Requires that get-quiz-questions --tag and generate-open-ended-questions
-        have both been run for this quiz. Auto-refreshes submission data to pick
-        up recent attempts.
+        Picks the first row in the *_open_ended_*.csv with `selected_question == 1`
+        as the question to send (the instructor curates the choice offline).
+        Recipients are still students who missed the corresponding original quiz
+        question on their latest attempt. Requires that get-quiz-questions --tag
+        and generate-follow-up-questions have both been run for this quiz.
+        Auto-refreshes submission data to pick up recent attempts.
         """
         quiz_name = self.canvas_quiz.title
 
         # Load question metadata (from *_questions_w_tags_*.csv)
         question_info = self._loadQuestionInfo()
 
-        # Load the open-ended questions CSV
+        # Load the open-ended questions CSV — already filtered to selected_question=1 rows
         open_ended_rows = self._loadOpenEndedQuestions()
-
-        # Refresh submission data for up-to-date per-question scores
-        print("\nFetching latest submissions for follow-up question targeting...")
-        self.getAllSubmissionsAndEvents()
-        subs_by_q_df = self.all_subs_by_question
-
-        if subs_by_q_df is None or subs_by_q_df.empty:
-            print("No submission data available — cannot determine missed questions.")
+        if not open_ended_rows:
+            print("No `selected_question=1` rows found in the open-ended CSV.")
+            print("Edit the CSV to mark exactly one row per group (or at least one row overall) and re-run.")
             return
 
-        # Find the most-missed question
-        most_missed_qid = self._findMostMissedQuestion(subs_by_q_df, question_info)
-        if most_missed_qid is None:
-            print("All students scored perfectly on all questions — no follow-up needed!")
-            return
+        # Pick the first selected question — instructor curates the choice via the CSV.
+        selected_qid = next(iter(open_ended_rows))
+        oe_row = open_ended_rows[selected_qid]
 
-        info = question_info[most_missed_qid]
+        info = question_info.get(selected_qid)
+        if info is None:
+            print(f"Question {selected_qid} from open-ended CSV not found in questions metadata — re-run 'get-quiz-questions --tag'.")
+            return
         position = info['position']
         keywords = info['keywords']
-
-        # Look up the open-ended question for this question_id
-        oe_row = open_ended_rows.get(most_missed_qid)
-        if oe_row is None:
-            print(f"No open-ended question found for question_id {most_missed_qid} (Q{position}: {keywords}).")
-            print("Re-run 'generate-open-ended-questions' to regenerate.")
-            return
 
         question_mode = oe_row.get('question_mode', 'explain')
         open_ended_text = oe_row['open_ended_question']
 
-        print(f"\nMost-missed question: Q{position} — {keywords}")
+        print(f"\nSelected follow-up: Q{position} — {keywords}")
         print(f"  Mode: {question_mode}")
         print(f"  Follow-up: {open_ended_text[:120]}{'...' if len(open_ended_text) > 120 else ''}")
 
+        # Refresh submission data so the recipient list reflects the latest attempts
+        print("\nFetching latest submissions to identify students who missed this question...")
+        self.getAllSubmissionsAndEvents()
+        subs_by_q_df = self.all_subs_by_question
+
+        if subs_by_q_df is None or subs_by_q_df.empty:
+            print("No submission data available — cannot determine recipients.")
+            return
+
         # Build the list of students who missed this question on their latest attempt
-        students_who_missed = self._findStudentsWhoMissed(most_missed_qid, subs_by_q_df, question_info)
+        students_who_missed = self._findStudentsWhoMissed(selected_qid, subs_by_q_df, question_info)
 
         if not students_who_missed:
             print("No students missed this question on their latest attempt — no follow-up needed!")
@@ -632,7 +686,11 @@ class CanvigatorQuiz:
                 "message editor to record your response."
             )
 
-        subject_str = f"Follow-Up Question - {quiz_name} - Q{position}"
+        subject_str = _composeConversationSubject(
+            self.canvas_course.canvas_course.course_code,
+            quiz_name,
+            f"Q{position} Follow-Up",
+        )
         enrolled = self.canvas_course.students
         enrolled_map = {s['id']: s['name'] for s in enrolled}
 
@@ -657,11 +715,11 @@ class CanvigatorQuiz:
 
         if dry_run:
             self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
-            self._saveFollowUpManifest(messages, most_missed_qid, question_mode, subject_str, dry_run)
+            self._saveFollowUpManifest(messages, selected_qid, question_mode, subject_str, dry_run)
         else:
             sent_messages = self._interactiveSend(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
             if sent_messages:
-                self._saveFollowUpManifest(sent_messages, most_missed_qid, question_mode, subject_str, dry_run)
+                self._saveFollowUpManifest(sent_messages, selected_qid, question_mode, subject_str, dry_run)
 
     def _interactiveSend(self, messages, subject_str, quiz_name, points_possible):
         """Interactively prompt the instructor to send or skip each message.
@@ -687,11 +745,21 @@ class CanvigatorQuiz:
 
             choice = input(f"  Send to {student_name}? [send/SKIP]: ").strip().lower()
             if choice == 'send':
-                self.canvas.create_conversation(
-                    [str(student_id)], message_str, subject=subject_str, force_new=True
-                )
-                print("  -> Sent!\n")
-                sent_messages.append((student_id, student_name, message_str, reason))
+                # Capture the conversation ID returned by Canvas so the manifest
+                # can record it. assess-replies fetches each thread directly by ID
+                # rather than scanning the instructor's sent folder by subject —
+                # the sent scope can paginate / filter recent conversations away.
+                try:
+                    convos = self.canvas.create_conversation(
+                        [str(student_id)], message_str, subject=subject_str, force_new=True
+                    )
+                except Exception as e:
+                    print(f"  -> ERROR sending: {e}\n")
+                    logger.warning(f"create_conversation failed for student id={student_id}: {e}")
+                    continue
+                convo_id = convos[0].id if convos else None
+                print(f"  -> Sent! (conversation_id={convo_id})\n")
+                sent_messages.append((student_id, student_name, message_str, reason, convo_id))
             else:
                 print("  -> Skipped.\n")
 
@@ -700,42 +768,6 @@ class CanvigatorQuiz:
         print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
         logger.info(f"Interactive send for {quiz_name}: {n_sent} sent, {n_skipped} skipped")
         return sent_messages
-
-    def _findMostMissedQuestion(self, subs_by_q_df, question_info):
-        """Return the question_id with the highest miss rate, or None if all are perfect.
-
-        Miss rate = fraction of students whose latest attempt scored below
-        points_possible for that question.
-        """
-        # Use only the latest attempt per student (each student has multiple rows — one per question)
-        max_attempt_per_student = subs_by_q_df.groupby('id')['attempt'].transform('max')
-        latest_attempts = subs_by_q_df[subs_by_q_df['attempt'] == max_attempt_per_student]
-
-        miss_rates = {}
-        for qid, info in question_info.items():
-            pp = info.get('points_possible')
-            if pp is None:
-                continue
-            q_rows = latest_attempts[latest_attempts['question_id'] == qid]
-            if q_rows.empty:
-                continue
-            n_total = len(q_rows)
-            n_missed = sum(1 for _, row in q_rows.iterrows()
-                           if pd.notna(row.get('points')) and float(row['points']) < float(pp))
-            miss_rates[qid] = n_missed / n_total if n_total > 0 else 0.0
-
-        if not miss_rates or max(miss_rates.values()) == 0:
-            return None
-
-        # Report top-5 miss rates for instructor visibility
-        sorted_rates = sorted(miss_rates.items(), key=lambda t: t[1], reverse=True)
-        print("\nQuestion miss rates (latest attempt):")
-        for qid, rate in sorted_rates[:5]:
-            info = question_info.get(qid, {})
-            label = f"Q{info.get('position', '?')} ({info.get('keywords', '')})"
-            print(f"  {label}: {rate:.0%}")
-
-        return sorted_rates[0][0]
 
     def _findStudentsWhoMissed(self, question_id, subs_by_q_df, question_info):
         """Return a list of student IDs who scored below points_possible on the given question in their latest attempt."""
@@ -766,7 +798,7 @@ class CanvigatorQuiz:
         if latest_file is None:
             raise FileNotFoundError(
                 f"No *_open_ended_*.csv found for quiz '{self.quiz_name}'. "
-                f"Run 'python canvigator.py generate-open-ended-questions' first."
+                f"Run 'python canvigator.py generate-follow-up-questions' first."
             )
         print(f"  Using open-ended questions from: {latest_file.name}")
 
@@ -774,7 +806,7 @@ class CanvigatorQuiz:
         if 'open_ended_question' not in df.columns:
             raise RuntimeError(
                 f"The file {latest_file.name} has no 'open_ended_question' column. "
-                f"Re-run 'generate-open-ended-questions'."
+                f"Re-run 'generate-follow-up-questions'."
             )
 
         if 'selected_question' in df.columns:
@@ -812,16 +844,27 @@ class CanvigatorQuiz:
         return rows_by_qid
 
     def _saveFollowUpManifest(self, messages, question_id, question_mode, subject_str, dry_run):
-        """Save a CSV manifest of follow-up messages sent (or previewed in dry-run)."""
+        """Save a CSV manifest of follow-up messages sent (or previewed in dry-run).
+
+        Real sends populate ``conversation_id`` from the Canvas response; dry-run
+        rows leave it empty (assess-replies skips dry-run manifests).
+        """
         from datetime import datetime, timezone
         sent_at = datetime.now(timezone.utc).isoformat()
         manifest_rows = []
-        for student_id, student_name, _, reason in messages:
+        for entry in messages:
+            # Real sends are 5-tuples (..., convo_id); dry-run previews are 4-tuples.
+            if len(entry) == 5:
+                student_id, student_name, _, reason, convo_id = entry
+            else:
+                student_id, student_name, _, reason = entry
+                convo_id = None
             manifest_rows.append({
                 'student_id': student_id,
                 'student_name': student_name,
                 'question_id': question_id,
                 'question_mode': question_mode,
+                'conversation_id': convo_id,
                 'conversation_subject': subject_str,
                 'sent_at': sent_at,
             })
@@ -835,6 +878,42 @@ class CanvigatorQuiz:
         print(f"  Manifest saved: {csv_name.name}")
         logger.info(f"Follow-up manifest saved: {csv_name}")
 
+    def _saveReminderManifest(self, messages, subject_str, dry_run):
+        """Save a CSV audit log of quiz-reminder messages sent (or previewed in dry-run).
+
+        Reminders have no downstream task that consumes the manifest (students
+        don't reply to a reminder), so this is purely an audit trail — useful
+        for confirming who was nudged on which day and which Canvas thread
+        carries the message.
+        """
+        from datetime import datetime, timezone
+        sent_at = datetime.now(timezone.utc).isoformat()
+        manifest_rows = []
+        for entry in messages:
+            # Real sends are 5-tuples (..., convo_id); dry-run previews are 4-tuples.
+            if len(entry) == 5:
+                student_id, student_name, _, reason, convo_id = entry
+            else:
+                student_id, student_name, _, reason = entry
+                convo_id = None
+            manifest_rows.append({
+                'student_id': student_id,
+                'student_name': student_name,
+                'reason': reason,
+                'conversation_id': convo_id,
+                'conversation_subject': subject_str,
+                'sent_at': sent_at,
+            })
+
+        manifest_df = pd.DataFrame(manifest_rows)
+        suffix = "_dryrun" if dry_run else ""
+        csv_name = self.config.data_path / (
+            f"{self.config.quiz_prefix}{self.canvas_quiz.id}_reminder_sent{suffix}_{today_str()}.csv"
+        )
+        manifest_df.to_csv(csv_name, index=False)
+        print(f"  Manifest saved: {csv_name.name}")
+        logger.info(f"Reminder manifest saved: {csv_name}")
+
     def getFollowUpReplies(self, reply_window_days=5):
         """Retrieve student replies to follow-up questions from Canvas conversations.
 
@@ -846,57 +925,53 @@ class CanvigatorQuiz:
         from datetime import datetime, timedelta, timezone
 
         manifest = self._loadFollowUpManifest()
-        subject_str = manifest['conversation_subject'].iloc[0]
-        question_id = int(manifest['question_id'].iloc[0])
-        question_mode = manifest['question_mode'].iloc[0]
-
-        # Parse the sent_at timestamp to compute the reply window cutoff
-        sent_at_str = manifest['sent_at'].iloc[0]
-        sent_at = datetime.fromisoformat(sent_at_str.replace('Z', '+00:00'))
-        cutoff = sent_at + timedelta(days=reply_window_days)
         now = datetime.now(timezone.utc)
 
-        print(f"\nLooking for replies to: {subject_str}")
-        print(f"  Reply window: {reply_window_days} days (cutoff: {cutoff.strftime('%Y-%m-%d %H:%M UTC')})")
-        if now < cutoff:
-            remaining = cutoff - now
-            print(f"  Window still open — {remaining.days}d {remaining.seconds // 3600}h remaining")
-
-        # Build a set of student IDs we expect replies from
-        expected_students = set(manifest['student_id'].astype(int))
-        student_names = dict(zip(manifest['student_id'].astype(int), manifest['student_name']))
+        print(f"\nFetching follow-up replies (window: {reply_window_days} days per send)")
 
         # Get the instructor's user ID to filter out instructor messages
         instructor_id = self.canvas.get_current_user().id
-
-        # Search sent conversations for threads matching our subject
-        print("\n  Scanning sent conversations...")
-        matching_convos = self._findConversationsBySubject(subject_str)
-        print(f"  Found {len(matching_convos)} matching conversation(s)")
 
         # Ensure the replies directory exists
         replies_dir = self.config.data_path / "replies"
         replies_dir.mkdir(exist_ok=True)
 
-        # Extract replies from each matching conversation
+        # Iterate the manifest and fetch each conversation directly by its ID,
+        # which was captured at send time. This replaces the older approach of
+        # scanning the instructor's sent folder by subject — that scan proved
+        # unreliable when Canvas paginated or filtered recent conversations.
         all_replies = []
         n_with_reply = 0
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        expected_students = set(manifest['student_id'].astype(int))
 
-        for convo_summary in matching_convos:
-            # Get full conversation with messages (don't mark as read)
-            convo = self.canvas.get_conversation(convo_summary.id, auto_mark_as_read=False)
-            messages = getattr(convo, 'messages', [])
-            audience = set(getattr(convo, 'audience', []))
-
-            # Determine which student this conversation belongs to
-            student_ids_in_convo = audience & expected_students
-            if not student_ids_in_convo:
+        print(f"  Fetching {len(manifest)} conversation(s) by ID...")
+        for _, mrow in manifest.iterrows():
+            student_id = int(mrow['student_id'])
+            student_name = mrow['student_name']
+            question_id = int(mrow['question_id'])
+            question_mode = mrow['question_mode']
+            sent_at = datetime.fromisoformat(str(mrow['sent_at']).replace('Z', '+00:00'))
+            cutoff = sent_at + timedelta(days=reply_window_days)
+            if now < cutoff:
+                remaining = cutoff - now
+                logger.info(f"Reply window for {student_name} still open — "
+                            f"{remaining.days}d {remaining.seconds // 3600}h remaining")
+            convo_id_raw = mrow.get('conversation_id')
+            if pd.isna(convo_id_raw):
+                logger.warning(
+                    f"Manifest row for {student_name} (id={student_id}) has no "
+                    f"conversation_id — skipping (re-send the follow-up to capture one)."
+                )
                 continue
-            student_id = next(iter(student_ids_in_convo))
-            student_name = student_names.get(student_id, f"Unknown ({student_id})")
+            convo_id = int(convo_id_raw)
+            try:
+                convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
+            except Exception as e:
+                logger.warning(f"get_conversation({convo_id}) failed for {student_name}: {e}")
+                continue
 
-            # Collect student replies (messages not from the instructor)
+            messages = getattr(convo, 'messages', [])
             student_replies = self._extractStudentReplies(
                 messages, instructor_id, sent_at, cutoff
             )
@@ -916,6 +991,7 @@ class CanvigatorQuiz:
                     'student_name': student_name,
                     'question_id': question_id,
                     'question_mode': question_mode,
+                    'conversation_id': convo_id,
                     'message_id': msg.get('id', ''),
                     'reply_text': msg.get('body', ''),
                     'has_attachment': bool(attachment_path),
@@ -963,19 +1039,12 @@ class CanvigatorQuiz:
         print(f"  Using follow-up manifest: {latest_file.name}")
 
         df = pd.read_csv(latest_file)
-        required_cols = {'student_id', 'student_name', 'question_id', 'question_mode', 'conversation_subject', 'sent_at'}
+        required_cols = {'student_id', 'student_name', 'question_id', 'question_mode',
+                         'conversation_id', 'conversation_subject', 'sent_at'}
         missing = required_cols - set(df.columns)
         if missing:
             raise RuntimeError(f"Manifest {latest_file.name} is missing columns: {missing}")
         return df
-
-    def _findConversationsBySubject(self, subject_str):
-        """Return a list of Conversation objects from sent conversations matching the given subject."""
-        matching = []
-        for convo in self.canvas.get_conversations(scope='sent'):
-            if getattr(convo, 'subject', '') == subject_str:
-                matching.append(convo)
-        return matching
 
     def _extractStudentReplies(self, messages, instructor_id, sent_at, cutoff):
         """Filter conversation messages to only student replies within the reply window.
@@ -1055,27 +1124,26 @@ class CanvigatorQuiz:
 
         return attachment_path, audio_path
 
-    def assessFollowUpReplies(self):
-        """Assess student replies using the local LLM.
+    def assessFollowUpReplies(self, reply_window_days=5):
+        """Fetch the latest student replies, then assess them with the local LLM.
 
-        Loads the latest followup_replies CSV, filters to only the latest reply
+        First refreshes replies from Canvas (writing the
+        ``*_followup_replies_*.csv``), then filters to only the latest reply
         per student, loads the open-ended question context, and calls the LLM
-        to produce a pass/fail assessment with feedback. Outputs a
-        followup_assessments CSV.
+        to produce a pass/fail assessment with feedback. Merges results into a
+        single persistent followup_assessments CSV (no date suffix); rows where
+        ``sent_assessment=1`` are preserved verbatim so previously sent feedback
+        is never overwritten by re-runs.
         """
-        # Load replies CSV
+        self.getFollowUpReplies(reply_window_days=reply_window_days)
         replies_df = self._loadFollowUpReplies()
-        # Filter to latest reply per student only
         latest_replies = replies_df[replies_df['latest'] == True].to_dict('records')  # noqa: E712
 
         if not latest_replies:
             print("No student replies to assess.")
             return
 
-        # Load the open-ended questions to get context for assessment
         open_ended_rows = self._loadOpenEndedQuestions()
-
-        # All replies should share the same question_id (Phase 1 sends one question)
         question_id = int(latest_replies[0]['question_id'])
         oe_row = open_ended_rows.get(question_id)
         if oe_row is None:
@@ -1086,23 +1154,61 @@ class CanvigatorQuiz:
         print(f"  Question: {oe_row.get('open_ended_question', '')[:100]}...")
         print(f"  Mode: {latest_replies[0].get('question_mode', 'explain')}")
 
-        import canvigator_llm
-        results = canvigator_llm.assess_replies(latest_replies, oe_row)
+        existing_df = self._loadOrMigrateAssessments()
+        existing_index = self._indexAssessments(existing_df)
 
-        # Save assessments CSV
-        out_df = pd.DataFrame(results, columns=[
-            'student_id', 'student_name', 'question_id', 'question_mode',
-            'result', 'feedback', 'transcript', 'assessed_at',
-        ])
-        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
-        csv_name = self.config.data_path / f"{file_prefix}followup_assessments_{today_str()}.csv"
-        out_df.to_csv(csv_name, index=False)
+        # Split incoming replies: skip those whose existing assessment was already sent.
+        to_assess = []
+        skipped_sent = 0
+        for r in latest_replies:
+            key = (int(r['student_id']), int(r['question_id']))
+            existing = existing_index.get(key)
+            if existing is not None and int(existing.get('sent_assessment', 0) or 0) == 1:
+                skipped_sent += 1
+                continue
+            to_assess.append(r)
+
+        if skipped_sent:
+            print(f"  Skipping {skipped_sent} reply(ies) whose feedback was already sent.")
+
+        if not to_assess:
+            print("  Nothing new to assess.")
+            self._writeAssessmentsCsv(existing_df)
+            return
+
+        # Resolve relative media paths to absolute (ollama opens by path).
+        data_root = self.config.data_path.parent
+        for r in to_assess:
+            for key in ('attachment_path', 'audio_path'):
+                p = r.get(key, '')
+                if pd.isna(p) or not p:
+                    r[key] = ''
+                    continue
+                p = str(p)
+                r[key] = p if os.path.isabs(p) else str(data_root / p)
+
+        import canvigator_llm
+        results = canvigator_llm.assess_replies(to_assess, oe_row)
+
+        # Carry conversation_id from the reply (or fall back to manifest lookup).
+        convo_lookup = self._buildConversationLookup()
+        replies_by_key = {(int(r['student_id']), int(r['question_id'])): r for r in to_assess}
+        for res in results:
+            key = (int(res['student_id']), int(res['question_id']))
+            reply_row = replies_by_key.get(key, {})
+            convo_id = reply_row.get('conversation_id')
+            if convo_id is None or pd.isna(convo_id):
+                convo_id = convo_lookup.get(key)
+            res['conversation_id'] = int(convo_id) if convo_id else ''
+            res['sent_assessment'] = 0
+
+        merged_df = self._mergeAssessments(existing_df, results)
+        self._writeAssessmentsCsv(merged_df)
 
         n_pass = sum(1 for r in results if r['result'] == 'pass')
         n_fail = sum(1 for r in results if r['result'] == 'fail')
-        print(f"\n  Results: {n_pass} pass, {n_fail} fail")
-        print(f"  Assessments saved: {csv_name.name}")
-        logger.info(f"Follow-up assessments saved: {csv_name}")
+        print(f"\n  New/updated this run: {len(results)} ({n_pass} pass, {n_fail} fail)")
+        print(f"  Total in assessments file: {len(merged_df)}")
 
     def _loadFollowUpReplies(self):
         """Load the latest *_followup_replies_*.csv.
@@ -1116,24 +1222,201 @@ class CanvigatorQuiz:
         if latest_file is None:
             raise FileNotFoundError(
                 f"No *_followup_replies_*.csv found for quiz '{self.quiz_name}'. "
-                f"Run 'get-replies' first."
+                f"Run 'assess-replies' first."
             )
         print(f"  Using replies from: {latest_file.name}")
         return pd.read_csv(latest_file)
 
-    SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    ASSESSMENTS_COLUMNS = [
+        'student_id', 'student_name', 'question_id', 'question_mode',
+        'conversation_id', 'result', 'feedback', 'transcript',
+        'assessed_at', 'sent_assessment', 'sent_at',
+    ]
+
+    def _assessmentsPath(self):
+        """Return the persistent (non-dated) assessments CSV path for this quiz."""
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        return self.config.data_path / f"{file_prefix}followup_assessments.csv"
+
+    def _loadOrMigrateAssessments(self):
+        """Load the persistent assessments CSV, falling back to the latest dated file.
+
+        Returns an empty DataFrame with the canonical column set if neither exists.
+        """
+        path = self._assessmentsPath()
+        if path.exists():
+            df = pd.read_csv(path)
+        else:
+            file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+            latest = find_latest_csv(self.config.data_path, file_prefix + "followup_assessments_")
+            if latest is not None:
+                print(f"  Migrating prior assessments file: {latest.name} -> {path.name}")
+                df = pd.read_csv(latest)
+            else:
+                df = pd.DataFrame(columns=self.ASSESSMENTS_COLUMNS)
+        # Ensure all canonical columns exist (older files may be missing some).
+        for col in self.ASSESSMENTS_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0 if col == 'sent_assessment' else ''
+        df['sent_assessment'] = df['sent_assessment'].fillna(0).astype(int)
+        return df
+
+    def _indexAssessments(self, df):
+        """Index an assessments DataFrame by (student_id, question_id) -> dict row."""
+        out = {}
+        for _, row in df.iterrows():
+            sid = row.get('student_id')
+            qid = row.get('question_id')
+            if pd.notna(sid) and pd.notna(qid):
+                out[(int(sid), int(qid))] = row.to_dict()
+        return out
+
+    def _buildConversationLookup(self):
+        """Scan all *_followup_sent_*.csv manifests for (student_id, question_id) -> conversation_id."""
+        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
+        lookup = {}
+        for f in self.config.data_path.glob(file_prefix + "followup_sent_*.csv"):
+            if '_dryrun_' in f.name:
+                continue
+            try:
+                m = pd.read_csv(f)
+            except Exception:
+                continue
+            for _, row in m.iterrows():
+                sid = row.get('student_id')
+                qid = row.get('question_id')
+                cid = row.get('conversation_id')
+                if pd.notna(sid) and pd.notna(qid) and pd.notna(cid):
+                    lookup.setdefault((int(sid), int(qid)), int(cid))
+        return lookup
+
+    def _mergeAssessments(self, existing_df, new_results):
+        """Merge new assessment dicts into existing_df, replacing rows with the same (student_id, question_id)."""
+        if existing_df.empty:
+            return pd.DataFrame(new_results, columns=self.ASSESSMENTS_COLUMNS)
+        keys_to_replace = {(int(r['student_id']), int(r['question_id'])) for r in new_results}
+        keep_mask = existing_df.apply(
+            lambda row: (int(row['student_id']), int(row['question_id'])) not in keys_to_replace,
+            axis=1,
+        )
+        kept = existing_df[keep_mask]
+        new_df = pd.DataFrame(new_results, columns=self.ASSESSMENTS_COLUMNS)
+        merged = pd.concat([kept, new_df], ignore_index=True)
+        return merged[self.ASSESSMENTS_COLUMNS]
+
+    def _writeAssessmentsCsv(self, df):
+        """Write the assessments DataFrame to the persistent (non-dated) path."""
+        path = self._assessmentsPath()
+        df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
+        print(f"  Assessments saved: {path.name}")
+        logger.info(f"Follow-up assessments saved: {path}")
+
+    def sendFollowUpAssessments(self, dry_run=False):
+        """Send instructor-curated feedback back to students on their follow-up threads.
+
+        Reads the persistent ``*_followup_assessments.csv`` for this quiz and, for
+        every row with ``sent_assessment=0`` and a non-empty ``feedback`` value,
+        posts the feedback text as a reply to the existing Canvas conversation
+        (using the ``conversation_id`` captured at send time). Successful sends
+        flip ``sent_assessment`` to ``1`` and stamp ``sent_at``; the file is then
+        rewritten in place.
+        """
+        path = self._assessmentsPath()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"No assessments file found at {path.name}. Run 'assess-replies' first."
+            )
+        df = pd.read_csv(path)
+        for col in self.ASSESSMENTS_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0 if col == 'sent_assessment' else ''
+        df['sent_assessment'] = df['sent_assessment'].fillna(0).astype(int)
+
+        convo_lookup = self._buildConversationLookup()
+
+        to_send = self._collectAssessmentsToSend(df, convo_lookup)
+
+        if not to_send:
+            print("\nNo unsent feedback to send.")
+            return
+
+        print(f"\n{'[DRY-RUN] ' if dry_run else ''}Sending feedback for {len(to_send)} student(s).")
+        n_sent = 0
+        for idx, convo_id, row in to_send:
+            if self._sendOneAssessment(df, idx, convo_id, row, dry_run):
+                n_sent += 1
+
+        if dry_run:
+            print(f"\n[DRY-RUN] Would have sent {len(to_send)} feedback message(s). No changes written.")
+            return
+
+        df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
+        print(f"\nSent {n_sent} feedback message(s); updated {path.name}.")
+        logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
+
+    def _collectAssessmentsToSend(self, df, convo_lookup):
+        """Filter the assessments DataFrame to rows that should be sent now.
+
+        Returns a list of ``(row_index, conversation_id, row_dict)`` tuples,
+        one per row with ``sent_assessment=0``, non-empty ``feedback``, and a
+        resolvable ``conversation_id`` (from the row itself or the manifest
+        lookup as a fallback).
+        """
+        to_send = []
+        for idx, row in df.iterrows():
+            if int(row.get('sent_assessment', 0) or 0) == 1:
+                continue
+            feedback = row.get('feedback', '')
+            if pd.isna(feedback) or not str(feedback).strip():
+                continue
+            convo_id = row.get('conversation_id')
+            if pd.isna(convo_id) or not convo_id:
+                key = (int(row['student_id']), int(row['question_id']))
+                convo_id = convo_lookup.get(key)
+                if not convo_id:
+                    logger.warning(
+                        f"No conversation_id for {row.get('student_name')} "
+                        f"(student_id={row['student_id']}, question_id={row['question_id']}) — skipping."
+                    )
+                    continue
+            to_send.append((idx, int(convo_id), row))
+        return to_send
+
+    def _sendOneAssessment(self, df, idx, convo_id, row, dry_run):
+        """Send (or preview) feedback for a single assessment row.
+
+        Updates ``df`` in place on a successful real send and returns True;
+        returns False on dry-run or send failure.
+        """
+        from datetime import datetime, timezone
+        student_name = row.get('student_name', '?')
+        feedback = str(row['feedback']).strip()
+        result = row.get('result', '')
+        message_body = _composeFollowUpFeedbackMessage(student_name, feedback, result)
+        preview = message_body if len(message_body) <= 300 else message_body[:300] + '...'
+        print(f"\n  -> {student_name} (conversation_id={convo_id})")
+        for line in preview.splitlines():
+            print(f"     {line}")
+        if dry_run:
+            return False
+        try:
+            convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
+            convo.add_message(message_body)
+        except Exception as e:
+            logger.warning(f"add_message({convo_id}) failed for {student_name}: {e}")
+            print(f"     ERROR: {e}")
+            return False
+        df.at[idx, 'sent_assessment'] = 1
+        df.at[idx, 'sent_at'] = datetime.now(timezone.utc).isoformat()
+        return True
 
     def _spin(self, frame, message, indent=2):
-        """Write a single spinner frame with a message to stdout, overwriting the current line."""
-        pad = ' ' * indent
-        sys.stdout.write(f"\r{pad}{self.SPINNER_FRAMES[frame % len(self.SPINNER_FRAMES)]} {message}  ")
-        sys.stdout.flush()
+        """Write a single spinner frame with a message — thin wrapper around canvigator_utils.spin."""
+        spin(frame, message, indent=indent)
 
     def _spin_done(self, message, indent=2):
-        """Clear the spinner line and write a completion message."""
-        pad = ' ' * indent
-        sys.stdout.write(f"\r{pad}✓ {message}                              \n")
-        sys.stdout.flush()
+        """Clear the spinner line and write a completion message — wrapper around canvigator_utils.spin_done."""
+        spin_done(message, indent=indent)
 
     def figurePath(self, figure_name):
         """Return a figure output path with the date suffix at the end."""
@@ -1535,7 +1818,7 @@ class CanvigatorQuiz:
         return groups
 
     def _selectSubmissionDate(self):
-        """Prompt user to select a date with get-all-subs data, or reuse a previously selected date."""
+        """Prompt user to select a date with get-quiz-submission-events data, or reuse a previously selected date."""
         if hasattr(self, '_selected_submission_date') and self._selected_submission_date:
             print(f"\nReusing previously selected date: {self._selected_submission_date}")
             return self._selected_submission_date
@@ -1554,7 +1837,7 @@ class CanvigatorQuiz:
         if not available_dates:
             raise FileNotFoundError(
                 f"No all_submissions CSV found for quiz '{self.quiz_name}'. "
-                "Run the 'get-all-subs' task first to generate these files."
+                "Run the 'get-quiz-submission-events' task first to generate these files."
             )
 
         print("\nAvailable dates with submission data:")
@@ -1579,7 +1862,7 @@ class CanvigatorQuiz:
         if not events_csv.exists() or not subs_by_q_csv.exists():
             raise FileNotFoundError(
                 f"No matching all_subs_and_events / subs_by_question CSV pair found for date {selected_date}. "
-                "Run the 'get-all-subs' task first to generate these files."
+                "Run the 'get-quiz-submission-events' task first to generate these files."
             )
 
         print(f"\nUsing files from {selected_date}")
@@ -1614,7 +1897,7 @@ class CanvigatorQuiz:
 
         if not subs_csv.exists():
             raise FileNotFoundError(
-                f"Submissions file not found: {subs_csv}. Run the 'get-all-subs' task first."
+                f"Submissions file not found: {subs_csv}. Run the 'get-quiz-submission-events' task first."
             )
 
         return pd.read_csv(subs_csv)
