@@ -25,7 +25,7 @@ task_groups = [
         ('get-activity', 'Export student activity data'),
         ('get-quiz-submission-events', 'Export quiz submissions and events for a selected quiz (use --all for every quiz)'),
         ('get-conversations', 'Export Canvas conversations involving students in the selected course'),
-        ('delete-old-conversations', 'Delete Canvas conversations older than N months (account-wide; default 6, override with --m; use --dry-run first)'),
+        ('delete-old-conversations', 'Delete Canvas conversations older than N months (account-wide; default 6; override with --months/-m)'),
         ('get-gradebook', 'Export course gradebook'),
         ('get-roster', 'Export the full course roster (name, id, sis_id, enrollment_type)'),
         ('send-quiz-reminder', 'Send quiz reminder messages to students'),
@@ -37,14 +37,14 @@ tasks = list(task_descriptions.keys())
 
 def print_help():
     """Print usage information with grouped task descriptions."""
-    print("Usage: canvigator.py [--dry-run] [--tag] [--all] [--crn <CRN>] [--m <months>] <task>\n")
-    print("Options:")
-    print("  --dry-run      Preview changes without modifying Canvas (bonus, reminder, follow-up, feedback, and delete-old-conversations tasks)")
-    print("  --tag          Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
-    print("  --all          Run across every quiz in the course instead of prompting for one (get-quiz-questions and get-quiz-submission-events only)")
-    print("  --crn <CRN>    Select course by CRN (last 5 digits of course code)")
-    print("  --m <months>   Age threshold in months for delete-old-conversations (default: 6)")
-    print("  --reply-window-days N  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
+    print("Usage: canvigator.py [OPTIONS] <task>\n")
+    print("Options (short and long forms are interchangeable):")
+    print("  -d, --dry-run                Preview changes without modifying Canvas (applies to bonus, reminder, follow-up, feedback, delete-old-conversations)")
+    print("  -t, --tag                    Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
+    print("  -a, --all                    Run across every quiz in the course (get-quiz-questions and get-quiz-submission-events only)")
+    print("  -c, --crn <CRN>              Select course by CRN (last 5 digits of course code)")
+    print("  -m, --months <N>             Age threshold in months for delete-old-conversations (default: 6)")
+    print("  -w, --reply-window-days <N>  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
     max_name = max(len(t) for t in tasks)
     for header, items in task_groups:
         print(f"\n{header}")
@@ -90,7 +90,18 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
         quiz.awardBonusPoints(dry_run=dry_run)
 
 
-args = sys.argv[1:]
+# Normalize short flag aliases to their long form so the rest of the parser
+# can match a single canonical name per option.
+_SHORT_TO_LONG = {
+    '-d': '--dry-run',
+    '-t': '--tag',
+    '-a': '--all',
+    '-c': '--crn',
+    '-m': '--months',
+    '-w': '--reply-window-days',
+}
+args = [_SHORT_TO_LONG.get(a, a) for a in sys.argv[1:]]
+
 dry_run = '--dry-run' in args
 if dry_run:
     args.remove('--dry-run')
@@ -107,7 +118,7 @@ crn = None
 if '--crn' in args:
     crn_idx = args.index('--crn')
     if crn_idx + 1 >= len(args):
-        print("Error: --crn requires a 5-digit CRN value")
+        print("Error: --crn/-c requires a 5-digit CRN value")
         sys.exit(1)
     crn = args[crn_idx + 1]
     if not crn.isdigit() or len(crn) != 5:
@@ -117,33 +128,33 @@ if '--crn' in args:
     args.pop(crn_idx)  # remove the CRN value
 
 n_months = 6
-if '--m' in args:
-    m_idx = args.index('--m')
+if '--months' in args:
+    m_idx = args.index('--months')
     if m_idx + 1 >= len(args):
-        print("Error: --m requires a numeric value (number of months)")
+        print("Error: --months/-m requires a numeric value (number of months)")
         sys.exit(1)
     try:
         n_months = int(args[m_idx + 1])
         if n_months < 1:
             raise ValueError
     except ValueError:
-        print(f"Error: --m must be a positive integer, got '{args[m_idx + 1]}'")
+        print(f"Error: --months/-m must be a positive integer, got '{args[m_idx + 1]}'")
         sys.exit(1)
-    args.pop(m_idx)  # remove '--m'
+    args.pop(m_idx)  # remove '--months'
     args.pop(m_idx)  # remove the value
 
 reply_window_days = 5
 if '--reply-window-days' in args:
     rw_idx = args.index('--reply-window-days')
     if rw_idx + 1 >= len(args):
-        print("Error: --reply-window-days requires a numeric value")
+        print("Error: --reply-window-days/-w requires a numeric value")
         sys.exit(1)
     try:
         reply_window_days = int(args[rw_idx + 1])
         if reply_window_days < 1:
             raise ValueError
     except ValueError:
-        print(f"Error: --reply-window-days must be a positive integer, got '{args[rw_idx + 1]}'")
+        print(f"Error: --reply-window-days/-w must be a positive integer, got '{args[rw_idx + 1]}'")
         sys.exit(1)
     args.pop(rw_idx)  # remove '--reply-window-days'
     args.pop(rw_idx)  # remove the value
