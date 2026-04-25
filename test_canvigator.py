@@ -103,6 +103,66 @@ class TestPromptForIndex:
         assert result == 0
 
 
+class _StubQuiz:
+    """Minimal stand-in for a canvasapi Quiz object."""
+
+    def __init__(self, published=True, due_at=None):
+        """Set published flag and due_at string for the stub."""
+        self.published = published
+        self.due_at = due_at
+
+
+class TestIsQuizOpenForReminder:
+    """Tests for is_quiz_open_for_reminder filter predicate."""
+
+    def _now(self):
+        """Return a frozen UTC reference timestamp for deterministic tests."""
+        from datetime import timezone
+        return datetime(2026, 4, 24, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_published_with_future_due(self):
+        """Published quiz with due_at after now returns True."""
+        from canvigator_utils import is_quiz_open_for_reminder
+        quiz = _StubQuiz(published=True, due_at="2026-04-25T12:00:00Z")
+        assert is_quiz_open_for_reminder(quiz, now=self._now()) is True
+
+    def test_published_with_past_due(self):
+        """Published quiz with due_at before now returns False."""
+        from canvigator_utils import is_quiz_open_for_reminder
+        quiz = _StubQuiz(published=True, due_at="2026-04-23T12:00:00Z")
+        assert is_quiz_open_for_reminder(quiz, now=self._now()) is False
+
+    def test_unpublished_with_future_due(self):
+        """Unpublished quiz returns False even with future due_at."""
+        from canvigator_utils import is_quiz_open_for_reminder
+        quiz = _StubQuiz(published=False, due_at="2026-04-25T12:00:00Z")
+        assert is_quiz_open_for_reminder(quiz, now=self._now()) is False
+
+    def test_due_at_none(self):
+        """Quiz with due_at=None returns False."""
+        from canvigator_utils import is_quiz_open_for_reminder
+        quiz = _StubQuiz(published=True, due_at=None)
+        assert is_quiz_open_for_reminder(quiz, now=self._now()) is False
+
+    def test_due_at_empty_string(self):
+        """Quiz with empty due_at returns False."""
+        from canvigator_utils import is_quiz_open_for_reminder
+        quiz = _StubQuiz(published=True, due_at="")
+        assert is_quiz_open_for_reminder(quiz, now=self._now()) is False
+
+    def test_due_at_malformed(self):
+        """Malformed due_at strings are treated as not-open rather than raising."""
+        from canvigator_utils import is_quiz_open_for_reminder
+        quiz = _StubQuiz(published=True, due_at="not-a-date")
+        assert is_quiz_open_for_reminder(quiz, now=self._now()) is False
+
+    def test_due_at_exactly_now(self):
+        """due_at equal to now is not strictly future, so returns False."""
+        from canvigator_utils import is_quiz_open_for_reminder
+        quiz = _StubQuiz(published=True, due_at="2026-04-24T12:00:00Z")
+        assert is_quiz_open_for_reminder(quiz, now=self._now()) is False
+
+
 # ---------------------------------------------------------------------------
 # canvigator_course anonymization tests
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import re
 import sys
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,26 @@ def selectFromList(paginated_list, item_type="item"):
     index = prompt_for_index(f"\nSelect {item_type} from above using index in square brackets: ", len(subobject_list) - 1)
     logger.info(f"Selected {item_type} at index {index}: {subobject_list[index]}")
     return subobject_list[index]
+
+
+def is_quiz_open_for_reminder(quiz, now=None):
+    """Return True if quiz is published and has a due_at strictly in the future (UTC).
+
+    Quizzes without a due_at are treated as not open for reminders. `now` is
+    injectable for tests; defaults to datetime.now(timezone.utc).
+    """
+    if not getattr(quiz, 'published', False):
+        return False
+    due_at = getattr(quiz, 'due_at', None)
+    if not due_at:
+        return False
+    try:
+        due_dt = datetime.fromisoformat(due_at.replace('Z', '+00:00'))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return due_dt > now
 
 
 def selectCourseByCRN(canvas, crn):

@@ -112,16 +112,17 @@ All model names are overridable via env vars (`OLLAMA_TEXT_MODEL`, `OLLAMA_MODEL
 source set_env.sh                            # set Canvas (and optional Ollama) environment variables (once per terminal session)
 python canvigator.py <task>                  # run a task (prompts for course selection)
 python canvigator.py --crn <CRN> <task>      # select course by CRN (last 5 digits of course code)
-python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus, reminder, and follow-up tasks)
+python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus, reminder, follow-up, and delete-old-conversations tasks)
 python canvigator.py --tag get-quiz-questions     # add LLM-generated topic tags to the quiz questions export
 python canvigator.py --reply-window-days N <task>  # set the days-after-send window for assess-replies (default: 5)
+python canvigator.py --months N delete-old-conversations  # cutoff age in months for delete-old-conversations (default: 6)
 ```
 
 The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 get-activity`.
 
-Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-quiz-submission-events`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
+Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `delete-old-conversations`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-quiz-submission-events`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -516,6 +517,32 @@ The output CSV is sorted newest first and contains columns: `conversation_id`,
 `subject`, `last_message_at`, `message_count`, `workflow_state`, `student_ids`
 (comma-separated), `student_names` (semicolon-separated), `n_student_participants`,
 `last_message`.
+
+---
+
+#### `delete-old-conversations` — Delete inbox conversations older than N months
+
+Sweeps the instructor's Canvas inbox, sent folder, and archived folder for
+conversations whose most recent message is older than `N` months
+(approximate; one month = 30 days, default `N = 6`). Each match is shown
+(last_message_at, subject, participant names) before any action is taken.
+In live mode the task requires an explicit `yes` confirmation at the prompt
+before any deletes run; `--dry-run` previews only.
+
+Canvas conversations are not course-scoped, so this task skips course
+selection entirely and operates on the full account inbox. Deletion uses
+`Conversation.delete()` to remove the whole thread (not just individual
+messages).
+
+Override the cutoff with `--months`/`-m`, e.g.
+`python canvigator.py --months 12 delete-old-conversations` keeps the
+most recent year and deletes everything older.
+
+| | Files |
+|---|---|
+| **Input** | _(none — operates directly against the Canvas inbox)_ |
+| **Output** | _(none — matched conversations are listed in the terminal)_ |
+| **Canvas side-effect** | Permanently deletes matched conversations (skipped in `--dry-run` mode); requires explicit `yes` confirmation in live mode |
 
 ---
 
