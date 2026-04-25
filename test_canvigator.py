@@ -1133,11 +1133,11 @@ class TestExtractStudentReplies:
 class TestAssessmentsMerge:
     """Tests for CanvigatorQuiz._mergeAssessments and _indexAssessments."""
 
-    COLS = [
-        'student_id', 'student_name', 'question_id', 'question_mode',
-        'conversation_id', 'result', 'feedback', 'transcript',
-        'assessed_at', 'sent_assessment', 'sent_at',
-    ]
+    @property
+    def COLS(self):
+        """Pull the canonical column list from the production class so tests track it."""
+        from canvigator_quiz import CanvigatorQuiz
+        return list(CanvigatorQuiz.ASSESSMENTS_COLUMNS)
 
     def _stub(self):
         """Return a CanvigatorQuiz stand-in carrying just ASSESSMENTS_COLUMNS."""
@@ -1155,7 +1155,8 @@ class TestAssessmentsMerge:
         base = {
             'student_id': sid, 'student_name': f's{sid}', 'question_id': qid,
             'question_mode': 'explain', 'conversation_id': 100 + sid,
-            'result': 'pass', 'feedback': 'fb', 'transcript': '',
+            'result': 'pass', 'confidence': 'high', 'feedback': 'fb',
+            'transcript': '', 'criteria_evaluations': '',
             'assessed_at': '2026-04-22T00:00:00Z', 'sent_assessment': 0, 'sent_at': '',
         }
         base.update(overrides)
@@ -1404,55 +1405,6 @@ class TestIntegerAlignedBins:
 # canvigator_llm: assessment helper tests
 # ---------------------------------------------------------------------------
 
-class TestParseAssessment:
-    """Tests for canvigator_llm._parse_assessment."""
-
-    def test_parses_pass(self):
-        """Correctly parses a pass result with feedback."""
-        from canvigator_llm import _parse_assessment
-        result, feedback = _parse_assessment("Result: pass\nFeedback: Good explanation of the concept.")
-        assert result == 'pass'
-        assert feedback == 'Good explanation of the concept.'
-
-    def test_parses_fail(self):
-        """Correctly parses a fail result with feedback."""
-        from canvigator_llm import _parse_assessment
-        result, feedback = _parse_assessment("Result: fail\nFeedback: The student did not address the question.")
-        assert result == 'fail'
-        assert feedback == 'The student did not address the question.'
-
-    def test_defaults_to_fail_on_empty(self):
-        """Returns fail with default feedback on empty input."""
-        from canvigator_llm import _parse_assessment
-        result, feedback = _parse_assessment("")
-        assert result == 'fail'
-
-    def test_defaults_to_fail_on_none(self):
-        """Returns fail with default feedback on None input."""
-        from canvigator_llm import _parse_assessment
-        result, feedback = _parse_assessment(None)
-        assert result == 'fail'
-
-    def test_case_insensitive_result(self):
-        """Result parsing is case-insensitive."""
-        from canvigator_llm import _parse_assessment
-        result, feedback = _parse_assessment("Result: Pass\nFeedback: OK.")
-        assert result == 'pass'
-
-    def test_unknown_result_defaults_to_fail(self):
-        """Unknown result value defaults to fail."""
-        from canvigator_llm import _parse_assessment
-        result, feedback = _parse_assessment("Result: maybe\nFeedback: Unclear.")
-        assert result == 'fail'
-
-    def test_fallback_uses_whole_response_as_feedback(self):
-        """If no Feedback: line, the whole response becomes feedback."""
-        from canvigator_llm import _parse_assessment
-        result, feedback = _parse_assessment("Result: pass\nThe student did well.")
-        assert result == 'pass'
-        assert 'The student did well' in feedback
-
-
 class TestBuildAssessmentPrompt:
     """Tests for canvigator_llm._build_assessment_prompt."""
 
@@ -1486,12 +1438,13 @@ class TestBuildAssessmentPrompt:
             keywords="binary trees",
             open_ended_question="Draw a binary search tree.",
             original_question_text="What is a BST?",
+            mode='draw',
         )
         assert "binary trees" in result
         assert "transcript" not in result.lower()
 
     def test_includes_assessment_guide(self):
-        """Assessment guide, when provided, appears labeled as the primary rubric."""
+        """Assessment guide is rendered with its instructor-framing label."""
         from canvigator_llm import _build_assessment_prompt
         result = _build_assessment_prompt(
             keywords="binary search",
@@ -1501,7 +1454,6 @@ class TestBuildAssessmentPrompt:
             assessment_guide="Student should mention halving, log n, and sorted input.",
         )
         assert "Assessment guide" in result
-        assert "primary rubric" in result
         assert "halving, log n, and sorted input" in result
 
     def test_omits_empty_assessment_guide(self):
@@ -1515,6 +1467,112 @@ class TestBuildAssessmentPrompt:
             assessment_guide="",
         )
         assert "Assessment guide" not in result
+
+    def test_renders_rubric_block(self):
+        """A rubric dict is rendered as bulleted sections in the prompt."""
+        from canvigator_llm import _build_assessment_prompt
+        rubric = {
+            'canonical_answer': 'Halve the search space each step.',
+            'model_answer': 'Binary search works by dividing the array in half...',
+            'pass_criteria': ['mention halving', 'mention log n'],
+            'acceptable_alternatives': ['logarithmic time'],
+            'common_misconceptions': ['saying it is O(n)'],
+            'fatal_errors': ['claims O(1)'],
+        }
+        result = _build_assessment_prompt(
+            keywords="binary search",
+            open_ended_question="Explain the complexity.",
+            original_question_text="What is the runtime?",
+            transcript="It's logarithmic because we halve each step.",
+            rubric=rubric,
+        )
+        assert "Pass criteria" in result
+        assert "mention halving" in result
+        assert "mention log n" in result
+        assert "Acceptable alternative framings" in result
+        assert "logarithmic time" in result
+        assert "Common misconceptions" in result
+        assert "saying it is O(n)" in result
+        assert "Fatal errors" in result
+        assert "claims O(1)" in result
+        assert "Model answer" in result
+        assert "Canonical answer" in result
+
+    def test_renders_required_visual_elements_for_draw(self):
+        """Draw-mode rubric surfaces required_visual_elements as a checklist."""
+        from canvigator_llm import _build_assessment_prompt
+        rubric = {
+            'canonical_answer': '',
+            'model_answer': '',
+            'pass_criteria': [],
+            'acceptable_alternatives': [],
+            'common_misconceptions': [],
+            'fatal_errors': [],
+            'required_visual_elements': ['root node labeled', 'three child nodes', 'arrows pointing down'],
+        }
+        result = _build_assessment_prompt(
+            keywords="trees",
+            open_ended_question="Draw a tree.",
+            original_question_text="What is a tree?",
+            rubric=rubric,
+            mode='draw',
+        )
+        assert "Required visual elements" in result
+        assert "root node labeled" in result
+        assert "three child nodes" in result
+
+    def test_renders_exemplars_block(self):
+        """Pass/fail exemplars and notes are rendered as a calibration section."""
+        from canvigator_llm import _build_assessment_prompt
+        exemplars = {
+            'exemplar_pass': 'Um, so binary search like cuts the array in half...',
+            'exemplar_pass_note': 'Covers halving and runtime, informal but correct.',
+            'exemplar_fail': 'It just goes through every element.',
+            'exemplar_fail_note': 'Describes linear search, the wrong algorithm.',
+        }
+        result = _build_assessment_prompt(
+            keywords="binary search",
+            open_ended_question="Explain.",
+            original_question_text="What is binary search?",
+            transcript="...",
+            exemplars=exemplars,
+        )
+        assert "Calibration exemplars" in result
+        assert "Passing example" in result
+        assert "cuts the array in half" in result
+        assert "Failing example" in result
+        assert "Describes linear search" in result
+
+    def test_renders_locked_examples(self):
+        """Instructor-approved few-shot examples are rendered when supplied."""
+        from canvigator_llm import _build_assessment_prompt
+        locked = [
+            {'response': 'Binary search halves the array each step.', 'result': 'pass',
+             'feedback': 'Solid — you got the key idea.'},
+            {'response': 'It searches one item at a time.', 'result': 'fail',
+             'feedback': 'You described linear search instead.'},
+        ]
+        result = _build_assessment_prompt(
+            keywords="binary search",
+            open_ended_question="Explain.",
+            original_question_text="What is binary search?",
+            transcript="...",
+            locked_examples=locked,
+        )
+        assert "Previously-graded examples" in result
+        assert "halves the array each step" in result
+        assert "Example 1 verdict: pass" in result
+        assert "searches one item at a time" in result
+        assert "Example 2 verdict: fail" in result
+
+    def test_omits_locked_examples_when_empty(self):
+        """No locked-examples header when the list is empty."""
+        from canvigator_llm import _build_assessment_prompt
+        result = _build_assessment_prompt(
+            keywords="k", open_ended_question="Q", original_question_text="O",
+            transcript="t", locked_examples=[],
+        )
+        assert "Previously-graded examples" not in result
 
 
 class TestBuildAssessmentGuidePrompt:
@@ -1562,3 +1620,481 @@ class TestBuildAssessmentGuidePrompt:
             open_ended_question="Explain the complexity.",
         )
         assert "O(log n)" in result
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm: structured rubric parser tests (Tier 1B coverage)
+# ---------------------------------------------------------------------------
+
+class TestParseStructuredRubric:
+    """Tests for canvigator_llm._parse_structured_rubric."""
+
+    def _clean_explain_json(self):
+        """Fixture: a minimal valid explain-mode rubric as a JSON string."""
+        return (
+            '{"canonical_answer": "It runs in log time.",'
+            ' "model_answer": "Binary search halves the array each step until found.",'
+            ' "pass_criteria": ["mention halving", "mention sorted input"],'
+            ' "acceptable_alternatives": ["logarithmic"],'
+            ' "common_misconceptions": ["claim O(n)"],'
+            ' "fatal_errors": ["claim O(1)"]}'
+        )
+
+    def test_parses_clean_explain_json(self):
+        """Clean JSON with all explain-mode fields is parsed correctly."""
+        from canvigator_llm import _parse_structured_rubric
+        out = _parse_structured_rubric(self._clean_explain_json(), 'explain')
+        assert out['canonical_answer'] == 'It runs in log time.'
+        assert out['model_answer'].startswith('Binary search halves')
+        assert out['pass_criteria'] == ['mention halving', 'mention sorted input']
+        assert out['acceptable_alternatives'] == ['logarithmic']
+        assert out['common_misconceptions'] == ['claim O(n)']
+        assert out['fatal_errors'] == ['claim O(1)']
+        # Explain mode should NOT have required_visual_elements
+        assert 'required_visual_elements' not in out
+
+    def test_handles_markdown_fences(self):
+        """JSON wrapped in ```json ... ``` fences is unwrapped before parsing."""
+        from canvigator_llm import _parse_structured_rubric
+        wrapped = "```json\n" + self._clean_explain_json() + "\n```"
+        out = _parse_structured_rubric(wrapped, 'explain')
+        assert out['canonical_answer'] == 'It runs in log time.'
+
+    def test_handles_prose_prefix(self):
+        """JSON preceded by prose ('Here is the rubric: {...}') is still parsed."""
+        from canvigator_llm import _parse_structured_rubric
+        prose = "Here is the rubric you asked for: " + self._clean_explain_json() + "\nHope that helps!"
+        out = _parse_structured_rubric(prose, 'explain')
+        assert out['pass_criteria'] == ['mention halving', 'mention sorted input']
+
+    def test_malformed_json_returns_empty_rubric(self):
+        """Garbage in -> empty rubric (no crash, no partial fields)."""
+        from canvigator_llm import _parse_structured_rubric
+        out = _parse_structured_rubric('not json at all', 'explain')
+        assert out['canonical_answer'] == ''
+        assert out['model_answer'] == ''
+        assert out['pass_criteria'] == []
+        assert out['fatal_errors'] == []
+
+    def test_empty_string_returns_empty_rubric(self):
+        """Empty input returns the canonical empty rubric."""
+        from canvigator_llm import _parse_structured_rubric
+        out = _parse_structured_rubric('', 'explain')
+        assert out['pass_criteria'] == []
+
+    def test_draw_mode_includes_required_visual_elements(self):
+        """Draw mode parses required_visual_elements as a list."""
+        from canvigator_llm import _parse_structured_rubric
+        draw_json = (
+            '{"canonical_answer": "Tree with 3 nodes.",'
+            ' "model_answer": "Root at top with two children below.",'
+            ' "pass_criteria": ["root labeled"],'
+            ' "acceptable_alternatives": [],'
+            ' "common_misconceptions": [],'
+            ' "fatal_errors": [],'
+            ' "required_visual_elements": ["root node", "child nodes", "edges"]}'
+        )
+        out = _parse_structured_rubric(draw_json, 'draw')
+        assert out['required_visual_elements'] == ['root node', 'child nodes', 'edges']
+
+    def test_filters_empty_list_items(self):
+        """List entries that are None or empty strings are dropped."""
+        from canvigator_llm import _parse_structured_rubric
+        json_with_empties = (
+            '{"canonical_answer": "X",'
+            ' "model_answer": "",'
+            ' "pass_criteria": ["good", "", "  ", null, "also good"],'
+            ' "acceptable_alternatives": [],'
+            ' "common_misconceptions": [],'
+            ' "fatal_errors": []}'
+        )
+        out = _parse_structured_rubric(json_with_empties, 'explain')
+        assert out['pass_criteria'] == ['good', 'also good']
+
+    def test_non_dict_root_returns_empty(self):
+        """A JSON list (not an object) at the root returns empty rubric."""
+        from canvigator_llm import _parse_structured_rubric
+        out = _parse_structured_rubric('["just a list"]', 'explain')
+        assert out['pass_criteria'] == []
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm: per-criterion assessment parsing
+# ---------------------------------------------------------------------------
+
+class TestParsePerCriterionResponse:
+    """Tests for canvigator_llm._parse_per_criterion_response."""
+
+    def test_parses_clean_explain_json(self):
+        """A well-formed explain-mode response yields all three sections."""
+        from canvigator_llm import _parse_per_criterion_response
+        resp = (
+            '{"pass_criteria_evaluations": ['
+            '  {"criterion": "mention halving", "status": "met"},'
+            '  {"criterion": "mention sorted input", "status": "missing"}'
+            '],'
+            ' "fatal_errors_evaluations": ['
+            '  {"error": "claim O(1)", "status": "absent"}'
+            '],'
+            ' "feedback": "Solid coverage of halving but you missed sorted input."}'
+        )
+        out = _parse_per_criterion_response(resp, 'explain')
+        assert out['pass_criteria_evaluations'] == [
+            {'criterion': 'mention halving', 'status': 'met'},
+            {'criterion': 'mention sorted input', 'status': 'missing'},
+        ]
+        assert out['fatal_errors_evaluations'] == [
+            {'error': 'claim O(1)', 'status': 'absent'}
+        ]
+        assert 'sorted input' in out['feedback']
+        # explain mode does not have visual_elements
+        assert 'visual_elements_evaluations' not in out
+
+    def test_parses_draw_mode_with_visual_elements(self):
+        """Draw mode parses visual_elements_evaluations."""
+        from canvigator_llm import _parse_per_criterion_response
+        resp = (
+            '{"pass_criteria_evaluations": [],'
+            ' "fatal_errors_evaluations": [],'
+            ' "visual_elements_evaluations": ['
+            '  {"element": "root node", "status": "yes"},'
+            '  {"element": "edges", "status": "no"}'
+            '],'
+            ' "feedback": "Root is there but no edges."}'
+        )
+        out = _parse_per_criterion_response(resp, 'draw')
+        assert out['visual_elements_evaluations'] == [
+            {'element': 'root node', 'status': 'yes'},
+            {'element': 'edges', 'status': 'no'},
+        ]
+
+    def test_handles_markdown_fences(self):
+        """Fenced JSON output is unwrapped before parsing."""
+        from canvigator_llm import _parse_per_criterion_response
+        resp = (
+            '```json\n'
+            '{"pass_criteria_evaluations": [{"criterion": "X", "status": "met"}],'
+            ' "fatal_errors_evaluations": [],'
+            ' "feedback": "ok"}'
+            '\n```'
+        )
+        out = _parse_per_criterion_response(resp, 'explain')
+        assert out['pass_criteria_evaluations'][0]['status'] == 'met'
+
+    def test_invalid_status_degrades_to_worst_case(self):
+        """A bogus status value never silently flips to a charitable default."""
+        from canvigator_llm import _parse_per_criterion_response
+        resp = (
+            '{"pass_criteria_evaluations": [{"criterion": "X", "status": "kinda met"}],'
+            ' "fatal_errors_evaluations": [{"error": "Y", "status": "maybe"}],'
+            ' "feedback": "test"}'
+        )
+        out = _parse_per_criterion_response(resp, 'explain')
+        assert out['pass_criteria_evaluations'][0]['status'] == 'missing'
+        assert out['fatal_errors_evaluations'][0]['status'] == 'present'
+
+    def test_malformed_returns_empty_shape(self):
+        """Malformed JSON returns the canonical empty shape, not a crash."""
+        from canvigator_llm import _parse_per_criterion_response
+        out = _parse_per_criterion_response('not json', 'explain')
+        assert out['pass_criteria_evaluations'] == []
+        assert out['fatal_errors_evaluations'] == []
+        assert out['feedback'] == ''
+
+
+class TestAggregatePassFail:
+    """Tests for canvigator_llm._aggregate_pass_fail."""
+
+    def test_all_met_passes(self):
+        """All pass criteria met, no fatal errors -> pass."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [
+                {'criterion': 'a', 'status': 'met'},
+                {'criterion': 'b', 'status': 'met'},
+            ],
+            'fatal_errors_evaluations': [{'error': 'x', 'status': 'absent'}],
+        }
+        assert _aggregate_pass_fail(evals, 'explain') == 'pass'
+
+    def test_all_missing_fails(self):
+        """All criteria missing -> fail."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [
+                {'criterion': 'a', 'status': 'missing'},
+                {'criterion': 'b', 'status': 'missing'},
+            ],
+            'fatal_errors_evaluations': [],
+        }
+        assert _aggregate_pass_fail(evals, 'explain') == 'fail'
+
+    def test_partial_credit_at_threshold(self):
+        """Two partial out of two = 0.5 score = exact threshold = pass."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [
+                {'criterion': 'a', 'status': 'partial'},
+                {'criterion': 'b', 'status': 'partial'},
+            ],
+            'fatal_errors_evaluations': [],
+        }
+        assert _aggregate_pass_fail(evals, 'explain') == 'pass'
+
+    def test_below_threshold_fails(self):
+        """One partial + one missing = 0.25 score = below threshold -> fail."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [
+                {'criterion': 'a', 'status': 'partial'},
+                {'criterion': 'b', 'status': 'missing'},
+            ],
+            'fatal_errors_evaluations': [],
+        }
+        assert _aggregate_pass_fail(evals, 'explain') == 'fail'
+
+    def test_fatal_error_forces_fail(self):
+        """A fatal error present forces fail, even with all criteria met."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [
+                {'criterion': 'a', 'status': 'met'},
+                {'criterion': 'b', 'status': 'met'},
+            ],
+            'fatal_errors_evaluations': [{'error': 'x', 'status': 'present'}],
+        }
+        assert _aggregate_pass_fail(evals, 'explain') == 'fail'
+
+    def test_empty_criteria_passes(self):
+        """No pass criteria + no fatal errors -> pass (default 1.0 score)."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {'pass_criteria_evaluations': [], 'fatal_errors_evaluations': []}
+        assert _aggregate_pass_fail(evals, 'explain') == 'pass'
+
+    def test_draw_mode_visual_elements_below_threshold_fails(self):
+        """Draw mode: visual elements below threshold forces fail even if criteria met."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [{'criterion': 'a', 'status': 'met'}],
+            'fatal_errors_evaluations': [],
+            'visual_elements_evaluations': [
+                {'element': 'x', 'status': 'no'},
+                {'element': 'y', 'status': 'no'},
+            ],
+        }
+        assert _aggregate_pass_fail(evals, 'draw') == 'fail'
+
+    def test_draw_mode_unclear_counts_as_half(self):
+        """Draw mode: unclear visual elements count as 0.5."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [{'criterion': 'a', 'status': 'met'}],
+            'fatal_errors_evaluations': [],
+            'visual_elements_evaluations': [
+                {'element': 'x', 'status': 'unclear'},
+                {'element': 'y', 'status': 'unclear'},
+            ],
+        }
+        # 0.5 + 0.5 = 1.0 / 2 = 0.5 exactly = pass
+        assert _aggregate_pass_fail(evals, 'draw') == 'pass'
+
+    def test_draw_mode_no_visual_elements_defaults_to_pass_score(self):
+        """Empty visual elements list defaults visual score to 1.0 (auto-pass on that axis)."""
+        from canvigator_llm import _aggregate_pass_fail
+        evals = {
+            'pass_criteria_evaluations': [{'criterion': 'a', 'status': 'met'}],
+            'fatal_errors_evaluations': [],
+            'visual_elements_evaluations': [],
+        }
+        assert _aggregate_pass_fail(evals, 'draw') == 'pass'
+
+
+class TestVoteAssessments:
+    """Tests for canvigator_llm._vote_assessments."""
+
+    def test_unanimous_pass_yields_high_confidence(self):
+        """3-0 pass -> result=pass, confidence=high."""
+        from canvigator_llm import _vote_assessments
+        runs = [
+            ('pass', 'Good.', {'pass_criteria_evaluations': []}),
+            ('pass', 'Solid.', {'pass_criteria_evaluations': []}),
+            ('pass', 'OK.', {'pass_criteria_evaluations': []}),
+        ]
+        result, confidence, feedback, _ = _vote_assessments(runs)
+        assert result == 'pass'
+        assert confidence == 'high'
+        assert feedback == 'Good.'  # First matching run's feedback
+
+    def test_majority_pass_yields_borderline(self):
+        """2-1 pass -> result=pass, confidence=borderline."""
+        from canvigator_llm import _vote_assessments
+        runs = [
+            ('fail', 'Off-topic.', {}),
+            ('pass', 'Mostly there.', {}),
+            ('pass', 'Acceptable.', {}),
+        ]
+        result, confidence, feedback, _ = _vote_assessments(runs)
+        assert result == 'pass'
+        assert confidence == 'borderline'
+        assert feedback == 'Mostly there.'  # First matching run
+
+    def test_majority_fail_yields_borderline(self):
+        """1-2 fail -> result=fail, confidence=borderline."""
+        from canvigator_llm import _vote_assessments
+        runs = [
+            ('pass', 'Looks good.', {}),
+            ('fail', 'Missed it.', {}),
+            ('fail', 'Off-topic.', {}),
+        ]
+        result, confidence, feedback, _ = _vote_assessments(runs)
+        assert result == 'fail'
+        assert confidence == 'borderline'
+        assert feedback == 'Missed it.'
+
+    def test_empty_runs_returns_fail(self):
+        """Empty runs list returns a sane fail default."""
+        from canvigator_llm import _vote_assessments
+        result, confidence, feedback, _ = _vote_assessments([])
+        assert result == 'fail'
+        assert 'No assessment runs' in feedback
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm: exemplar parsing
+# ---------------------------------------------------------------------------
+
+class TestParseExemplars:
+    """Tests for canvigator_llm._parse_exemplars."""
+
+    def test_parses_clean_json(self):
+        """All four exemplar fields are extracted from a clean JSON object."""
+        from canvigator_llm import _parse_exemplars
+        resp = (
+            '{"exemplar_pass": "It halves the array each step.",'
+            ' "exemplar_pass_note": "Captures the core idea.",'
+            ' "exemplar_fail": "It looks at every element.",'
+            ' "exemplar_fail_note": "Describes linear search instead."}'
+        )
+        out = _parse_exemplars(resp)
+        assert out['exemplar_pass'] == 'It halves the array each step.'
+        assert out['exemplar_pass_note'] == 'Captures the core idea.'
+        assert out['exemplar_fail'] == 'It looks at every element.'
+        assert out['exemplar_fail_note'] == 'Describes linear search instead.'
+
+    def test_handles_fences(self):
+        """Markdown fences are stripped."""
+        from canvigator_llm import _parse_exemplars
+        resp = '```json\n{"exemplar_pass": "X", "exemplar_pass_note": "", "exemplar_fail": "", "exemplar_fail_note": ""}\n```'
+        out = _parse_exemplars(resp)
+        assert out['exemplar_pass'] == 'X'
+
+    def test_malformed_returns_empty(self):
+        """Malformed JSON returns the empty exemplar dict."""
+        from canvigator_llm import _parse_exemplars
+        out = _parse_exemplars('not json')
+        assert out == {
+            'exemplar_pass': '', 'exemplar_pass_note': '',
+            'exemplar_fail': '', 'exemplar_fail_note': '',
+        }
+
+
+# ---------------------------------------------------------------------------
+# canvigator_quiz: locked-example sampler (Tier 3C)
+# ---------------------------------------------------------------------------
+
+class TestCollectLockedExamples:
+    """Tests for CanvigatorQuiz._collectLockedExamples."""
+
+    def _stub(self):
+        """Return a CanvigatorQuiz stand-in carrying just _collectLockedExamples."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        class _Stub:
+            LOCKED_EXAMPLES_PER_BUCKET = CanvigatorQuiz.LOCKED_EXAMPLES_PER_BUCKET
+            _collectLockedExamples = CanvigatorQuiz._collectLockedExamples
+
+        return _Stub()
+
+    def _df(self, rows):
+        """Build an assessments DataFrame from row dicts."""
+        from canvigator_quiz import CanvigatorQuiz
+        return pd.DataFrame(rows, columns=CanvigatorQuiz.ASSESSMENTS_COLUMNS)
+
+    def _row(self, sid, qid, result, transcript, sent=1, mode='explain', feedback='fb'):
+        """Convenience row builder."""
+        return {
+            'student_id': sid, 'student_name': f's{sid}', 'question_id': qid,
+            'question_mode': mode, 'conversation_id': 100 + sid,
+            'result': result, 'confidence': 'high', 'feedback': feedback,
+            'transcript': transcript, 'criteria_evaluations': '',
+            'assessed_at': '', 'sent_assessment': sent, 'sent_at': '',
+        }
+
+    def test_empty_df_returns_empty(self):
+        """An empty DataFrame yields no examples."""
+        from canvigator_quiz import CanvigatorQuiz
+        out = self._stub()._collectLockedExamples(
+            pd.DataFrame(columns=CanvigatorQuiz.ASSESSMENTS_COLUMNS), 42,
+        )
+        assert out == []
+
+    def test_only_includes_sent_assessments(self):
+        """sent_assessment=0 rows are skipped."""
+        df = self._df([
+            self._row(1, 42, 'pass', 'good response', sent=1),
+            self._row(2, 42, 'pass', 'also good', sent=0),
+        ])
+        out = self._stub()._collectLockedExamples(df, 42)
+        responses = [e['response'] for e in out]
+        assert 'good response' in responses
+        assert 'also good' not in responses
+
+    def test_only_includes_matching_question_id(self):
+        """Rows for a different question_id are filtered out."""
+        df = self._df([
+            self._row(1, 42, 'pass', 'matches'),
+            self._row(2, 99, 'pass', 'wrong question'),
+        ])
+        out = self._stub()._collectLockedExamples(df, 42)
+        responses = [e['response'] for e in out]
+        assert responses == ['matches']
+
+    def test_skips_rows_with_empty_transcript(self):
+        """Rows whose transcript is empty (e.g. draw mode) are skipped."""
+        df = self._df([
+            self._row(1, 42, 'pass', '', mode='draw'),
+            self._row(2, 42, 'pass', 'has text'),
+        ])
+        out = self._stub()._collectLockedExamples(df, 42)
+        responses = [e['response'] for e in out]
+        assert responses == ['has text']
+
+    def test_skips_draw_mode_even_with_transcript(self):
+        """Draw mode is filtered before sampling, regardless of transcript."""
+        df = self._df([
+            self._row(1, 42, 'pass', 'something', mode='draw'),
+            self._row(2, 42, 'pass', 'explain text', mode='explain'),
+        ])
+        out = self._stub()._collectLockedExamples(df, 42)
+        responses = [e['response'] for e in out]
+        assert responses == ['explain text']
+
+    def test_returns_both_passes_and_fails(self):
+        """Both pass and fail buckets are sampled."""
+        df = self._df([
+            self._row(1, 42, 'pass', 'pass-resp'),
+            self._row(2, 42, 'fail', 'fail-resp'),
+        ])
+        out = self._stub()._collectLockedExamples(df, 42)
+        results = sorted(e['result'] for e in out)
+        assert results == ['fail', 'pass']
+
+    def test_caps_per_bucket(self):
+        """No more than LOCKED_EXAMPLES_PER_BUCKET examples per result label."""
+        from canvigator_quiz import CanvigatorQuiz
+        cap = CanvigatorQuiz.LOCKED_EXAMPLES_PER_BUCKET
+        rows = [self._row(i, 42, 'pass', f'resp{i}') for i in range(cap + 4)]
+        df = self._df(rows)
+        out = self._stub()._collectLockedExamples(df, 42)
+        passes = [e for e in out if e['result'] == 'pass']
+        assert len(passes) == cap
