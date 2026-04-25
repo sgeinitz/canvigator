@@ -303,7 +303,14 @@ elif task == 'get-quiz-questions' and all_quizzes_flag:
 
 else:
     # All remaining tasks require quiz selection
-    quiz_choice = cu.selectFromList(course_choice.get_quizzes(), "quiz")
+    all_quizzes = list(course_choice.get_quizzes())
+    if task == 'send-quiz-reminder':
+        candidates = [q for q in all_quizzes if cu.is_quiz_open_for_reminder(q)]
+        if not candidates:
+            raise ValueError("No published quizzes with a future due date were found.")
+    else:
+        candidates = all_quizzes
+    quiz_choice = cu.selectFromList(candidates, "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
     skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
