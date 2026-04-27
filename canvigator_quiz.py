@@ -295,7 +295,8 @@ def generateOpenEndedQuestions(tagged_csv_path):
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',
         'keywords', 'question_mode', 'open_ended_question', 'assessment_guide',
-        'rubric_json', 'original_question_text',
+        'rubric_json', 'exemplar_pass', 'exemplar_pass_note',
+        'exemplar_fail', 'exemplar_fail_note', 'original_question_text',
     ])
     csv_name = tagged_csv_path.parent / f"{prefix}open_ended_{today_str()}.csv"
     out_df.to_csv(csv_name, index=False)
@@ -1259,8 +1260,12 @@ class CanvigatorQuiz:
                 p = str(p)
                 r[key] = p if os.path.isabs(p) else str(data_root / p)
 
+        locked_examples = self._collectLockedExamples(existing_df, question_id)
+        if locked_examples:
+            print(f"  Using {len(locked_examples)} instructor-approved example(s) for calibration.")
+
         import canvigator_llm
-        results = canvigator_llm.assess_replies(to_assess, oe_row)
+        results = canvigator_llm.assess_replies(to_assess, oe_row, locked_examples=locked_examples)
 
         # Carry conversation_id from the reply (or fall back to manifest lookup).
         convo_lookup = self._buildConversationLookup()
@@ -1301,8 +1306,8 @@ class CanvigatorQuiz:
 
     ASSESSMENTS_COLUMNS = [
         'student_id', 'student_name', 'question_id', 'question_mode',
-        'conversation_id', 'result', 'feedback', 'transcript',
-        'assessed_at', 'sent_assessment', 'sent_at',
+        'conversation_id', 'result', 'confidence', 'feedback', 'transcript',
+        'criteria_evaluations', 'assessed_at', 'sent_assessment', 'sent_at',
     ]
 
     def _assessmentsPath(self):
@@ -1342,6 +1347,43 @@ class CanvigatorQuiz:
             if pd.notna(sid) and pd.notna(qid):
                 out[(int(sid), int(qid))] = row.to_dict()
         return out
+
+    LOCKED_EXAMPLES_PER_BUCKET = 3
+
+    def _collectLockedExamples(self, df, question_id):
+        """Sample locked (sent_assessment=1) explain-mode prior assessments for question_id.
+
+        Returns a list of {response, result, feedback} dicts — up to
+        LOCKED_EXAMPLES_PER_BUCKET passes and the same number of fails. Draw mode
+        is skipped because its `transcript` field is empty (the response is the
+        image, which we can't put in a text prompt).
+        """
+        if df is None or df.empty:
+            return []
+        qid_match = df['question_id'].apply(lambda v: pd.notna(v) and int(v) == int(question_id))
+        sent_match = df['sent_assessment'].fillna(0).astype(int) == 1
+        mode_match = df['question_mode'].fillna('explain').astype(str).str.lower() == 'explain'
+        sub = df[qid_match & sent_match & mode_match]
+        if sub.empty:
+            return []
+
+        examples = []
+        for label in ('pass', 'fail'):
+            bucket = sub[sub['result'].astype(str).str.lower() == label]
+            if bucket.empty:
+                continue
+            bucket = bucket.tail(self.LOCKED_EXAMPLES_PER_BUCKET)
+            for _, row in bucket.iterrows():
+                transcript = str(row.get('transcript') or '').strip()
+                feedback = str(row.get('feedback') or '').strip()
+                if not transcript:
+                    continue
+                examples.append({
+                    'response': transcript,
+                    'result': label,
+                    'feedback': feedback,
+                })
+        return examples
 
     def _buildConversationLookup(self):
         """Scan all *_followup_sent_*.csv manifests for (student_id, question_id) -> conversation_id."""

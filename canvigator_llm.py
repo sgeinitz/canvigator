@@ -127,6 +127,9 @@ _DRAW_SYSTEM_PROMPT = (
 
 _RUBRIC_COMMON_SCHEMA = (
     '  "canonical_answer": "<concise 1-2 sentence model answer that represents a strong response>",\n'
+    '  "model_answer": "<an 80-120 word fully-developed exemplar of an A-grade student response, '
+    'written in the register a real student would use — informal but substantive — describing '
+    'every concept the response should cover>",\n'
     '  "pass_criteria": ["<2-5 concrete must-haves a passing response must demonstrate>"],\n'
     '  "acceptable_alternatives": ["<equivalent framings, synonyms, or alternative correct approaches that should still count as passing>"],\n'
     '  "common_misconceptions": ["<wrong-but-plausible answers that should NOT count as passing, each with a brief reason>"],\n'
@@ -148,6 +151,9 @@ _RUBRIC_EXPLAIN_SYSTEM_PROMPT = (
     "- Do not repeat the same idea across lists. Pass criteria are what MUST be present; "
     "alternatives are equivalent framings; misconceptions are wrong answers; fatal errors "
     "are auto-fails.\n"
+    "- canonical_answer is a tight 1-2 sentence summary. model_answer is longer (80-120 words), "
+    "phrased the way a strong student would actually speak — informal but substantive — and must "
+    "cover every concept the pass_criteria expect to see.\n"
     "- Focus on conceptual substance, not stylistic polish. The student is speaking, so "
     "informal language is fine — criteria should be about understanding, not phrasing.\n"
     "- All strings must be valid JSON (escape quotes, no trailing commas)."
@@ -169,6 +175,9 @@ _RUBRIC_DRAW_SYSTEM_PROMPT = (
     "- Do not repeat the same idea across lists. Pass criteria cover correctness of structure "
     "or relationships; required_visual_elements are concrete things that should literally "
     "appear in the picture (nodes, edges, labels, arrows, regions).\n"
+    "- canonical_answer is a tight 1-2 sentence summary. model_answer is an 80-120 word prose "
+    "description of what an A-grade student drawing would contain — every shape, label, arrow, "
+    "and structural relationship the picture must show. Describe the picture, do not draw it.\n"
     "- Focus on structural correctness, not artistic quality. Hand-drawn, rough, or "
     "imperfectly-proportioned drawings are fine — criteria should be about the idea being "
     "communicated.\n"
@@ -475,6 +484,7 @@ def _empty_rubric(mode):
     """Return the canonical empty rubric shape for the given mode."""
     base = {
         'canonical_answer': '',
+        'model_answer': '',
         'pass_criteria': [],
         'acceptable_alternatives': [],
         'common_misconceptions': [],
@@ -515,9 +525,10 @@ def _parse_structured_rubric(response, mode):
     if not isinstance(data, dict):
         return out
 
+    string_keys = {'canonical_answer', 'model_answer'}
     for key in out:
         val = data.get(key)
-        if key == 'canonical_answer':
+        if key in string_keys:
             out[key] = str(val).strip() if val else ''
         elif isinstance(val, list):
             out[key] = [str(v).strip() for v in val if v is not None and str(v).strip()]
@@ -570,6 +581,143 @@ def generate_structured_rubric(row, client, model, mode, open_ended_question):
         return _empty_rubric(mode)
 
 
+_EXEMPLARS_EXPLAIN_SYSTEM_PROMPT = (
+    "You are an expert university instructor producing few-shot calibration examples for an "
+    "AI grader. Given a follow-up question and its rubric, write ONE realistic passing student "
+    "response and ONE realistic failing student response, plus a one-sentence note on why each "
+    "sits at the bar.\n\n"
+    "Both responses must read like spoken student responses — informal language, hesitations, "
+    "imperfect phrasing — NOT polished prose. Aim for 50-100 words each.\n\n"
+    "The passing response should be a realistic minimum-bar pass: it covers the core concepts "
+    "but is not perfect (think B/B+ student, not A+). The failing response should sound "
+    "plausible — a student who tried but missed the point, exhibits a misconception, or hit a "
+    "fatal error from the rubric — NOT obvious nonsense or a one-line shrug.\n\n"
+    "Return ONLY a single JSON object with exactly this schema, no prose, no markdown fences:\n"
+    "{\n"
+    '  "exemplar_pass": "<50-100 word realistic spoken passing response>",\n'
+    '  "exemplar_pass_note": "<one-sentence note on why this is at the passing bar>",\n'
+    '  "exemplar_fail": "<50-100 word realistic spoken failing response>",\n'
+    '  "exemplar_fail_note": "<one-sentence note on why this is at the failing bar>"\n'
+    "}"
+)
+
+_EXEMPLARS_DRAW_SYSTEM_PROMPT = (
+    "You are an expert university instructor producing few-shot calibration examples for an "
+    "AI grader. Given a follow-up question and its rubric, write a prose description of ONE "
+    "realistic passing student drawing and ONE realistic failing student drawing, plus a "
+    "one-sentence note on why each sits at the bar.\n\n"
+    "Describe the drawings — do not produce images. Each description should sound like an "
+    "instructor narrating what they see on a piece of paper: shapes, labels, arrows, "
+    "relationships, missing or incorrect parts. 50-100 words each.\n\n"
+    "The passing description should be a realistic minimum-bar pass: structure correct, most "
+    "labels present, but not flawless (think B/B+ student, not A+). The failing description "
+    "should sound plausible — wrong structure, missing critical elements, or shows a "
+    "misconception from the rubric — NOT a blank page.\n\n"
+    "Return ONLY a single JSON object with exactly this schema, no prose, no markdown fences:\n"
+    "{\n"
+    '  "exemplar_pass": "<50-100 word prose description of a passing drawing>",\n'
+    '  "exemplar_pass_note": "<one-sentence note on why this is at the passing bar>",\n'
+    '  "exemplar_fail": "<50-100 word prose description of a failing drawing>",\n'
+    '  "exemplar_fail_note": "<one-sentence note on why this is at the failing bar>"\n'
+    "}"
+)
+
+
+_EMPTY_EXEMPLARS = {
+    'exemplar_pass': '',
+    'exemplar_pass_note': '',
+    'exemplar_fail': '',
+    'exemplar_fail_note': '',
+}
+
+
+def _parse_exemplars(response):
+    """Parse the exemplars JSON response into the canonical 4-key dict."""
+    out = dict(_EMPTY_EXEMPLARS)
+    if not response:
+        return out
+    text = response.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```\s*$', '', text)
+    brace_start = text.find('{')
+    brace_end = text.rfind('}')
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        text = text[brace_start:brace_end + 1]
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        logger.warning(f"Exemplars JSON parse failed; raw response starts with: {response[:200]!r}")
+        return out
+    if not isinstance(data, dict):
+        return out
+    for key in out:
+        v = data.get(key)
+        out[key] = str(v).strip() if v else ''
+    return out
+
+
+def _build_exemplars_prompt(keywords, original_question_text, answers_json, mode, open_ended_question, rubric):
+    """Build the user-side prompt for exemplar generation."""
+    clean_text = _strip_html(original_question_text)
+    labels = _answer_labels(answers_json)
+    parts = []
+    if keywords:
+        parts.append(f"Topic keywords: {keywords}")
+    if clean_text:
+        parts.append(f"Original quiz question: {clean_text}")
+    if labels:
+        joined = " | ".join(labels[:6])
+        parts.append(f"Answer choices from the original: {joined}")
+    parts.append(f"Question type: {'draw (hand-drawn diagram)' if mode == 'draw' else 'explain (verbal explanation)'}")
+    parts.append(f"Open-ended question the student will answer: {open_ended_question}")
+
+    rubric_lines = []
+    if rubric.get('canonical_answer'):
+        rubric_lines.append(f"Canonical answer: {rubric['canonical_answer']}")
+    if rubric.get('pass_criteria'):
+        rubric_lines.append("Pass criteria: " + "; ".join(rubric['pass_criteria']))
+    if rubric.get('common_misconceptions'):
+        rubric_lines.append("Common misconceptions: " + "; ".join(rubric['common_misconceptions']))
+    if rubric.get('fatal_errors'):
+        rubric_lines.append("Fatal errors: " + "; ".join(rubric['fatal_errors']))
+    if mode == 'draw' and rubric.get('required_visual_elements'):
+        rubric_lines.append("Required visual elements: " + "; ".join(rubric['required_visual_elements']))
+    if rubric_lines:
+        parts.append("Rubric:")
+        parts.extend(rubric_lines)
+    parts.append("Exemplars JSON:")
+    return "\n".join(parts)
+
+
+def generate_exemplars(row, client, model, mode, open_ended_question, rubric):
+    """Call the LLM to produce one passing + one failing exemplar response for the question."""
+    if not open_ended_question:
+        return dict(_EMPTY_EXEMPLARS)
+    prompt = _build_exemplars_prompt(
+        row.get("keywords"),
+        row.get("question_text"),
+        row.get("answers"),
+        mode,
+        open_ended_question,
+        rubric or _empty_rubric(mode),
+    )
+    system_prompt = _EXEMPLARS_DRAW_SYSTEM_PROMPT if mode == 'draw' else _EXEMPLARS_EXPLAIN_SYSTEM_PROMPT
+    try:
+        resp = _chat_with_retry(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.5},
+        )
+        return _parse_exemplars(resp["message"]["content"])
+    except Exception as e:
+        logger.warning(f"LLM exemplar generation failed for question {row.get('question_id')}: {e}")
+        return dict(_EMPTY_EXEMPLARS)
+
+
 _TRANSCRIBE_SYSTEM_PROMPT = (
     "You are a transcription assistant. Listen to the audio and produce an accurate, "
     "verbatim transcription of everything the speaker says. Output ONLY the transcription "
@@ -578,68 +726,280 @@ _TRANSCRIBE_SYSTEM_PROMPT = (
 
 _ASSESS_EXPLAIN_SYSTEM_PROMPT = (
     "You are a university instructor assessing a student's verbal explanation of a concept. "
-    "Given the original quiz question, the topic keywords, and the student's spoken response "
-    "(provided as a transcript), determine whether the student demonstrates a reasonable "
-    "understanding of the core concept.\n\n"
-    "If an \"Assessment guide\" is provided in the user message, treat it as the primary "
-    "rubric for deciding pass vs. fail — it was written by the instructor who knows what a "
-    "correct response looks like.\n\n"
-    "A \"pass\" means the student demonstrates a reasonable understanding of the core concept, "
-    "even if their explanation is imprecise, incomplete, or uses informal language. "
-    "A \"fail\" means the student shows a fundamental misunderstanding, did not address the "
-    "question, or gave a response with no substantive content.\n\n"
-    "Respond in EXACTLY this format (two lines):\n"
-    "Result: pass\n"
-    "Feedback: Your 2-3 sentence feedback here.\n\n"
-    "Or:\n"
-    "Result: fail\n"
-    "Feedback: Your 2-3 sentence feedback here."
+    "You will be given the original quiz question, topic keywords, the follow-up question asked, "
+    "a structured rubric, an instructor-written assessment guide, optionally a model answer and "
+    "calibration exemplars and previously-graded examples, and the student's spoken response "
+    "(as a transcript).\n\n"
+    "Walk the rubric one item at a time. For EACH pass criterion answer met / partial / missing. "
+    "For EACH fatal error answer absent / present. Be charitable: informal phrasing, hesitation, "
+    "and incomplete-but-substantive coverage should still earn met or partial. A student who "
+    "repeats the question, says \"I don't know\", or shows a fundamental misunderstanding fails.\n\n"
+    "Then write 2-3 sentences of feedback for the student that references the criteria they met "
+    "and missed.\n\n"
+    "Return ONLY a single JSON object with this exact schema (no prose, no markdown fences):\n\n"
+    "{\n"
+    '  "pass_criteria_evaluations": [\n'
+    '    {"criterion": "<the criterion text, copied verbatim from the rubric>", "status": "met"|"partial"|"missing"}\n'
+    "  ],\n"
+    '  "fatal_errors_evaluations": [\n'
+    '    {"error": "<the error text, copied verbatim from the rubric>", "status": "absent"|"present"}\n'
+    "  ],\n"
+    '  "feedback": "<2-3 sentences of feedback for the student>"\n'
+    "}\n\n"
+    "Include exactly one entry per rubric item — no more, no less. If the rubric supplies an "
+    "empty list, return an empty list. Do not invent criteria or errors that were not in the rubric."
 )
 
 _ASSESS_DRAW_SYSTEM_PROMPT = (
     "You are a university instructor assessing a student's hand-drawn diagram or figure. "
-    "Given the original quiz question, the topic keywords, and the student's drawing "
-    "(provided as an image), determine whether the drawing demonstrates a reasonable "
-    "understanding of the key concepts and relationships.\n\n"
-    "If an \"Assessment guide\" is provided in the user message, treat it as the primary "
-    "rubric for deciding pass vs. fail — it was written by the instructor who knows what a "
-    "correct drawing looks like.\n\n"
-    "A \"pass\" means the drawing shows the essential structure or relationships, even if "
-    "it is rough, has minor inaccuracies, or is missing non-critical labels. "
-    "A \"fail\" means the drawing is fundamentally incorrect, shows the wrong structure, "
-    "is missing critical elements, or does not address the question.\n\n"
-    "Respond in EXACTLY this format (two lines):\n"
-    "Result: pass\n"
-    "Feedback: Your 2-3 sentence feedback here.\n\n"
-    "Or:\n"
-    "Result: fail\n"
-    "Feedback: Your 2-3 sentence feedback here."
+    "You will be given the original quiz question, topic keywords, the follow-up question asked, "
+    "a structured rubric, an instructor-written assessment guide, optionally a model answer and "
+    "calibration exemplars, and the student's drawing (as an image).\n\n"
+    "Walk the rubric one item at a time. For EACH pass criterion answer met / partial / missing. "
+    "For EACH fatal error answer absent / present. For EACH required visual element answer "
+    "yes / no / unclear based on what literally appears in the drawing. Be charitable about "
+    "neatness — rough hand-drawn diagrams with the right structure should pass.\n\n"
+    "Then write 2-3 sentences of feedback that references which elements are present and which "
+    "are missing.\n\n"
+    "Return ONLY a single JSON object with this exact schema (no prose, no markdown fences):\n\n"
+    "{\n"
+    '  "pass_criteria_evaluations": [\n'
+    '    {"criterion": "<the criterion text, copied verbatim from the rubric>", "status": "met"|"partial"|"missing"}\n'
+    "  ],\n"
+    '  "fatal_errors_evaluations": [\n'
+    '    {"error": "<the error text, copied verbatim from the rubric>", "status": "absent"|"present"}\n'
+    "  ],\n"
+    '  "visual_elements_evaluations": [\n'
+    '    {"element": "<the element text, copied verbatim from the rubric>", "status": "yes"|"no"|"unclear"}\n'
+    "  ],\n"
+    '  "feedback": "<2-3 sentences of feedback for the student>"\n'
+    "}\n\n"
+    "Include exactly one entry per rubric item — no more, no less. Do not invent items that were "
+    "not in the rubric."
 )
 
 
-def _parse_assessment(response):
-    r"""Parse a 'Result: pass/fail\nFeedback: ...' response into (result, feedback)."""
+_VALID_PASS_STATUSES = {'met', 'partial', 'missing'}
+_VALID_FATAL_STATUSES = {'absent', 'present'}
+_VALID_VISUAL_STATUSES = {'yes', 'no', 'unclear'}
+
+
+def _parse_per_criterion_response(response, mode):
+    """Parse Gemma's JSON response into a per-criterion evaluation dict.
+
+    Returns a dict with keys: pass_criteria_evaluations, fatal_errors_evaluations,
+    visual_elements_evaluations (draw mode only), feedback. Statuses outside the
+    permitted vocabulary degrade to the worst-case (missing / present / no) so a
+    bogus status never silently flips a fail to a pass.
+    """
+    out = {
+        'pass_criteria_evaluations': [],
+        'fatal_errors_evaluations': [],
+        'feedback': '',
+    }
+    if mode == 'draw':
+        out['visual_elements_evaluations'] = []
     if not response:
-        return 'fail', 'No response from model.'
+        return out
 
-    result = 'fail'
-    feedback = ''
-    for line in response.strip().splitlines():
-        line_stripped = line.strip()
-        if line_stripped.lower().startswith('result:'):
-            token = line_stripped[len('result:'):].strip().lower().strip('.,')
-            result = 'pass' if token == 'pass' else 'fail'
-        elif line_stripped.lower().startswith('feedback:'):
-            feedback = line_stripped[len('feedback:'):].strip()
+    text = response.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```\s*$', '', text)
+    brace_start = text.find('{')
+    brace_end = text.rfind('}')
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        text = text[brace_start:brace_end + 1]
 
-    if not feedback:
-        # Fallback: treat the whole response as feedback
-        feedback = response.strip()
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        logger.warning(f"Per-criterion JSON parse failed; raw response starts with: {response[:200]!r}")
+        return out
+    if not isinstance(data, dict):
+        return out
 
-    return result, feedback
+    def _normalize(items, item_key, status_key, valid, worst):
+        result = []
+        if not isinstance(items, list):
+            return result
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            text = str(entry.get(item_key, '')).strip()
+            status = str(entry.get('status', '')).strip().lower()
+            if status not in valid:
+                status = worst
+            if text:
+                result.append({item_key: text, 'status': status})
+        return result
+
+    out['pass_criteria_evaluations'] = _normalize(
+        data.get('pass_criteria_evaluations'), 'criterion', 'status',
+        _VALID_PASS_STATUSES, 'missing',
+    )
+    out['fatal_errors_evaluations'] = _normalize(
+        data.get('fatal_errors_evaluations'), 'error', 'status',
+        _VALID_FATAL_STATUSES, 'present',
+    )
+    if mode == 'draw':
+        out['visual_elements_evaluations'] = _normalize(
+            data.get('visual_elements_evaluations'), 'element', 'status',
+            _VALID_VISUAL_STATUSES, 'no',
+        )
+    fb = data.get('feedback')
+    out['feedback'] = str(fb).strip() if fb else ''
+    return out
 
 
-def _build_assessment_prompt(keywords, open_ended_question, original_question_text, transcript=None, assessment_guide=None):
+_AGGREGATION_THRESHOLD = 0.5
+
+
+def _aggregate_pass_fail(per_criterion, mode):
+    """Compute deterministic pass/fail from a parsed per-criterion evaluation dict.
+
+    Pass requires:
+    - pass-criteria score (met=1, partial=0.5, missing=0) / count >= 0.5,
+      defaulting to pass when there are zero criteria.
+    - No fatal error marked present.
+    - For draw mode: visual-elements score (yes=1, unclear=0.5, no=0) / count >= 0.5,
+      defaulting to pass when there are zero visual elements.
+    """
+    pass_items = per_criterion.get('pass_criteria_evaluations', [])
+    if pass_items:
+        pass_score = sum(
+            1.0 if e['status'] == 'met' else (0.5 if e['status'] == 'partial' else 0.0)
+            for e in pass_items
+        ) / len(pass_items)
+    else:
+        pass_score = 1.0
+
+    fatal_items = per_criterion.get('fatal_errors_evaluations', [])
+    fatal_present = any(e['status'] == 'present' for e in fatal_items)
+
+    visual_score = 1.0
+    if mode == 'draw':
+        visual_items = per_criterion.get('visual_elements_evaluations', [])
+        if visual_items:
+            visual_score = sum(
+                1.0 if e['status'] == 'yes' else (0.5 if e['status'] == 'unclear' else 0.0)
+                for e in visual_items
+            ) / len(visual_items)
+
+    passed = (
+        pass_score >= _AGGREGATION_THRESHOLD and
+        not fatal_present and
+        visual_score >= _AGGREGATION_THRESHOLD
+    )
+    return 'pass' if passed else 'fail'
+
+
+def _render_rubric_block(rubric, mode):
+    """Render a structured rubric dict as a prompt-ready bullet block.
+
+    Returns an empty string when the rubric is empty so callers can drop the
+    section cleanly.
+    """
+    if not rubric:
+        return ''
+    blocks = []
+    if rubric.get('canonical_answer'):
+        blocks.append(f"Canonical answer (1-2 sentence summary): {rubric['canonical_answer']}")
+    if rubric.get('model_answer'):
+        blocks.append(
+            "Model answer (an A-grade response in a real student's voice — use this as a "
+            f"depth/coverage reference, the student does NOT need to phrase things this way):\n{rubric['model_answer']}"
+        )
+    if rubric.get('pass_criteria'):
+        bullets = "\n".join(f"- {c}" for c in rubric['pass_criteria'])
+        blocks.append(
+            "Pass criteria (the student's response MUST demonstrate these — evaluate each one):\n"
+            f"{bullets}"
+        )
+    if rubric.get('acceptable_alternatives'):
+        bullets = "\n".join(f"- {c}" for c in rubric['acceptable_alternatives'])
+        blocks.append(
+            "Acceptable alternative framings (count these as equivalent to the criteria):\n"
+            f"{bullets}"
+        )
+    if rubric.get('common_misconceptions'):
+        bullets = "\n".join(f"- {c}" for c in rubric['common_misconceptions'])
+        blocks.append(
+            "Common misconceptions (do NOT count these as passing):\n"
+            f"{bullets}"
+        )
+    if rubric.get('fatal_errors'):
+        bullets = "\n".join(f"- {c}" for c in rubric['fatal_errors'])
+        blocks.append(
+            "Fatal errors (any of these forces a fail — evaluate each one):\n"
+            f"{bullets}"
+        )
+    if mode == 'draw' and rubric.get('required_visual_elements'):
+        bullets = "\n".join(f"- {c}" for c in rubric['required_visual_elements'])
+        blocks.append(
+            "Required visual elements — walk the drawing one element at a time, marking yes / "
+            "no / unclear based on what is literally drawn:\n"
+            f"{bullets}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _render_exemplars_block(exemplars):
+    """Render Gemini-authored pass/fail exemplars as a prompt-ready section."""
+    if not exemplars:
+        return ''
+    p_resp = exemplars.get('exemplar_pass') or ''
+    p_note = exemplars.get('exemplar_pass_note') or ''
+    f_resp = exemplars.get('exemplar_fail') or ''
+    f_note = exemplars.get('exemplar_fail_note') or ''
+    if not (p_resp or f_resp):
+        return ''
+    parts = ["Calibration exemplars (use these to anchor the bar, not as ground truth):"]
+    if p_resp:
+        parts.append(f'Passing example: "{p_resp}"')
+        if p_note:
+            parts.append(f"  (Note: {p_note})")
+    if f_resp:
+        parts.append(f'Failing example: "{f_resp}"')
+        if f_note:
+            parts.append(f"  (Note: {f_note})")
+    return "\n".join(parts)
+
+
+def _render_locked_examples_block(locked_examples):
+    """Render previously instructor-approved assessments as in-context few-shot examples.
+
+    Each entry should be a dict with keys: response, result, feedback. Caller is
+    responsible for sampling — this function just renders.
+    """
+    if not locked_examples:
+        return ''
+    parts = ["Previously-graded examples for this question (instructor-approved verdicts):"]
+    for i, ex in enumerate(locked_examples, start=1):
+        resp = (ex.get('response') or '').strip()
+        result = (ex.get('result') or '').strip()
+        feedback = (ex.get('feedback') or '').strip()
+        if not resp or not result:
+            continue
+        parts.append(f'Example {i} student response: "{resp}"')
+        parts.append(f"Example {i} verdict: {result}")
+        if feedback:
+            parts.append(f"Example {i} instructor feedback: {feedback}")
+    if len(parts) == 1:
+        return ''
+    return "\n".join(parts)
+
+
+def _build_assessment_prompt(
+    keywords,
+    open_ended_question,
+    original_question_text,
+    transcript=None,
+    assessment_guide=None,
+    rubric=None,
+    exemplars=None,
+    locked_examples=None,
+    mode='explain',
+):
     """Build the user-side prompt for assessing a student response."""
     parts = []
     if keywords:
@@ -649,10 +1009,23 @@ def _build_assessment_prompt(keywords, open_ended_question, original_question_te
     if open_ended_question:
         parts.append(f"Follow-up question asked: {open_ended_question}")
     if assessment_guide:
-        parts.append(f"Assessment guide (use this as your primary rubric): {assessment_guide}")
+        parts.append(f"Assessment guide (instructor framing): {assessment_guide}")
+
+    rubric_block = _render_rubric_block(rubric, mode)
+    if rubric_block:
+        parts.append(rubric_block)
+
+    exemplars_block = _render_exemplars_block(exemplars)
+    if exemplars_block:
+        parts.append(exemplars_block)
+
+    locked_block = _render_locked_examples_block(locked_examples)
+    if locked_block:
+        parts.append(locked_block)
+
     if transcript:
         parts.append(f"Student's response (transcript): {transcript}")
-    return "\n".join(parts)
+    return "\n\n".join(parts)
 
 
 def transcribe_audio(audio_path, client, model):
@@ -673,12 +1046,8 @@ def transcribe_audio(audio_path, client, model):
         return ""
 
 
-def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model, assessment_guide=None):
-    """Assess a student's verbal explanation using the transcript."""
-    prompt = _build_assessment_prompt(
-        keywords, open_ended_question, original_question_text,
-        transcript=transcript, assessment_guide=assessment_guide,
-    )
+def _assess_explain_once(prompt, client, model):
+    """Single-pass explain assessment. Returns (result, feedback, evaluations_dict)."""
     try:
         resp = _chat_with_retry(
             client,
@@ -689,18 +1058,15 @@ def assess_explain(transcript, keywords, open_ended_question, original_question_
             ],
             options={"temperature": 0.3},
         )
-        return _parse_assessment(resp["message"]["content"])
+        evals = _parse_per_criterion_response(resp["message"]["content"], 'explain')
     except Exception as e:
         logger.warning(f"Explain assessment failed: {e}")
-        return 'fail', f'Assessment error: {e}'
+        return 'fail', f'Assessment error: {e}', _parse_per_criterion_response('', 'explain')
+    return _aggregate_pass_fail(evals, 'explain'), evals.get('feedback', ''), evals
 
 
-def assess_draw(image_path, keywords, open_ended_question, original_question_text, client, model, assessment_guide=None):
-    """Assess a student's drawing by sending the image to a multimodal model."""
-    prompt = _build_assessment_prompt(
-        keywords, open_ended_question, original_question_text,
-        assessment_guide=assessment_guide,
-    )
+def _assess_draw_once(prompt, image_path, client, model):
+    """Single-pass draw assessment. Returns (result, feedback, evaluations_dict)."""
     try:
         resp = _chat_with_retry(
             client,
@@ -712,19 +1078,101 @@ def assess_draw(image_path, keywords, open_ended_question, original_question_tex
             ],
             options={"temperature": 0.3},
         )
-        return _parse_assessment(resp["message"]["content"])
+        evals = _parse_per_criterion_response(resp["message"]["content"], 'draw')
     except Exception as e:
         logger.warning(f"Draw assessment failed for {image_path}: {e}")
-        return 'fail', f'Assessment error: {e}'
+        return 'fail', f'Assessment error: {e}', _parse_per_criterion_response('', 'draw')
+    return _aggregate_pass_fail(evals, 'draw'), evals.get('feedback', ''), evals
 
 
-def assess_replies(replies, question_info_row, model=None, audio_model=None):
+_SELF_CONSISTENCY_N = 3
+
+
+def _vote_assessments(runs):
+    """Majority-vote a list of (result, feedback, evals) tuples.
+
+    Returns (result, confidence, feedback, evals) where confidence is "high"
+    when all runs agree and "borderline" otherwise. The feedback and evals are
+    drawn from the first run that matches the majority verdict so the per-criterion
+    audit trail aligns with the reported result.
+    """
+    if not runs:
+        return 'fail', 'borderline', 'No assessment runs completed.', {}
+    n_pass = sum(1 for r, _, _ in runs if r == 'pass')
+    n_fail = len(runs) - n_pass
+    majority = 'pass' if n_pass >= n_fail else 'fail'
+    confidence = 'high' if (n_pass == 0 or n_fail == 0) else 'borderline'
+    for r, fb, ev in runs:
+        if r == majority:
+            return majority, confidence, fb, ev
+    r, fb, ev = runs[0]
+    return r, confidence, fb, ev
+
+
+def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model,
+                   assessment_guide=None, rubric=None, exemplars=None, locked_examples=None,
+                   n_consistency=_SELF_CONSISTENCY_N):
+    """Assess a verbal explanation, running N self-consistency passes.
+
+    Returns (result, confidence, feedback, evaluations).
+    """
+    prompt = _build_assessment_prompt(
+        keywords, open_ended_question, original_question_text,
+        transcript=transcript, assessment_guide=assessment_guide,
+        rubric=rubric, exemplars=exemplars, locked_examples=locked_examples,
+        mode='explain',
+    )
+    runs = [_assess_explain_once(prompt, client, model) for _ in range(n_consistency)]
+    return _vote_assessments(runs)
+
+
+def assess_draw(image_path, keywords, open_ended_question, original_question_text, client, model,
+                assessment_guide=None, rubric=None, exemplars=None, locked_examples=None,
+                n_consistency=_SELF_CONSISTENCY_N):
+    """Assess a hand-drawn diagram, running N self-consistency passes.
+
+    Returns (result, confidence, feedback, evaluations).
+    """
+    prompt = _build_assessment_prompt(
+        keywords, open_ended_question, original_question_text,
+        assessment_guide=assessment_guide, rubric=rubric, exemplars=exemplars,
+        locked_examples=locked_examples, mode='draw',
+    )
+    runs = [_assess_draw_once(prompt, image_path, client, model) for _ in range(n_consistency)]
+    return _vote_assessments(runs)
+
+
+def _parse_rubric_from_row(question_info_row):
+    """Extract rubric and exemplars from an open-ended question row dict."""
+    mode = (question_info_row.get('question_mode') or 'explain').strip().lower()
+    rubric_raw = question_info_row.get('rubric_json') or ''
+    if isinstance(rubric_raw, str) and rubric_raw.strip():
+        rubric = _parse_structured_rubric(rubric_raw, 'draw' if mode == 'draw' else 'explain')
+    else:
+        rubric = _empty_rubric('draw' if mode == 'draw' else 'explain')
+    exemplars = {
+        'exemplar_pass': str(question_info_row.get('exemplar_pass') or '').strip(),
+        'exemplar_pass_note': str(question_info_row.get('exemplar_pass_note') or '').strip(),
+        'exemplar_fail': str(question_info_row.get('exemplar_fail') or '').strip(),
+        'exemplar_fail_note': str(question_info_row.get('exemplar_fail_note') or '').strip(),
+    }
+    return rubric, exemplars, mode
+
+
+def assess_replies(replies, question_info_row, model=None, audio_model=None,
+                   locked_examples=None, n_consistency=_SELF_CONSISTENCY_N):
     """Assess a list of student reply dicts, returning a list of assessment result dicts.
 
     Each reply dict should have keys: student_id, student_name, question_id,
     question_mode, reply_text, attachment_path, audio_path.
 
-    question_info_row should have: keywords, open_ended_question, original_question_text.
+    question_info_row should have: keywords, open_ended_question,
+    original_question_text, assessment_guide, rubric_json, and the four
+    exemplar_* columns.
+
+    locked_examples (optional): list of dicts {response, result, feedback}
+    drawn from previously instructor-approved assessments for the same question.
+    Used as in-context few-shot calibration.
     """
     try:
         import ollama  # noqa: F401
@@ -750,9 +1198,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
     oe_question = question_info_row.get('open_ended_question', '')
     orig_text = question_info_row.get('original_question_text', '')
     assessment_guide = question_info_row.get('assessment_guide', '') or ''
+    rubric, exemplars, _row_mode = _parse_rubric_from_row(question_info_row)
 
     total = len(replies)
-    print(f"Assessing {total} student replies with model '{model}'...")
+    print(f"Assessing {total} student replies with model '{model}' (n={n_consistency} self-consistency)...")
     results = []
     for i, reply in enumerate(replies, start=1):
         student_name = reply.get('student_name', '?')
@@ -760,6 +1209,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
         print(f"  [{i}/{total}] {student_name} ({mode})...", end="", flush=True)
 
         transcript = ''
+        evaluations = {}
         if mode == 'explain':
             audio_path = reply.get('audio_path', '')
             if audio_path:
@@ -776,15 +1226,18 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
                     'question_id': reply['question_id'],
                     'question_mode': mode,
                     'result': 'fail',
+                    'confidence': 'high',
                     'feedback': 'No response content to assess (no audio and no text).',
                     'transcript': '',
+                    'criteria_evaluations': '',
                     'assessed_at': '',
                 })
                 continue
-            print(" assessing...", end="", flush=True)
-            result, feedback = assess_explain(
+            print(f" assessing (x{n_consistency})...", end="", flush=True)
+            result, confidence, feedback, evaluations = assess_explain(
                 transcript, keywords, oe_question, orig_text, client, model,
-                assessment_guide=assessment_guide,
+                assessment_guide=assessment_guide, rubric=rubric, exemplars=exemplars,
+                locked_examples=locked_examples, n_consistency=n_consistency,
             )
         else:
             # Draw mode
@@ -797,21 +1250,24 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
                     'question_id': reply['question_id'],
                     'question_mode': mode,
                     'result': 'fail',
+                    'confidence': 'high',
                     'feedback': 'No image attachment to assess.',
                     'transcript': '',
+                    'criteria_evaluations': '',
                     'assessed_at': '',
                 })
                 continue
-            transcript = ''
-            print(" assessing image...", end="", flush=True)
-            result, feedback = assess_draw(
+            print(f" assessing image (x{n_consistency})...", end="", flush=True)
+            # locked_examples carry transcripts, which don't apply to drawings — drop them.
+            result, confidence, feedback, evaluations = assess_draw(
                 image_path, keywords, oe_question, orig_text, client, model,
-                assessment_guide=assessment_guide,
+                assessment_guide=assessment_guide, rubric=rubric, exemplars=exemplars,
+                locked_examples=None, n_consistency=n_consistency,
             )
 
         from datetime import datetime, timezone
         assessed_at = datetime.now(timezone.utc).isoformat()
-        print(f" {result}")
+        print(f" {result} ({confidence})")
 
         results.append({
             'student_id': reply['student_id'],
@@ -819,8 +1275,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None):
             'question_id': reply['question_id'],
             'question_mode': mode,
             'result': result,
+            'confidence': confidence,
             'feedback': feedback,
             'transcript': transcript,
+            'criteria_evaluations': json.dumps(evaluations, ensure_ascii=False) if evaluations else '',
             'assessed_at': assessed_at,
         })
 
@@ -874,12 +1332,13 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
         candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
         non_empty = len([c for c in candidates if c])
         if spin_fn:
-            spin_fn(frame, f"[{i}/{total}] {label} — writing {non_empty} guide(s) + rubric(s)")
+            spin_fn(frame, f"[{i}/{total}] {label} — writing {non_empty} guide(s) + rubric(s) + exemplars")
             frame += 1
         else:
-            print(f" writing {non_empty} guide(s) + rubric(s)...", end="", flush=True)
+            print(f" writing {non_empty} guide(s) + rubric(s) + exemplars...", end="", flush=True)
         guides = [generate_assessment_guide(row, client, model, mode, cand) for cand in candidates]
         rubrics = [generate_structured_rubric(row, client, model, mode, cand) for cand in candidates]
+        exemplars = [generate_exemplars(row, client, model, mode, cand, rub) for cand, rub in zip(candidates, rubrics)]
         if not spin_fn:
             print(" done")
 
@@ -890,8 +1349,9 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
         padded_candidates = (candidates + [''] * n)[:n]
         padded_guides = (guides + [''] * n)[:n]
         padded_rubrics = (rubrics + [_empty_rubric(mode)] * n)[:n]
+        padded_exemplars = (exemplars + [dict(_EMPTY_EXEMPLARS)] * n)[:n]
         original_text = _strip_html(row.get('question_text'))
-        for cand, guide, rubric in zip(padded_candidates, padded_guides, padded_rubrics):
+        for cand, guide, rubric, ex in zip(padded_candidates, padded_guides, padded_rubrics, padded_exemplars):
             results.append({
                 'selected_question': 0,
                 'question_id': row.get('question_id'),
@@ -902,6 +1362,10 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
                 'open_ended_question': cand,
                 'assessment_guide': guide,
                 'rubric_json': json.dumps(rubric, ensure_ascii=False),
+                'exemplar_pass': ex.get('exemplar_pass', ''),
+                'exemplar_pass_note': ex.get('exemplar_pass_note', ''),
+                'exemplar_fail': ex.get('exemplar_fail', ''),
+                'exemplar_fail_note': ex.get('exemplar_fail_note', ''),
                 'original_question_text': original_text,
             })
     if spin_done_fn:
