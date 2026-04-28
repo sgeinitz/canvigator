@@ -14,7 +14,7 @@ import os
 import re
 import json
 from pathlib import Path
-from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv, spin, spin_done
+from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv, spin, spin_done, format_due_date
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +309,98 @@ def generateOpenEndedQuestions(tagged_csv_path):
     logger.info(f"Open-ended questions saved: {csv_name}")
 
 
+def _sendOrPreviewMessages(messages, subject_str, header_label):
+    """Preview the collected messages in dry-run mode and print a summary.
+
+    `header_label` is the one-line context string shown above the previews
+    (e.g. "Quiz: <name> (<pts> points possible)" or
+    "Course: <code> (consolidated reminder for N quiz(zes))").
+    """
+    if not messages:
+        print("No reminders to send.")
+        return
+
+    print("\n=== DRY RUN MODE - No messages will be sent on Canvas ===\n")
+
+    print(header_label)
+    print(f"Reminders to send: {len(messages)}\n")
+
+    for student_id, student_name, message_str, reason in messages:
+        print(f"  [DRY RUN] To: {student_name} (id: {student_id}, {reason})")
+        print(f"            Subject: {subject_str}")
+        print(f"            Message: {message_str}\n")
+
+    # Categories may overlap when one consolidated message covers multiple
+    # quizzes with different reasons (e.g. "no attempt; page blur"), so the
+    # counts are independent — they don't sum to len(messages).
+    n_no_attempt = sum(1 for _, _, _, r in messages if 'no attempt' in r)
+    n_blur = sum(1 for _, _, _, r in messages if 'page blur' in r)
+    n_perfect_clean = sum(1 for _, _, _, r in messages if 'perfect clean' in r)
+    n_imperfect = sum(1 for _, _, _, r in messages if 'score ' in r)
+    summary_parts = []
+    if n_no_attempt:
+        summary_parts.append(f"{n_no_attempt} containing no-attempt")
+    if n_imperfect:
+        summary_parts.append(f"{n_imperfect} containing imperfect-score")
+    if n_blur:
+        summary_parts.append(f"{n_blur} containing page-blur")
+    if n_perfect_clean:
+        summary_parts.append(f"{n_perfect_clean} containing perfect-clean")
+    if summary_parts:
+        print(f"\n{len(messages)} reminder(s) would be sent ({', '.join(summary_parts)}).")
+    else:
+        print(f"\n{len(messages)} reminder(s) would be sent.")
+    logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)}")
+
+
+def _interactiveSend(canvas, messages, subject_str, header_label):
+    """Interactively prompt the instructor to send or skip each message.
+
+    Default behavior is SKIP — the message is sent if and only if the user
+    types ``y`` (case-insensitive) and presses Enter. Any other input,
+    including a bare Enter, skips. Returns the list of messages that were
+    actually sent as 5-tuples (..., conversation_id).
+    """
+    if not messages:
+        print("No messages to send!")
+        return []
+
+    print(f"\n{header_label}")
+    print(f"Messages to review: {len(messages)}")
+    print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).\n")
+
+    sent_messages = []
+    for i, (student_id, student_name, message_str, reason) in enumerate(messages, 1):
+        print(f"--- Student {i}/{len(messages)} ---")
+        print(f"  To: {student_name} (id: {student_id}, {reason})")
+        print(f"  Subject: {subject_str}")
+        print(f"  Message: {message_str}\n")
+
+        # Strict 'y' check — N is the default; anything other than 'y' (case-insensitive)
+        # skips. This includes 'yes', 'send', 'Y', empty, etc. — only a single 'y' sends.
+        choice = input(f"  Send to {student_name}? [y/N]: ").strip().lower()
+        if choice == 'y':
+            try:
+                convos = canvas.create_conversation(
+                    [str(student_id)], message_str, subject=subject_str, force_new=True
+                )
+            except Exception as e:
+                print(f"  -> ERROR sending: {e}\n")
+                logger.warning(f"create_conversation failed for student id={student_id}: {e}")
+                continue
+            convo_id = convos[0].id if convos else None
+            print(f"  -> Sent! (conversation_id={convo_id})\n")
+            sent_messages.append((student_id, student_name, message_str, reason, convo_id))
+        else:
+            print("  -> Skipped.\n")
+
+    n_sent = len(sent_messages)
+    n_skipped = len(messages) - n_sent
+    print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
+    logger.info(f"Interactive send: {n_sent} sent, {n_skipped} skipped")
+    return sent_messages
+
+
 class CanvigatorQuiz:
     """A class for one quiz and associated attributes/data."""
 
@@ -566,6 +658,28 @@ class CanvigatorQuiz:
                     quiz_scores[student_id] = score
         return quiz_scores
 
+    def _classifyStudentForQuiz(self, student_id, quiz_scores, points_possible,
+                                subs_by_q_df, events_df, question_info):
+        """Classify a student's state for one quiz. Returns ``(reason, bullets_or_None)``.
+
+        ``reason`` is one of: ``'no attempt'``, ``f'score {score}/{points_possible}'``,
+        ``'page blur'``, or ``'perfect clean'`` (perfect score with no
+        page-blur events on the latest attempt — encourages retake while the
+        quiz is still open).
+        """
+        if student_id not in quiz_scores:
+            return ('no attempt', None)
+
+        score = quiz_scores[student_id]
+        if score < points_possible:
+            bullets = self._buildMissedBulletsForStudent(student_id, subs_by_q_df, question_info)
+            return (f"score {score}/{points_possible}", bullets)
+
+        blur_bullets = self._buildBlurBulletsForStudent(student_id, events_df, question_info)
+        if blur_bullets:
+            return ('page blur', blur_bullets)
+        return ('perfect clean', None)
+
     def sendQuizReminders(self, dry_run=False):
         """Send reminder messages to students who haven't taken the quiz, haven't achieved a perfect score, or had page blur events."""
         quiz_name = self.canvas_quiz.title
@@ -611,6 +725,13 @@ class CanvigatorQuiz:
             "the struggle."
         )
 
+        perfect_clean_template = (
+            "Nice work on earning a perfect score on {quiz_name} and not needing to "
+            "change window focus even once! This quiz isn't due until {due_date} though, "
+            "so it's not a bad idea to take it once more to see if you're still able to "
+            "answer without any external assistance."
+        )
+
         note_str = (
             "\n\nNOTE: This is an auto-generated message that is currently being tested to see "
             "whether it helps encourage students to (re)take a quiz, so please let me know if "
@@ -629,24 +750,24 @@ class CanvigatorQuiz:
             student_name = student['name']
             first_name = student_name.split()[0]
 
-            if student_id not in quiz_scores:
-                reminder = no_attempt_template.format(quiz_name=quiz_name)
-                reason = "no attempt"
-            elif quiz_scores[student_id] < points_possible:
-                score = quiz_scores[student_id]
-                reminder = imperfect_template.format(quiz_name=quiz_name)
-                reason = f"score {score}/{points_possible}"
+            classification = self._classifyStudentForQuiz(
+                student_id, quiz_scores, points_possible, subs_by_q_df, events_df, question_info,
+            )
+            if classification is None:
+                continue
+            reason, bullets = classification
 
-                bullets = self._buildMissedBulletsForStudent(student_id, subs_by_q_df, question_info)
+            if reason == 'no attempt':
+                reminder = no_attempt_template.format(quiz_name=quiz_name)
+            elif reason == 'page blur':
+                reminder = blur_template.format(quiz_name=quiz_name) + (bullets or '')
+            elif reason == 'perfect clean':
+                due_date = format_due_date(getattr(self.canvas_quiz, 'due_at', None))
+                reminder = perfect_clean_template.format(quiz_name=quiz_name, due_date=due_date)
+            else:
+                reminder = imperfect_template.format(quiz_name=quiz_name)
                 if bullets:
                     reminder = reminder + bullets
-            else:
-                # Perfect score — check for page blur events
-                blur_bullets = self._buildBlurBulletsForStudent(student_id, events_df, question_info)
-                if not blur_bullets:
-                    continue
-                reminder = blur_template.format(quiz_name=quiz_name) + blur_bullets
-                reason = "page blur"
 
             message_str = f"Hello {first_name}, {reminder}{note_str}"
             messages.append((student_id, student_name, message_str, reason))
@@ -660,33 +781,13 @@ class CanvigatorQuiz:
                 self._saveReminderManifest(sent_messages, subject_str, dry_run)
 
     def _sendOrPreviewMessages(self, messages, subject_str, quiz_name, points_possible):
-        """Preview the collected messages in dry-run mode and print a summary."""
-        if not messages:
-            print("No reminders to send — all students have perfect scores with no page blur events!")
-            return
+        """Preview the collected messages in dry-run mode (single-quiz path).
 
-        print("\n=== DRY RUN MODE - No messages will be sent on Canvas ===\n")
-
-        print(f"Quiz: {quiz_name} ({points_possible} points possible)")
-        print(f"Reminders to send: {len(messages)}\n")
-
-        for student_id, student_name, message_str, reason in messages:
-            print(f"  [DRY RUN] To: {student_name} (id: {student_id}, {reason})")
-            print(f"            Subject: {subject_str}")
-            print(f"            Message: {message_str}\n")
-
-        n_no_attempt = sum(1 for _, _, _, r in messages if r == "no attempt")
-        n_blur = sum(1 for _, _, _, r in messages if r == "page blur")
-        n_imperfect = len(messages) - n_no_attempt - n_blur
-        summary_parts = []
-        if n_no_attempt:
-            summary_parts.append(f"{n_no_attempt} no-attempt")
-        if n_imperfect:
-            summary_parts.append(f"{n_imperfect} imperfect-score")
-        if n_blur:
-            summary_parts.append(f"{n_blur} page-blur")
-        print(f"\n{len(messages)} reminder(s) would be sent ({', '.join(summary_parts)}).")
-        logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)} for {quiz_name}")
+        Thin wrapper around the module-level ``_sendOrPreviewMessages`` that
+        builds the per-quiz header label.
+        """
+        header_label = f"Quiz: {quiz_name} ({points_possible} points possible)"
+        _sendOrPreviewMessages(messages, subject_str, header_label)
 
     def sendFollowUpQuestions(self, dry_run=False):
         """Send the instructor-selected open-ended follow-up question to students who missed it.
@@ -795,52 +896,13 @@ class CanvigatorQuiz:
                 self._saveFollowUpManifest(sent_messages, selected_qid, question_mode, subject_str, dry_run)
 
     def _interactiveSend(self, messages, subject_str, quiz_name, points_possible):
-        """Interactively prompt the instructor to send or skip each message.
+        """Interactively prompt for send/skip per message (single-quiz path).
 
-        For each student, displays the message preview and asks the instructor
-        to type 'send' or 'skip' (default: skip). Returns the list of messages
-        that were actually sent.
+        Thin wrapper around the module-level ``_interactiveSend`` that builds
+        the per-quiz header label and threads ``self.canvas`` through.
         """
-        if not messages:
-            print("No messages to send!")
-            return []
-
-        print(f"\nQuiz: {quiz_name} ({points_possible} points possible)")
-        print(f"Messages to review: {len(messages)}")
-        print("For each student, enter 'send' to send or press Enter to skip.\n")
-
-        sent_messages = []
-        for i, (student_id, student_name, message_str, reason) in enumerate(messages, 1):
-            print(f"--- Student {i}/{len(messages)} ---")
-            print(f"  To: {student_name} (id: {student_id}, {reason})")
-            print(f"  Subject: {subject_str}")
-            print(f"  Message: {message_str}\n")
-
-            choice = input(f"  Send to {student_name}? [send/SKIP]: ").strip().lower()
-            if choice == 'send':
-                # Capture the conversation ID returned by Canvas so the manifest
-                # can record it. assess-replies fetches each thread directly by ID
-                # rather than scanning the instructor's sent folder by subject —
-                # the sent scope can paginate / filter recent conversations away.
-                try:
-                    convos = self.canvas.create_conversation(
-                        [str(student_id)], message_str, subject=subject_str, force_new=True
-                    )
-                except Exception as e:
-                    print(f"  -> ERROR sending: {e}\n")
-                    logger.warning(f"create_conversation failed for student id={student_id}: {e}")
-                    continue
-                convo_id = convos[0].id if convos else None
-                print(f"  -> Sent! (conversation_id={convo_id})\n")
-                sent_messages.append((student_id, student_name, message_str, reason, convo_id))
-            else:
-                print("  -> Skipped.\n")
-
-        n_sent = len(sent_messages)
-        n_skipped = len(messages) - n_sent
-        print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
-        logger.info(f"Interactive send for {quiz_name}: {n_sent} sent, {n_skipped} skipped")
-        return sent_messages
+        header_label = f"Quiz: {quiz_name} ({points_possible} points possible)"
+        return _interactiveSend(self.canvas, messages, subject_str, header_label)
 
     def _findStudentsWhoMissed(self, question_id, subs_by_q_df, question_info):
         """Return a list of student IDs who scored below points_possible on the given question in their latest attempt."""
