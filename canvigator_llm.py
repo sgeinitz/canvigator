@@ -90,17 +90,28 @@ _CLASSIFY_SYSTEM_PROMPT = (
     "Respond with ONLY the single word \"explain\" or \"draw\" — nothing else."
 )
 
+_STANDALONE_RULE = (
+    "- Be FULLY STAND-ALONE and ISOLATED — write each question so that a student who has "
+    "never seen (or has completely forgotten) the original quiz question can read your "
+    "question on its own and know exactly what is being asked. Re-state every entity, "
+    "scenario, variable, dataset, function name, or example that the question depends on. "
+    "Do NOT use phrases like \"the previous question\", \"as shown above\", \"recall the "
+    "scenario\", \"this method/function/algorithm/figure\", \"the question on the quiz\", "
+    "or any pronoun whose referent appears only in the original quiz question. If you find "
+    "yourself relying on context from the original, inline that context into your question "
+    "instead\n"
+)
+
 _EXPLAIN_SYSTEM_PROMPT = (
     "You are an expert university instructor designing oral exam questions. "
     "Given a topic and details from an existing quiz question, create THREE distinct "
-    "open-ended questions that a student would answer verbally. Each question should:\n"
+    "open-ended questions that a student would answer verbally. Each question should:\n" +
+    _STANDALONE_RULE +
     "- Begin with \"Explain\" and require the student to explain a concept or idea clearly "
     "in their own words\n"
     "- Be answerable in under 1 minute of speaking\n"
     "- Test understanding, not memorization — the student should demonstrate they grasp "
     "the underlying idea, not just recall a definition\n"
-    "- Be self-contained (a student should understand what is being asked without seeing "
-    "the original quiz question)\n"
     "- NOT be a yes/no question or a question that can be answered in one word\n\n"
     "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
     "do not reword the same question three times.\n\n"
@@ -111,13 +122,12 @@ _EXPLAIN_SYSTEM_PROMPT = (
 _DRAW_SYSTEM_PROMPT = (
     "You are an expert university instructor designing visual assessment questions. "
     "Given a topic and details from an existing quiz question, create THREE distinct "
-    "questions that ask a student to draw a diagram or figure by hand. Each question should:\n"
+    "questions that ask a student to draw a diagram or figure by hand. Each question should:\n" +
+    _STANDALONE_RULE +
     "- Begin with \"Draw a diagram\" or \"Draw a figure\" and clearly describe what the "
     "student should illustrate\n"
     "- Be completable in under 2 minutes of drawing\n"
     "- Test understanding of structure, relationships, or processes — not artistic skill\n"
-    "- Be self-contained (a student should understand what is being asked without seeing "
-    "the original quiz question)\n"
     "- Specify what key elements or labels should appear in the diagram\n\n"
     "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
     "do not reword the same question three times.\n\n"
@@ -371,10 +381,21 @@ def _build_open_ended_prompt(keywords, question_text, answers_json, mode):
     if keywords:
         parts.append(f"Topic keywords: {keywords}")
     if clean_text:
-        parts.append(f"Original question: {clean_text}")
+        parts.append(
+            "Original quiz question (BACKGROUND CONTEXT ONLY — do NOT reference, quote, "
+            f"or allude to it in your output): {clean_text}"
+        )
     if labels:
         joined = " | ".join(labels[:6])
-        parts.append(f"Answer choices from the original: {joined}")
+        parts.append(
+            f"Answer choices from the original (background only, do NOT reference): {joined}"
+        )
+    parts.append(
+        "REMINDER: Each of your three questions must stand entirely on its own — a reader "
+        "who has never seen the material above must be able to understand and answer it from "
+        "the question text alone. Inline any needed scenario, variables, or example data "
+        "directly into the question."
+    )
     if mode == "draw":
         parts.append("Visual assessment question (must start with \"Draw a diagram\" or \"Draw a figure\"):")
     else:
