@@ -507,10 +507,17 @@ class CanvigatorQuiz:
         quiz_id = self.canvas_quiz.id
         assignment_id = getattr(self.canvas_quiz, 'assignment_id', None)
 
-        fields = ['position', 'question_name', 'question_type', 'question_text', 'points_possible']
+        # Canvas's per-question `position` field is set at creation time and is not
+        # reliably updated when questions are reordered or removed, so we ignore it
+        # and number questions 1..N in the order Canvas returns them — which is the
+        # order students see them. This `position` then flows through to the
+        # `*_questions_w_tags_*.csv`, the `*_open_ended_*.csv`, and the
+        # student-facing "Q{position}" bullets in send-quiz-reminder.
+        fields = ['question_name', 'question_type', 'question_text', 'points_possible']
         rows = []
-        for q in self.quiz_questions:
+        for idx, q in enumerate(self.quiz_questions, start=1):
             row = {'quiz_id': quiz_id, 'assignment_id': assignment_id, 'question_id': getattr(q, 'id', None)}
+            row['position'] = idx
             row.update({f: getattr(q, f, None) for f in fields})
             row['answers'] = json.dumps(getattr(q, 'answers', []))
             rows.append(row)

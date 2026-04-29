@@ -2100,6 +2100,63 @@ class TestCollectLockedExamples:
         assert len(passes) == cap
 
 
+class TestGetQuizQuestionsPosition:
+    """Tests that getQuizQuestions enumerates `position` as 1..N regardless of Canvas's stale `position` field."""
+
+    def _stub_quiz(self, canvas_questions, tmp_path):
+        """Build a CanvigatorQuiz instance bypassing __init__ for direct method tests."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        class _Config:
+            def __init__(self, data_path):
+                self.data_path = data_path
+                self.quiz_prefix = 'quiz'
+
+        class _CanvasQuiz:
+            id = 999
+            assignment_id = 12345
+
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        quiz.canvas_quiz = _CanvasQuiz()
+        quiz.config = _Config(tmp_path)
+        quiz.quiz_questions = canvas_questions
+        return quiz
+
+    def _question_stub(self, qid, position, name, qtype='multiple_choice_question', text='', pp=1.0):
+        """Build a minimal stand-in for a canvasapi QuizQuestion object."""
+        class _Q:
+            pass
+        q = _Q()
+        q.id = qid
+        q.position = position
+        q.question_name = name
+        q.question_type = qtype
+        q.question_text = text
+        q.points_possible = pp
+        q.answers = []
+        return q
+
+    def test_position_is_one_based_enumeration(self, tmp_path):
+        """`position` reflects iteration order, not Canvas's stale per-question position field."""
+        # Canvas reports stale positions: out-of-order values, gaps from removed questions
+        canvas_questions = [
+            self._question_stub(101, position=7, name='Q one'),     # stale 7
+            self._question_stub(102, position=2, name='Q two'),     # stale 2
+            self._question_stub(103, position=42, name='Q three'),  # stale 42 (gap)
+        ]
+        quiz = self._stub_quiz(canvas_questions, tmp_path)
+        quiz.getQuizQuestions(tag=False)
+
+        out_files = list(tmp_path.glob('quiz999_questions_*.csv'))
+        assert len(out_files) == 1
+        df = pd.read_csv(out_files[0])
+
+        # Position is 1..N in iteration order, ignoring Canvas's reported values
+        assert list(df['position']) == [1, 2, 3]
+        assert list(df['question_id']) == [101, 102, 103]
+        assert list(df['question_name']) == ['Q one', 'Q two', 'Q three']
+
+
 # ---------------------------------------------------------------------------
 # Multi-quiz reminder tests (--all path for send-quiz-reminder)
 # ---------------------------------------------------------------------------
