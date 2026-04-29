@@ -606,19 +606,41 @@ class CanvigatorCourse:
                                            'used_mobile_app', 'n_distinct_user_agents'])
 
 
+def _indentBulletsAsSub(bullets_text):
+    r"""Convert a single-quiz bullet block into a 2-space-indented sub-bullet block.
+
+    The renderers produce a block like ``"\n\n<preamble>:\n• Q1...\n• Q2..."``.
+    When that block is nested under a quiz section header in a multi-quiz
+    consolidated message, the preamble is redundant (the header already conveys
+    context) and the bullets need to read as sub-items. This drops the preamble
+    and indents every ``•`` line with two spaces.
+    """
+    if not bullets_text:
+        return ''
+    sub_lines = ['  ' + ln for ln in bullets_text.splitlines() if ln.startswith('•')]
+    if not sub_lines:
+        return ''
+    return '\n' + '\n'.join(sub_lines)
+
+
 def _composeMultiQuizReminder(first_name, state_list):
     """Render a consolidated reminder body for one student covering multiple quizzes.
 
     ``state_list`` is an ordered list of dicts with keys ``quiz_name``,
     ``due_at``, ``points_possible``, ``reason``, ``bullets`` (already-rendered
-    bullet block or ``None``). Sections are emitted in the order provided.
+    bullet block or ``None``). Sections are emitted in the order provided. When
+    the message covers more than one quiz, per-question bullets are rendered as
+    2-space-indented sub-bullets of their quiz section header.
     """
+    nested = len(state_list) > 1
     sections = []
     for s in state_list:
         due_str = format_due_date(s.get('due_at'))
         quiz_name = s.get('quiz_name', '')
         reason = s.get('reason', '')
         bullets = s.get('bullets') or ''
+        if nested:
+            bullets = _indentBulletsAsSub(bullets)
 
         if reason == 'no attempt':
             head = f"• {quiz_name} (due {due_str}) — not yet attempted"

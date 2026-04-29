@@ -2221,6 +2221,51 @@ class TestComposeMultiQuizReminder:
         assert 'Q5 (due 2026-05-15) — nice work, perfect score with no window changes' in body
         assert 'consider retaking' in body
 
+    def test_single_quiz_keeps_top_level_bullets(self):
+        """With only one quiz, bullets stay at top level (preamble preserved, no indent)."""
+        from canvigator_course import _composeMultiQuizReminder
+        bullets_block = (
+            "\n\nThe questions that you missed on this most recent attempt covered "
+            "the concepts/topics:\n• Q1: foo (5/10 pts)\n• Q3: bar (2/10 pts)"
+        )
+        body = _composeMultiQuizReminder('Sam', [
+            {'quiz_name': 'Quiz Solo', 'due_at': '2026-05-01T12:00:00Z',
+             'points_possible': 10, 'reason': 'score 7/10', 'bullets': bullets_block},
+        ])
+        # Preamble is preserved
+        assert 'covered the concepts/topics' in body
+        # Bullets are NOT indented (no '  •' anywhere)
+        assert '\n  •' not in body
+        # Top-level bullets present
+        assert '\n• Q1: foo (5/10 pts)' in body
+
+    def test_multi_quiz_indents_bullets_as_sub_bullets(self):
+        """With 2+ quizzes, per-question bullets become 2-space-indented sub-bullets and the preamble is dropped."""
+        from canvigator_course import _composeMultiQuizReminder
+        missed_block = (
+            "\n\nThe questions that you missed on this most recent attempt covered "
+            "the concepts/topics:\n• Q1: foo (5/10 pts)\n• Q3: bar (2/10 pts)"
+        )
+        blur_block = (
+            "\n\nThe questions that you changed window focus on covered the concepts/topics:"
+            "\n• Q2: baz"
+        )
+        body = _composeMultiQuizReminder('Sam', [
+            {'quiz_name': 'Quiz A', 'due_at': '2026-05-01T12:00:00Z',
+             'points_possible': 10, 'reason': 'score 7/10', 'bullets': missed_block},
+            {'quiz_name': 'Quiz B', 'due_at': '2026-05-05T12:00:00Z',
+             'points_possible': 10, 'reason': 'page blur', 'bullets': blur_block},
+        ])
+        # Quiz names render as top-level bullets
+        assert '\n• Quiz A (due 2026-05-01) — score 7/10' in body
+        assert '\n• Quiz B (due 2026-05-05) — perfect score' in body
+        # Per-question bullets are 2-space-indented sub-bullets
+        assert '\n  • Q1: foo (5/10 pts)' in body
+        assert '\n  • Q3: bar (2/10 pts)' in body
+        assert '\n  • Q2: baz' in body
+        # Preamble dropped in nested mode
+        assert 'covered the concepts/topics' not in body
+
 
 class TestSendAllQuizRemindersFiltering:
     """Tests for sendAllQuizReminders quiz filtering and missing-CSV skip."""
