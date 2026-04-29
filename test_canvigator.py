@@ -1300,9 +1300,25 @@ class TestComposeConversationSubject:
         assert out == 'MATH-101 - Quiz 1 - Q1 Follow-Up'
 
     def test_short_code_preserves_hyphenless_code(self):
-        """A code with no hyphens passes through entirely."""
+        """A code with no hyphens and no spaces passes through entirely."""
         out = self._call('MATH101', 'Quiz 1', 'Q1 Follow-Up', short_code=True)
         assert out == 'MATH101 - Quiz 1 - Q1 Follow-Up'
+
+    def test_short_code_truncates_long_padded_code(self):
+        """A long course_code with embedded ' - ' separators truncates to '<prefix>-<number>'."""
+        # Models a Canvas course_code where extra metadata follows the section/CRN
+        out = self._call('CS-3120-001 - Spring 2026 - CRN: 32093', 'Quiz 8', 'Reminder', short_code=True)
+        assert out == 'CS-3120 - Quiz 8 - Reminder'
+
+    def test_short_code_falls_back_to_space_split(self):
+        """When the code has no hyphens, the second space is the truncation point."""
+        out = self._call('CS 3120 Spring 2026 CRN 32093', 'Quiz 1', 'Reminder', short_code=True)
+        assert out == 'CS 3120 - Quiz 1 - Reminder'
+
+    def test_short_code_single_token_is_unchanged(self):
+        """A single token (no hyphens, no spaces) is preserved verbatim."""
+        out = self._call('STANDALONE', 'Quiz 1', 'Reminder', short_code=True)
+        assert out == 'STANDALONE - Quiz 1 - Reminder'
 
 
 # ---------------------------------------------------------------------------

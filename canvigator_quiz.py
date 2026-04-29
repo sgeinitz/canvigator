@@ -142,28 +142,50 @@ def _render_missed_bullets(missed_rows, question_info):
     return header + "\n".join(lines)
 
 
+def _shortCourseLabel(code):
+    """Return everything in ``code`` before the second hyphen, or before the second space if no hyphens.
+
+    Hyphen split takes priority. Examples:
+      ``CSI-3300-001-12345`` -> ``CSI-3300``
+      ``CS-3120-001 - Spring 2026 - CRN: 32093`` -> ``CS-3120``
+      ``MATH-101`` -> ``MATH-101``
+      ``CS 3120 Spring 2026`` -> ``CS 3120``
+      ``MATH101`` -> ``MATH101``
+    Whitespace around split tokens is trimmed so the result is always tidy.
+    """
+    parts = [p.strip() for p in code.split('-') if p.strip()]
+    if len(parts) >= 2:
+        return '-'.join(parts[:2])
+    parts = [p for p in code.split() if p]
+    if len(parts) >= 2:
+        return ' '.join(parts[:2])
+    return code.strip()
+
+
 def _composeConversationSubject(course_code, quiz_name, suffix, short_code=False):
     """Build a Canvas Conversation subject that includes course identity, quiz, and a per-message suffix.
 
     By default the course code is compacted to ``<prefix>-<number>-<CRN>`` by
     dropping the middle section component when it's present (Canvas codes
     typically look like ``CSI-3300-001-12345``); shorter codes pass through
-    unchanged. When ``short_code=True``, the code is further truncated to the
-    portion before the second hyphen (``<prefix>-<number>``), and codes with
-    zero or one hyphen pass through unchanged — used for follow-up question
-    subjects where the CRN is noise. The suffix is the per-message tail (e.g.
-    ``"Q3 Follow-Up"`` or ``"Reminder"``). The richer subject lets
-    students/instructors group conversations across classes, quizzes, and
-    questions; threads themselves are still tracked internally by
-    ``conversation_id``, so subject changes are safe.
+    unchanged. When ``short_code=True``, the code is further truncated by
+    ``_shortCourseLabel`` to the portion before the second hyphen (or before
+    the second space if the code has no hyphens) — used for reminders and
+    follow-up question subjects where the CRN/section/term suffix is noise.
+    The suffix is the per-message tail (e.g. ``"Q3 Follow-Up"`` or
+    ``"Reminder"``). The richer subject lets students/instructors group
+    conversations across classes, quizzes, and questions; threads themselves
+    are still tracked internally by ``conversation_id``, so subject changes
+    are safe.
     """
     code = str(course_code).strip() if course_code else ''
-    code_parts = [p for p in code.split('-') if p]
     if short_code:
-        code_parts = code_parts[:2]
-    elif len(code_parts) == 4:
-        code_parts = [code_parts[0], code_parts[1], code_parts[3]]
-    course_label = '-'.join(code_parts) if code_parts else 'Course'
+        course_label = _shortCourseLabel(code) or 'Course'
+    else:
+        code_parts = [p for p in code.split('-') if p]
+        if len(code_parts) == 4:
+            code_parts = [code_parts[0], code_parts[1], code_parts[3]]
+        course_label = '-'.join(code_parts) if code_parts else 'Course'
     parts = [course_label, str(quiz_name).strip()]
     if suffix and str(suffix).strip():
         parts.append(str(suffix).strip())
@@ -749,6 +771,7 @@ class CanvigatorQuiz:
             self.canvas_course.canvas_course.course_code,
             quiz_name,
             "Reminder",
+            short_code=True,
         )
         messages = []
 
