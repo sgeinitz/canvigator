@@ -5,7 +5,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import canvigator_quiz as cq
-from canvigator_utils import today_str, spin, spin_done
+import canvigator_utils as cu
+from canvigator_utils import today_str, spin, spin_done, format_due_date
 
 MAX_COURSE_WEEKS = 16
 
@@ -57,6 +58,100 @@ class CanvigatorCourse:
                 quiz.generateFirstAttemptHistograms()
             else:
                 print("  Skipping (unpublished or insufficient submissions)")
+
+    def sendAllQuizReminders(self, dry_run=False):
+        """Send one consolidated reminder per student covering every published, future-due quiz they're behind on.
+
+        Iterates every quiz passing ``cu.is_quiz_open_for_reminder`` (published
+        with a ``due_at`` strictly in the future), classifies each enrolled
+        student per quiz (no attempt / imperfect / page-blur on perfect), and
+        composes a single message per student listing all eligible quizzes.
+        Skips quizzes lacking a ``*_questions_w_tags_*.csv`` with a warning.
+        """
+        all_quizzes = list(self.canvas_course.get_quizzes())
+        eligible = [q for q in all_quizzes if cu.is_quiz_open_for_reminder(q)]
+
+        if not eligible:
+            print("\nNo published quizzes with a future due date were found.")
+            logger.info("sendAllQuizReminders: no eligible quizzes")
+            return
+
+        # Earliest-due first so messages list quizzes in chronological order.
+        eligible.sort(key=lambda q: getattr(q, 'due_at', '') or '')
+
+        print(f"\nFound {len(eligible)} eligible quiz(zes) (published, future-due).")
+
+        # student_id -> list[dict(quiz_id, quiz_name, due_at, reason, bullets)]
+        student_state = {}
+
+        for i, q in enumerate(eligible, start=1):
+            print(f"\n[{i}/{len(eligible)}] Processing: {q.title}")
+            quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
+
+            try:
+                question_info = quiz._loadQuestionInfo()
+            except FileNotFoundError as e:
+                msg = f"Skipping '{q.title}' — {e}"
+                print(f"  WARNING: {msg}")
+                logger.warning(msg)
+                continue
+
+            print("  Fetching latest submissions...")
+            quiz.getAllSubmissionsAndEvents()
+            subs_by_q_df = quiz.all_subs_by_question
+            events_df = quiz.all_subs_and_events
+            quiz_scores = quiz._buildQuizScores()
+            points_possible = q.points_possible
+
+            for student in self.students:
+                student_id = student['id']
+                classification = quiz._classifyStudentForQuiz(
+                    student_id, quiz_scores, points_possible, subs_by_q_df, events_df, question_info,
+                )
+                if classification is None:
+                    continue
+                reason, bullets = classification
+                student_state.setdefault(student_id, []).append({
+                    'quiz_id': q.id,
+                    'quiz_name': q.title,
+                    'due_at': getattr(q, 'due_at', None),
+                    'points_possible': points_possible,
+                    'reason': reason,
+                    'bullets': bullets,
+                })
+
+        if not student_state:
+            print("\nAll students are caught up — no consolidated reminders to send.")
+            logger.info("sendAllQuizReminders: no students with reminder-worthy state")
+            return
+
+        enrolled_map = {s['id']: s['name'] for s in self.students}
+        subject_str = cq._composeConversationSubject(
+            self.canvas_course.course_code, "Quiz Reminder", "", short_code=True,
+        )
+
+        messages = []
+        for student_id, state_list in student_state.items():
+            student_name = enrolled_map.get(student_id, "")
+            if not student_name:
+                continue
+            first_name = student_name.split()[0]
+            message_str = _composeMultiQuizReminder(first_name, state_list)
+            reasons_summary = "; ".join(s['reason'] for s in state_list)
+            messages.append((student_id, student_name, message_str, reasons_summary))
+
+        header_label = (
+            f"Course: {self.canvas_course.course_code} "
+            f"(consolidated reminder covering {len(eligible)} quiz(zes))"
+        )
+
+        if dry_run:
+            cq._sendOrPreviewMessages(messages, subject_str, header_label)
+            _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, self.config.data_path)
+        else:
+            sent_messages = cq._interactiveSend(self.canvas, messages, subject_str, header_label)
+            if sent_messages:
+                _saveCourseReminderManifest(sent_messages, student_state, subject_str, dry_run, self.config.data_path)
 
     def createQuiz(self):
         """Create a new placeholder quiz with stub questions on Canvas."""
@@ -509,6 +604,113 @@ class CanvigatorCourse:
             })
         return pd.DataFrame(rows, columns=['id', 'top_browser', 'top_os',
                                            'used_mobile_app', 'n_distinct_user_agents'])
+
+
+def _indentBulletsAsSub(bullets_text):
+    r"""Convert a single-quiz bullet block into a 2-space-indented sub-bullet block.
+
+    The renderers produce a block like ``"\n\n<preamble>:\n• Q1...\n• Q2..."``.
+    When that block is nested under a quiz section header in a multi-quiz
+    consolidated message, the preamble is redundant (the header already conveys
+    context) and the bullets need to read as sub-items. This drops the preamble
+    and indents every ``•`` line with two spaces.
+    """
+    if not bullets_text:
+        return ''
+    sub_lines = ['  ' + ln for ln in bullets_text.splitlines() if ln.startswith('•')]
+    if not sub_lines:
+        return ''
+    return '\n' + '\n'.join(sub_lines)
+
+
+def _composeMultiQuizReminder(first_name, state_list):
+    """Render a consolidated reminder body for one student covering multiple quizzes.
+
+    ``state_list`` is an ordered list of dicts with keys ``quiz_name``,
+    ``due_at``, ``points_possible``, ``reason``, ``bullets`` (already-rendered
+    bullet block or ``None``). Sections are emitted in the order provided. When
+    the message covers more than one quiz, per-question bullets are rendered as
+    2-space-indented sub-bullets of their quiz section header.
+    """
+    nested = len(state_list) > 1
+    sections = []
+    for s in state_list:
+        due_str = format_due_date(s.get('due_at'))
+        quiz_name = s.get('quiz_name', '')
+        reason = s.get('reason', '')
+        bullets = s.get('bullets') or ''
+        if nested:
+            bullets = _indentBulletsAsSub(bullets)
+
+        if reason == 'no attempt':
+            head = f"• {quiz_name} (due {due_str}) — not yet attempted"
+        elif reason == 'page blur':
+            head = (
+                f"• {quiz_name} (due {due_str}) — perfect score, "
+                "but the quiz window appears to have been left during your most recent attempt"
+            )
+        elif reason == 'perfect clean':
+            head = (
+                f"• {quiz_name} (due {due_str}) — nice work, perfect score with no "
+                "window changes; still not due, so consider retaking to confirm retention"
+            )
+        else:
+            # 'score x/y'
+            head = f"• {quiz_name} (due {due_str}) — {reason}"
+
+        sections.append(head + bullets)
+
+    note_str = (
+        "\n\nNOTE: This is an auto-generated message that is currently being tested to see "
+        "whether it helps encourage students to (re)take a quiz, so please let me know if "
+        "you have any questions, concerns, or suggestions about it."
+    )
+
+    intro = (
+        f"Hello {first_name},\n\n"
+        "Below are currently active quizzes that you may want to revisit before they're due:\n\n"
+    )
+    closing = (
+        "\n\nQuizzes are most effective as learning tools when you try to answer the "
+        "questions on your own without using outside references or AI tools — embrace the "
+        "struggle, that's where the learning happens. Good luck!"
+    )
+    return intro + "\n\n".join(sections) + closing + note_str
+
+
+def _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, data_path):
+    """Save the combined course-level manifest for a `--all` send-quiz-reminder run.
+
+    One row per student-message; ``quiz_ids`` / ``quiz_names`` / ``reasons`` are
+    pipe-delimited in due-date order matching the rendered message.
+    """
+    sent_at = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for entry in messages:
+        if len(entry) == 5:
+            student_id, student_name, _, _, convo_id = entry
+        else:
+            student_id, student_name, _, _ = entry
+            convo_id = None
+        state_list = student_state.get(student_id, [])
+        rows.append({
+            'student_id': student_id,
+            'student_name': student_name,
+            'quiz_count': len(state_list),
+            'quiz_ids': '|'.join(str(s['quiz_id']) for s in state_list),
+            'quiz_names': '|'.join(s['quiz_name'] for s in state_list),
+            'reasons': '|'.join(s['reason'] for s in state_list),
+            'conversation_id': convo_id,
+            'conversation_subject': subject_str,
+            'sent_at': sent_at,
+        })
+
+    manifest_df = pd.DataFrame(rows)
+    suffix = "_dryrun" if dry_run else ""
+    csv_name = data_path / f"course_reminder_sent{suffix}_{today_str()}.csv"
+    manifest_df.to_csv(csv_name, index=False)
+    print(f"  Manifest saved: {csv_name.name}")
+    logger.info(f"Course-level reminder manifest saved: {csv_name}")
 
 
 def _collectOldConversations(canvas, cutoff_dt, current_user_id):

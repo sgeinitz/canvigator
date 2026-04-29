@@ -13,6 +13,17 @@ def today_str():
     return datetime.today().strftime('%Y%m%d')
 
 
+def format_due_date(due_at):
+    """Format a Canvas due_at ISO timestamp as YYYY-MM-DD; return '?' on failure."""
+    if not due_at:
+        return '?'
+    try:
+        dt = datetime.fromisoformat(str(due_at).replace('Z', '+00:00'))
+    except (TypeError, ValueError, AttributeError):
+        return '?'
+    return dt.strftime('%Y-%m-%d')
+
+
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 

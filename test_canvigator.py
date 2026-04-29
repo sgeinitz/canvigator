@@ -1300,9 +1300,25 @@ class TestComposeConversationSubject:
         assert out == 'MATH-101 - Quiz 1 - Q1 Follow-Up'
 
     def test_short_code_preserves_hyphenless_code(self):
-        """A code with no hyphens passes through entirely."""
+        """A code with no hyphens and no spaces passes through entirely."""
         out = self._call('MATH101', 'Quiz 1', 'Q1 Follow-Up', short_code=True)
         assert out == 'MATH101 - Quiz 1 - Q1 Follow-Up'
+
+    def test_short_code_truncates_long_padded_code(self):
+        """A long course_code with embedded ' - ' separators truncates to '<prefix>-<number>'."""
+        # Models a Canvas course_code where extra metadata follows the section/CRN
+        out = self._call('CS-3120-001 - Spring 2026 - CRN: 32093', 'Quiz 8', 'Reminder', short_code=True)
+        assert out == 'CS-3120 - Quiz 8 - Reminder'
+
+    def test_short_code_falls_back_to_space_split(self):
+        """When the code has no hyphens, the second space is the truncation point."""
+        out = self._call('CS 3120 Spring 2026 CRN 32093', 'Quiz 1', 'Reminder', short_code=True)
+        assert out == 'CS 3120 - Quiz 1 - Reminder'
+
+    def test_short_code_single_token_is_unchanged(self):
+        """A single token (no hyphens, no spaces) is preserved verbatim."""
+        out = self._call('STANDALONE', 'Quiz 1', 'Reminder', short_code=True)
+        assert out == 'STANDALONE - Quiz 1 - Reminder'
 
 
 # ---------------------------------------------------------------------------
@@ -2098,3 +2114,303 @@ class TestCollectLockedExamples:
         out = self._stub()._collectLockedExamples(df, 42)
         passes = [e for e in out if e['result'] == 'pass']
         assert len(passes) == cap
+
+
+class TestGetQuizQuestionsPosition:
+    """Tests that getQuizQuestions enumerates `position` as 1..N regardless of Canvas's stale `position` field."""
+
+    def _stub_quiz(self, canvas_questions, tmp_path):
+        """Build a CanvigatorQuiz instance bypassing __init__ for direct method tests."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        class _Config:
+            def __init__(self, data_path):
+                self.data_path = data_path
+                self.quiz_prefix = 'quiz'
+
+        class _CanvasQuiz:
+            id = 999
+            assignment_id = 12345
+
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        quiz.canvas_quiz = _CanvasQuiz()
+        quiz.config = _Config(tmp_path)
+        quiz.quiz_questions = canvas_questions
+        return quiz
+
+    def _question_stub(self, qid, position, name, qtype='multiple_choice_question', text='', pp=1.0):
+        """Build a minimal stand-in for a canvasapi QuizQuestion object."""
+        class _Q:
+            pass
+        q = _Q()
+        q.id = qid
+        q.position = position
+        q.question_name = name
+        q.question_type = qtype
+        q.question_text = text
+        q.points_possible = pp
+        q.answers = []
+        return q
+
+    def test_position_is_one_based_enumeration(self, tmp_path):
+        """`position` reflects iteration order, not Canvas's stale per-question position field."""
+        # Canvas reports stale positions: out-of-order values, gaps from removed questions
+        canvas_questions = [
+            self._question_stub(101, position=7, name='Q one'),     # stale 7
+            self._question_stub(102, position=2, name='Q two'),     # stale 2
+            self._question_stub(103, position=42, name='Q three'),  # stale 42 (gap)
+        ]
+        quiz = self._stub_quiz(canvas_questions, tmp_path)
+        quiz.getQuizQuestions(tag=False)
+
+        out_files = list(tmp_path.glob('quiz999_questions_*.csv'))
+        assert len(out_files) == 1
+        df = pd.read_csv(out_files[0])
+
+        # Position is 1..N in iteration order, ignoring Canvas's reported values
+        assert list(df['position']) == [1, 2, 3]
+        assert list(df['question_id']) == [101, 102, 103]
+        assert list(df['question_name']) == ['Q one', 'Q two', 'Q three']
+
+
+# ---------------------------------------------------------------------------
+# Multi-quiz reminder tests (--all path for send-quiz-reminder)
+# ---------------------------------------------------------------------------
+
+class TestClassifyStudentForQuiz:
+    """Tests for CanvigatorQuiz._classifyStudentForQuiz."""
+
+    def _quiz(self):
+        """Return a CanvigatorQuiz instance bypassing __init__ for direct method tests."""
+        from canvigator_quiz import CanvigatorQuiz
+        return CanvigatorQuiz.__new__(CanvigatorQuiz)
+
+    def test_no_attempt(self):
+        """Student missing from quiz_scores → 'no attempt' with no bullets."""
+        result = self._quiz()._classifyStudentForQuiz(
+            student_id=99, quiz_scores={}, points_possible=10.0,
+            subs_by_q_df=None, events_df=None, question_info={},
+        )
+        assert result == ('no attempt', None)
+
+    def test_imperfect_score_with_bullets(self, monkeypatch):
+        """Student with score < points_possible → 'score x/y' with bullet section."""
+        quiz = self._quiz()
+        monkeypatch.setattr(quiz, '_buildMissedBulletsForStudent',
+                            lambda sid, df, qi: '\n• Q1: keywords (5/10 pts)')
+        result = quiz._classifyStudentForQuiz(
+            student_id=42, quiz_scores={42: 7}, points_possible=10,
+            subs_by_q_df=None, events_df=None, question_info={},
+        )
+        assert result[0] == 'score 7/10'
+        assert 'Q1: keywords' in result[1]
+
+    def test_perfect_with_blur(self, monkeypatch):
+        """Student with perfect score and blur events → 'page blur' with bullets."""
+        quiz = self._quiz()
+        monkeypatch.setattr(quiz, '_buildBlurBulletsForStudent',
+                            lambda sid, df, qi: '\n• Q2: stuff')
+        result = quiz._classifyStudentForQuiz(
+            student_id=42, quiz_scores={42: 10}, points_possible=10,
+            subs_by_q_df=None, events_df=None, question_info={},
+        )
+        assert result[0] == 'page blur'
+        assert 'Q2: stuff' in result[1]
+
+    def test_perfect_no_blur_returns_perfect_clean(self, monkeypatch):
+        """Perfect score with no blur events → 'perfect clean' (encourage retake)."""
+        quiz = self._quiz()
+        monkeypatch.setattr(quiz, '_buildBlurBulletsForStudent', lambda sid, df, qi: None)
+        result = quiz._classifyStudentForQuiz(
+            student_id=42, quiz_scores={42: 10}, points_possible=10,
+            subs_by_q_df=None, events_df=None, question_info={},
+        )
+        assert result == ('perfect clean', None)
+
+
+class TestComposeMultiQuizReminder:
+    """Tests for canvigator_course._composeMultiQuizReminder."""
+
+    def test_orders_sections_in_input_order(self):
+        """Sections are emitted in the order provided in state_list."""
+        from canvigator_course import _composeMultiQuizReminder
+        state_list = [
+            {'quiz_name': 'Quiz A', 'due_at': '2026-05-01T12:00:00Z',
+             'points_possible': 10, 'reason': 'no attempt', 'bullets': None},
+            {'quiz_name': 'Quiz B', 'due_at': '2026-05-05T12:00:00Z',
+             'points_possible': 10, 'reason': 'score 7/10',
+             'bullets': '\n• Q1: foo (5/10 pts)'},
+            {'quiz_name': 'Quiz C', 'due_at': '2026-05-10T12:00:00Z',
+             'points_possible': 10, 'reason': 'page blur', 'bullets': '\n• Q2: bar'},
+        ]
+        body = _composeMultiQuizReminder('Alex', state_list)
+
+        # Greeting and structure
+        assert body.startswith('Hello Alex,')
+
+        # Order check: A appears before B which appears before C
+        i_a = body.index('Quiz A')
+        i_b = body.index('Quiz B')
+        i_c = body.index('Quiz C')
+        assert i_a < i_b < i_c
+
+        # Per-section formatting
+        assert 'Quiz A (due 2026-05-01) — not yet attempted' in body
+        assert 'Quiz B (due 2026-05-05) — score 7/10' in body
+        assert '• Q1: foo (5/10 pts)' in body
+        assert 'Quiz C (due 2026-05-10) — perfect score' in body
+        assert '• Q2: bar' in body
+
+        # NOTE disclaimer present
+        assert 'auto-generated message' in body
+
+    def test_handles_missing_due_at(self):
+        """A quiz with no due_at falls back to '?' in the section header."""
+        from canvigator_course import _composeMultiQuizReminder
+        body = _composeMultiQuizReminder('Sam', [
+            {'quiz_name': 'Q', 'due_at': None,
+             'points_possible': 5, 'reason': 'no attempt', 'bullets': None},
+        ])
+        assert 'Q (due ?)' in body
+
+    def test_skips_bullets_when_none(self):
+        """Section with bullets=None renders just the header, no nested bullet block."""
+        from canvigator_course import _composeMultiQuizReminder
+        body = _composeMultiQuizReminder('Sam', [
+            {'quiz_name': 'Q1', 'due_at': '2026-05-01T12:00:00Z',
+             'points_possible': 5, 'reason': 'no attempt', 'bullets': None},
+        ])
+        assert 'Q1 (due 2026-05-01) — not yet attempted' in body
+        # Only the section header bullet appears — no nested bullets below it.
+        assert body.count('•') == 1
+
+    def test_perfect_clean_section(self):
+        """A 'perfect clean' state renders a retake-encouraging section header."""
+        from canvigator_course import _composeMultiQuizReminder
+        body = _composeMultiQuizReminder('Sam', [
+            {'quiz_name': 'Q5', 'due_at': '2026-05-15T12:00:00Z',
+             'points_possible': 10, 'reason': 'perfect clean', 'bullets': None},
+        ])
+        assert 'Q5 (due 2026-05-15) — nice work, perfect score with no window changes' in body
+        assert 'consider retaking' in body
+
+    def test_single_quiz_keeps_top_level_bullets(self):
+        """With only one quiz, bullets stay at top level (preamble preserved, no indent)."""
+        from canvigator_course import _composeMultiQuizReminder
+        bullets_block = (
+            "\n\nThe questions that you missed on this most recent attempt covered "
+            "the concepts/topics:\n• Q1: foo (5/10 pts)\n• Q3: bar (2/10 pts)"
+        )
+        body = _composeMultiQuizReminder('Sam', [
+            {'quiz_name': 'Quiz Solo', 'due_at': '2026-05-01T12:00:00Z',
+             'points_possible': 10, 'reason': 'score 7/10', 'bullets': bullets_block},
+        ])
+        # Preamble is preserved
+        assert 'covered the concepts/topics' in body
+        # Bullets are NOT indented (no '  •' anywhere)
+        assert '\n  •' not in body
+        # Top-level bullets present
+        assert '\n• Q1: foo (5/10 pts)' in body
+
+    def test_multi_quiz_indents_bullets_as_sub_bullets(self):
+        """With 2+ quizzes, per-question bullets become 2-space-indented sub-bullets and the preamble is dropped."""
+        from canvigator_course import _composeMultiQuizReminder
+        missed_block = (
+            "\n\nThe questions that you missed on this most recent attempt covered "
+            "the concepts/topics:\n• Q1: foo (5/10 pts)\n• Q3: bar (2/10 pts)"
+        )
+        blur_block = (
+            "\n\nThe questions that you changed window focus on covered the concepts/topics:"
+            "\n• Q2: baz"
+        )
+        body = _composeMultiQuizReminder('Sam', [
+            {'quiz_name': 'Quiz A', 'due_at': '2026-05-01T12:00:00Z',
+             'points_possible': 10, 'reason': 'score 7/10', 'bullets': missed_block},
+            {'quiz_name': 'Quiz B', 'due_at': '2026-05-05T12:00:00Z',
+             'points_possible': 10, 'reason': 'page blur', 'bullets': blur_block},
+        ])
+        # Quiz names render as top-level bullets
+        assert '\n• Quiz A (due 2026-05-01) — score 7/10' in body
+        assert '\n• Quiz B (due 2026-05-05) — perfect score' in body
+        # Per-question bullets are 2-space-indented sub-bullets
+        assert '\n  • Q1: foo (5/10 pts)' in body
+        assert '\n  • Q3: bar (2/10 pts)' in body
+        assert '\n  • Q2: baz' in body
+        # Preamble dropped in nested mode
+        assert 'covered the concepts/topics' not in body
+
+
+class TestSendAllQuizRemindersFiltering:
+    """Tests for sendAllQuizReminders quiz filtering and missing-CSV skip."""
+
+    def _make_course_stub(self, quizzes, students):
+        """Build a CanvigatorCourse instance bypassing __init__ for direct method tests."""
+        from canvigator_course import CanvigatorCourse
+
+        class _CanvasCourse:
+            def __init__(self, quizzes):
+                self._quizzes = quizzes
+                self.course_code = 'CSI-3300-001-12345'
+
+            def get_quizzes(self):
+                return self._quizzes
+
+        course = CanvigatorCourse.__new__(CanvigatorCourse)
+        course.canvas = None
+        course.canvas_course = _CanvasCourse(quizzes)
+        course.config = None
+        course.students = students
+        course.verbose = False
+        return course
+
+    def test_filters_to_eligible_quizzes_and_skips_when_empty(self, capsys, monkeypatch):
+        """When no quiz passes is_quiz_open_for_reminder, the method returns early."""
+        from datetime import timezone as _tz
+        # Past-due quiz only
+        quizzes = [_StubQuiz(published=True, due_at='2026-01-01T12:00:00Z')]
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+
+        # Freeze "now" so the past quiz remains past
+        from canvigator_utils import is_quiz_open_for_reminder as orig
+        ref_now = datetime(2026, 4, 24, 12, 0, 0, tzinfo=_tz.utc)
+        monkeypatch.setattr('canvigator_course.cu.is_quiz_open_for_reminder',
+                            lambda q: orig(q, now=ref_now))
+
+        course.sendAllQuizReminders(dry_run=True)
+        captured = capsys.readouterr().out
+        assert 'No published quizzes with a future due date' in captured
+
+    def test_skips_quizzes_missing_tagged_csv(self, capsys, monkeypatch, caplog):
+        """A quiz whose _loadQuestionInfo raises FileNotFoundError is skipped with a warning."""
+        import logging as _logging
+        from datetime import timezone as _tz
+        # One eligible quiz; the only quiz lacks the tagged CSV
+        quizzes = [_StubQuiz(published=True, due_at='2026-12-31T12:00:00Z')]
+        # give it required attrs the constructor will need
+        quizzes[0].id = 999
+        quizzes[0].title = 'Quiz Z'
+        quizzes[0].points_possible = 10
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+
+        from canvigator_utils import is_quiz_open_for_reminder as orig
+        ref_now = datetime(2026, 4, 24, 12, 0, 0, tzinfo=_tz.utc)
+        monkeypatch.setattr('canvigator_course.cu.is_quiz_open_for_reminder',
+                            lambda q: orig(q, now=ref_now))
+
+        # Stub the CanvigatorQuiz constructor to return an object whose
+        # _loadQuestionInfo raises FileNotFoundError.
+        class _FakeQuiz:
+            def __init__(self, *a, **kw):
+                pass
+
+            def _loadQuestionInfo(self):
+                raise FileNotFoundError('No *_questions_w_tags_*.csv found for quiz')
+        monkeypatch.setattr('canvigator_course.cq.CanvigatorQuiz', _FakeQuiz)
+
+        with caplog.at_level(_logging.WARNING, logger='canvigator_course'):
+            course.sendAllQuizReminders(dry_run=True)
+        captured = capsys.readouterr().out
+        assert "Skipping 'Quiz Z'" in captured
+        assert any("Skipping 'Quiz Z'" in r.message for r in caplog.records)
+        # No reminder-worthy state, so we hit the "all caught up" branch
+        assert 'All students are caught up' in captured

@@ -41,7 +41,7 @@ def print_help():
     print("Options (short and long forms are interchangeable):")
     print("  -d, --dry-run                Preview changes without modifying Canvas (applies to bonus, reminder, follow-up, feedback, delete-old-conversations)")
     print("  -t, --tag                    Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
-    print("  -a, --all                    Run across every quiz in the course (get-quiz-questions and get-quiz-submission-events only)")
+    print("  -a, --all                    Run across every quiz in the course (get-quiz-questions, get-quiz-submission-events, send-quiz-reminder)")
     print("  -c, --crn <CRN>              Select course by CRN (last 5 digits of course code)")
     print("  -m, --months <N>             Age threshold in months for delete-old-conversations (default: 6)")
     print("  -w, --reply-window-days <N>  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
@@ -271,6 +271,9 @@ if task == 'get-activity':
 
 elif task == 'get-quiz-submission-events' and all_quizzes_flag:
     course.getAllQuizzesAndSubmissions()
+
+elif task == 'send-quiz-reminder' and all_quizzes_flag:
+    course.sendAllQuizReminders(dry_run=dry_run)
 
 elif task == 'create-quiz':
     course.createQuiz()
