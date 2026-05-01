@@ -297,8 +297,8 @@ elif task == 'generate-follow-up-questions':
     cq.generateOpenEndedQuestions(tagged_csv)
 
 elif task == 'get-quiz-questions' and all_quizzes_flag:
-    all_course_quizzes = list(course_choice.get_quizzes())
-    print(f"\nFound {len(all_course_quizzes)} quiz(zes).")
+    all_course_quizzes = [q for q in course_choice.get_quizzes() if getattr(q, 'published', False)]
+    print(f"\nFound {len(all_course_quizzes)} published quiz(zes).")
     for i, q in enumerate(all_course_quizzes, start=1):
         print(f"\n[{i}/{len(all_course_quizzes)}] {q.title}")
         quiz = cq.CanvigatorQuiz(canvas, course, q, canv_config, verbose=False, skip_student_data=True)
@@ -312,7 +312,9 @@ else:
         if not candidates:
             raise ValueError("No published quizzes with a future due date were found.")
     else:
-        candidates = all_quizzes
+        candidates = [q for q in all_quizzes if getattr(q, 'published', False)]
+        if not candidates:
+            raise ValueError("No published quizzes were found.")
     quiz_choice = cu.selectFromList(candidates, "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
     skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
