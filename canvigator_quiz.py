@@ -13,6 +13,7 @@ import seaborn as sbn
 import os
 import re
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv, spin, spin_done, format_due_date
 
@@ -476,7 +477,7 @@ class CanvigatorQuiz:
 
         quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
         quiz_csv_url = quiz_report.file['url']
-        quiz_csv = requests.get(quiz_csv_url)
+        quiz_csv = requests.get(quiz_csv_url, timeout=60)
         csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_student_analysis_{today_str()}.csv"
 
         with open(csv_name, 'wb') as f:
@@ -1014,7 +1015,6 @@ class CanvigatorQuiz:
         Real sends populate ``conversation_id`` from the Canvas response; dry-run
         rows leave it empty (assess-replies skips dry-run manifests).
         """
-        from datetime import datetime, timezone
         sent_at = datetime.now(timezone.utc).isoformat()
         manifest_rows = []
         for entry in messages:
@@ -1051,7 +1051,6 @@ class CanvigatorQuiz:
         for confirming who was nudged on which day and which Canvas thread
         carries the message.
         """
-        from datetime import datetime, timezone
         sent_at = datetime.now(timezone.utc).isoformat()
         manifest_rows = []
         for entry in messages:
@@ -1087,8 +1086,6 @@ class CanvigatorQuiz:
         extract student replies (text, audio, image attachments). Downloads media
         to a replies/ subdirectory. Outputs a followup_replies CSV.
         """
-        from datetime import datetime, timedelta, timezone
-
         manifest = self._loadFollowUpManifest()
         now = datetime.now(timezone.utc)
 
@@ -1217,8 +1214,6 @@ class CanvigatorQuiz:
         Returns a list of message dicts, newest first (Canvas's default order).
         Messages from the instructor or outside the window are excluded.
         """
-        from datetime import datetime
-
         replies = []
         for msg in messages:
             # Skip instructor's own messages
@@ -1486,7 +1481,8 @@ class CanvigatorQuiz:
                 continue
             try:
                 m = pd.read_csv(f)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"skipping unreadable manifest {f.name}: {e}")
                 continue
             for _, row in m.iterrows():
                 sid = row.get('student_id')
@@ -1537,6 +1533,7 @@ class CanvigatorQuiz:
             if col not in df.columns:
                 df[col] = 0 if col == 'sent_assessment' else ''
         df['sent_assessment'] = df['sent_assessment'].fillna(0).astype(int)
+        df['sent_at'] = df['sent_at'].astype(object).where(df['sent_at'].notna(), '')
 
         convo_lookup = self._buildConversationLookup()
 
@@ -1594,7 +1591,6 @@ class CanvigatorQuiz:
         Updates ``df`` in place on a successful real send and returns True;
         returns False on dry-run or send failure.
         """
-        from datetime import datetime, timezone
         student_name = row.get('student_name', '?')
         feedback = str(row['feedback']).strip()
         result = row.get('result', '')
@@ -2338,10 +2334,7 @@ class CanvigatorQuiz:
                 submissions_data.append(new_row)
 
                 # check that this an attempt/submission exists before trying to get all of the events for it
-                try:
-                    if attempt_num is None:
-                        break
-                except Exception:
+                if attempt_num is None:
                     break
 
                 # now get question-level data for this attempt
@@ -2362,8 +2355,8 @@ class CanvigatorQuiz:
                             'timestamp': event.created_at,
                             'question_id': _extract_question_id(event) if event.event_type == 'question_answered' else None,
                         })
-                except Exception:
-                    print(f"  !!! could not get events for student id {sub.user_id} for attempt {attempt_num}")
+                except Exception as e:
+                    logger.warning(f"could not get events for student id {sub.user_id} for attempt {attempt_num}: {e}")
                     continue
 
         # Create DataFrames from the collected lists

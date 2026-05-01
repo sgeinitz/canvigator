@@ -203,12 +203,12 @@ def selectCourse(canvas):
     """
     past_courses = []
     current_courses = []
-    current_date = datetime.now()
+    current_date = datetime.now(timezone.utc)
 
     for course in canvas.get_courses():
         try:
-            # Check start and end dates
-            end_date = datetime.strptime(course.end_at, '%Y-%m-%dT%H:%M:%SZ') if course.end_at else None
+            # Canvas times are UTC; parse with fromisoformat (Python 3.11+ accepts trailing Z directly).
+            end_date = datetime.fromisoformat(course.end_at.replace('Z', '+00:00')) if course.end_at else None
 
             # Separate past and current courses
             if end_date and current_date > end_date:
