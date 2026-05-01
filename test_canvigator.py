@@ -4,7 +4,8 @@ import pytest
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -2414,3 +2415,126 @@ class TestSendAllQuizRemindersFiltering:
         assert any("Skipping 'Quiz Z'" in r.message for r in caplog.records)
         # No reminder-worthy state, so we hit the "all caught up" branch
         assert 'All students are caught up' in captured
+
+
+# ---------------------------------------------------------------------------
+# canvigator_assignment tests
+# ---------------------------------------------------------------------------
+
+class TestCanvigatorAssignment:
+    """Tests for canvigator_assignment helpers and class methods."""
+
+    def _make_assignment_obj(self, points_possible=1):
+        """Build a minimal stand-in for a Canvas Assignment object."""
+        return SimpleNamespace(id=999, points_possible=points_possible)
+
+    def _make_instance(self, points_possible=1):
+        """Build a CanvigatorAssignment with mocked dependencies."""
+        from canvigator_assignment import CanvigatorAssignment
+        return CanvigatorAssignment(
+            canvas=MagicMock(),
+            course=MagicMock(),
+            canvas_assignment=self._make_assignment_obj(points_possible),
+            config=MagicMock(),
+        )
+
+    def test_is_media_recording_assignment_filter(self):
+        """Filter passes only assignments whose submission_types is exactly ['media_recording']."""
+        from canvigator_assignment import _isMediaRecordingAssignment
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=['media_recording'])) is True
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=['online_text_entry'])) is False
+        # Mixed types must NOT match — we want recording-only assignments.
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=['media_recording', 'online_upload'])) is False
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=None)) is False
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=[])) is False
+
+    def test_extract_audio_url_from_media_comment(self):
+        """media_comment with an audio media_type yields a .m4a extension."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(media_comment={'url': 'https://canvas/audio.m4a', 'media_type': 'audio'})
+        url, ext = ca._extractAudioUrl(sub)
+        assert url == 'https://canvas/audio.m4a'
+        assert ext == '.m4a'
+
+    def test_extract_audio_url_video_media_comment_uses_mp4(self):
+        """A video media_comment yields an .mp4 extension instead of .m4a."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(media_comment={'url': 'https://canvas/v.mp4', 'media_type': 'video'})
+        url, ext = ca._extractAudioUrl(sub)
+        assert url == 'https://canvas/v.mp4'
+        assert ext == '.mp4'
+
+    def test_extract_audio_url_from_attachment_fallback(self):
+        """When no media_comment is present, audio attachments are picked up by mime type."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(
+            media_comment=None,
+            attachments=[{
+                'url': 'https://canvas/file.webm',
+                'filename': 'recording.webm',
+                'content-type': 'audio/webm',
+            }],
+        )
+        url, ext = ca._extractAudioUrl(sub)
+        assert url == 'https://canvas/file.webm'
+        assert ext == '.webm'
+
+    def test_extract_audio_url_returns_none_when_empty(self):
+        """A submission with neither media_comment nor attachments returns (None, None)."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(media_comment=None, attachments=[])
+        assert ca._extractAudioUrl(sub) == (None, None)
+
+    def test_extract_audio_url_skips_non_audio_attachments(self):
+        """Non-audio attachments (e.g. PDFs) are ignored."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(
+            media_comment=None,
+            attachments=[
+                {'url': 'https://canvas/notes.pdf', 'filename': 'notes.pdf', 'content-type': 'application/pdf'},
+            ],
+        )
+        assert ca._extractAudioUrl(sub) == (None, None)
+
+    def test_build_recording_row_shape(self):
+        """_buildRecordingRow returns a dict with all expected columns populated."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(user_id=42, id=7, submitted_at='2026-05-01T12:00:00Z')
+        row = ca._buildRecordingRow(sub, 'Alice', 'data/course/media_recordings/assignment999/42_7.m4a', 'hello')
+        assert row['student_id'] == 42
+        assert row['student_name'] == 'Alice'
+        assert row['submission_id'] == 7
+        assert row['submitted_at'] == '2026-05-01T12:00:00Z'
+        assert row['audio_path'] == 'data/course/media_recordings/assignment999/42_7.m4a'
+        assert row['transcript'] == 'hello'
+        assert 'transcribed_at' in row and row['transcribed_at']
+
+    def test_post_grade_dry_run_does_not_call_edit(self):
+        """In dry-run mode, _postGrade skips Submission.edit and returns False."""
+        ca = self._make_instance(points_possible=3)
+        sub = MagicMock()
+        sub.user_id = 42
+        result = ca._postGrade(sub, 3, dry_run=True)
+        assert result is False
+        sub.edit.assert_not_called()
+
+    def test_post_grade_real_call_uses_points_possible(self):
+        """A real grade post calls Submission.edit with posted_grade=points_possible."""
+        ca = self._make_instance(points_possible=5)
+        sub = MagicMock()
+        sub.user_id = 42
+        result = ca._postGrade(sub, 5, dry_run=False)
+        assert result is True
+        sub.edit.assert_called_once_with(submission={'posted_grade': 5})
+
+    def test_post_grade_logs_warning_on_failure(self, caplog):
+        """When Submission.edit raises, _postGrade logs a warning and returns False."""
+        import logging as _logging
+        ca = self._make_instance(points_possible=2)
+        sub = MagicMock()
+        sub.user_id = 42
+        sub.edit.side_effect = RuntimeError("Canvas down")
+        with caplog.at_level(_logging.WARNING, logger='canvigator_assignment'):
+            result = ca._postGrade(sub, 2, dry_run=False)
+        assert result is False
+        assert any('Grade post failed' in r.message for r in caplog.records)

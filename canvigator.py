@@ -19,6 +19,10 @@ task_groups = [
         ('assess-replies', 'Fetch the latest student follow-up replies from Canvas and assess them with a local LLM'),
         ('send-follow-up-assessments', 'Send instructor-curated assessment feedback back to students (requires assess-replies)'),
     ]),
+    ('Media Recording Check-Ins', [
+        ('create-media-recording-assignment', 'Create a Canvas assignment that accepts only media_recording submissions'),
+        ('get-media-recordings', 'Fetch + transcribe student audio submissions for a media-recording assignment (use --grade to award full credit)'),
+    ]),
     ('Miscellaneous tasks', [
         ('create-quiz', 'Create an unpublished placeholder quiz on Canvas'),
         ('export-anon-data', 'Export anonymized course data (no Canvas API needed)'),
@@ -39,12 +43,14 @@ def print_help():
     """Print usage information with grouped task descriptions."""
     print("Usage: canvigator.py [OPTIONS] <task>\n")
     print("Options (short and long forms are interchangeable):")
-    print("  -d, --dry-run                Preview changes without modifying Canvas (applies to bonus, reminder, follow-up, feedback, delete-old-conversations)")
+    print("  -d, --dry-run                Preview changes without modifying Canvas (applies to bonus, reminder, follow-up,")
+    print("                               feedback, delete-old-conversations, get-media-recordings --grade)")
     print("  -t, --tag                    Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
     print("  -a, --all                    Run across every quiz in the course (get-quiz-questions, get-quiz-submission-events, send-quiz-reminder)")
     print("  -c, --crn <CRN>              Select course by CRN (last 5 digits of course code)")
     print("  -m, --months <N>             Age threshold in months for delete-old-conversations (default: 6)")
     print("  -w, --reply-window-days <N>  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
+    print("  -g, --grade                  Auto-award points_possible to every submitter (get-media-recordings only)")
     max_name = max(len(t) for t in tasks)
     for header, items in task_groups:
         print(f"\n{header}")
@@ -55,6 +61,18 @@ def print_help():
     print("    1. Classifies each question as 'explain' (oral) or 'draw' (visual)")
     print("    2. Generates a mode-appropriate open-ended question for instructor review")
     print("  Output CSV includes a question_mode column so the instructor can override choices.")
+
+
+def _run_assignment_task(task, course, canvas, canv_config, dry_run, grade_flag):
+    """Dispatch the two media-recording-assignment tasks."""
+    import canvigator_assignment as ca
+    if task == 'create-media-recording-assignment':
+        ca.createMediaRecordingAssignment(course)
+        return
+    assignment_choice = ca._selectMediaRecordingAssignment(course)
+    print(f"\nSelected assignment: {assignment_choice.name}")
+    cassign = ca.CanvigatorAssignment(canvas, course, assignment_choice, canv_config)
+    cassign.getMediaRecordings(grade=grade_flag, dry_run=dry_run)
 
 
 def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
@@ -99,6 +117,7 @@ _SHORT_TO_LONG = {
     '-c': '--crn',
     '-m': '--months',
     '-w': '--reply-window-days',
+    '-g': '--grade',
 }
 args = [_SHORT_TO_LONG.get(a, a) for a in sys.argv[1:]]
 
@@ -113,6 +132,10 @@ if tag:
 all_quizzes_flag = '--all' in args
 if all_quizzes_flag:
     args.remove('--all')
+
+grade_flag = '--grade' in args
+if grade_flag:
+    args.remove('--grade')
 
 crn = None
 if '--crn' in args:
@@ -277,6 +300,9 @@ elif task == 'send-quiz-reminder' and all_quizzes_flag:
 
 elif task == 'create-quiz':
     course.createQuiz()
+
+elif task in ('create-media-recording-assignment', 'get-media-recordings'):
+    _run_assignment_task(task, course, canvas, canv_config, dry_run, grade_flag)
 
 elif task == 'get-gradebook':
     course.exportGradebook(canv_config.data_path)
