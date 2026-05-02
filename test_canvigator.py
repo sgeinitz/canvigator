@@ -1,5 +1,6 @@
 """Tests for canvigator utility functions and core algorithms."""
 import hashlib
+import subprocess
 import pytest
 import pandas as pd
 from datetime import datetime
@@ -2497,17 +2498,28 @@ class TestCanvigatorAssignment:
         assert ca._extractAudioUrl(sub) == (None, None)
 
     def test_build_recording_row_shape(self):
-        """_buildRecordingRow returns a dict with all expected columns populated."""
+        """_buildRecordingRow returns a dict with all expected columns populated; grade defaults to empty."""
         ca = self._make_instance()
         sub = SimpleNamespace(user_id=42, id=7, submitted_at='2026-05-01T12:00:00Z')
-        row = ca._buildRecordingRow(sub, 'Alice', 'data/course/media_recordings/assignment999/42_7.m4a', 'hello')
+        row = ca._buildRecordingRow(sub, 'Alice', 'data/course/media_recordings/assignment999/42_7.wav', 'hello')
         assert row['student_id'] == 42
         assert row['student_name'] == 'Alice'
         assert row['submission_id'] == 7
         assert row['submitted_at'] == '2026-05-01T12:00:00Z'
-        assert row['audio_path'] == 'data/course/media_recordings/assignment999/42_7.m4a'
+        assert row['audio_path'] == 'data/course/media_recordings/assignment999/42_7.wav'
         assert row['transcript'] == 'hello'
         assert 'transcribed_at' in row and row['transcribed_at']
+        # Default grade=None yields empty grade and graded_at columns.
+        assert row['grade'] == ''
+        assert row['graded_at'] == ''
+
+    def test_build_recording_row_records_grade_and_graded_at(self):
+        """When a grade is passed, _buildRecordingRow records the value and a graded_at timestamp."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(user_id=42, id=7, submitted_at='2026-05-01T12:00:00Z')
+        row = ca._buildRecordingRow(sub, 'Alice', 'audio.wav', 'hello', grade=0.5)
+        assert row['grade'] == 0.5
+        assert row['graded_at']  # non-empty ISO timestamp
 
     def test_post_grade_dry_run_does_not_call_edit(self):
         """In dry-run mode, _postGrade skips Submission.edit and returns False."""
@@ -2538,3 +2550,80 @@ class TestCanvigatorAssignment:
             result = ca._postGrade(sub, 2, dry_run=False)
         assert result is False
         assert any('Grade post failed' in r.message for r in caplog.records)
+
+    def test_fetch_audio_invokes_ffmpeg_with_url_and_whitelist(self):
+        """_fetchAudio passes the URL directly to ffmpeg with an https-capable protocol whitelist."""
+        from canvigator_assignment import _fetchAudio
+        audio = Path('/tmp/data/course/media_recordings/assignment999/42_7.wav')
+        with patch('canvigator_assignment.subprocess.run') as mock_run:
+            mock_run.return_value = SimpleNamespace(returncode=0)
+            result = _fetchAudio('https://canvas/manifest.mpd', audio)
+        assert result is True
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == 'ffmpeg'
+        assert '-protocol_whitelist' in cmd
+        whitelist = cmd[cmd.index('-protocol_whitelist') + 1]
+        # https must be allowed so ffmpeg can follow DASH/HLS fragment URLs.
+        assert 'https' in whitelist
+        # Input URL is passed directly, not a local file.
+        assert 'https://canvas/manifest.mpd' in cmd
+        # Output is audio-only PCM WAV at 16 kHz mono — the format Gemma's
+        # audio path accepts. Anything else (e.g. AAC m4a) gets rejected as
+        # "image: unknown format" by Ollama's media-type detector.
+        assert '-vn' in cmd
+        assert 'pcm_s16le' in cmd
+        assert cmd[cmd.index('-ar') + 1] == '16000'
+        assert cmd[cmd.index('-ac') + 1] == '1'
+        assert str(audio) in cmd
+
+    def test_fetch_audio_handles_missing_ffmpeg(self, caplog):
+        """When ffmpeg is not on PATH, _fetchAudio returns False and logs a warning."""
+        import logging as _logging
+        from canvigator_assignment import _fetchAudio
+        audio = Path('/tmp/missing/v.m4a')
+        with patch('canvigator_assignment.subprocess.run', side_effect=FileNotFoundError()):
+            with caplog.at_level(_logging.WARNING, logger='canvigator_assignment'):
+                result = _fetchAudio('https://x/y', audio)
+        assert result is False
+        assert any('ffmpeg not found' in r.message for r in caplog.records)
+
+    def test_fetch_audio_handles_ffmpeg_failure(self, caplog):
+        """When ffmpeg exits non-zero, _fetchAudio returns False and logs a warning."""
+        import logging as _logging
+        from canvigator_assignment import _fetchAudio
+        audio = Path('/tmp/v.m4a')
+        err = subprocess.CalledProcessError(1, 'ffmpeg', stderr=b'bad input')
+        with patch('canvigator_assignment.subprocess.run', side_effect=err):
+            with caplog.at_level(_logging.WARNING, logger='canvigator_assignment'):
+                result = _fetchAudio('https://x/y', audio)
+        assert result is False
+        assert any('ffmpeg failed' in r.message for r in caplog.records)
+
+    def test_prompt_for_grade_returns_full_credit_on_empty(self, monkeypatch):
+        """Empty input on the prompt awards points_possible (full credit)."""
+        from canvigator_assignment import _promptForGrade
+        monkeypatch.setattr('builtins.input', lambda _prompt='': '')
+        result = _promptForGrade('Alice', 'transcript text', 'audio.wav', points_possible=1)
+        assert result == 1.0
+
+    def test_prompt_for_grade_returns_none_on_skip(self, monkeypatch):
+        """'s', 'skip' (case-insensitive) record no grade for the student."""
+        from canvigator_assignment import _promptForGrade
+        for raw in ('s', 'S', 'skip', 'SKIP'):
+            monkeypatch.setattr('builtins.input', lambda _prompt='', _raw=raw: _raw)
+            assert _promptForGrade('Alice', 'transcript', 'audio.wav', points_possible=1) is None
+
+    def test_prompt_for_grade_returns_numeric_value(self, monkeypatch):
+        """A numeric value is returned as a float, even when smaller or larger than points_possible."""
+        from canvigator_assignment import _promptForGrade
+        monkeypatch.setattr('builtins.input', lambda _prompt='': '0.5')
+        assert _promptForGrade('Alice', 't', 'a.wav', points_possible=1) == 0.5
+        monkeypatch.setattr('builtins.input', lambda _prompt='': '2')
+        assert _promptForGrade('Alice', 't', 'a.wav', points_possible=1) == 2.0
+
+    def test_prompt_for_grade_reprompts_on_invalid(self, monkeypatch):
+        """Negative and non-numeric input re-prompt; the eventual valid input is returned."""
+        from canvigator_assignment import _promptForGrade
+        inputs = iter(['-1', 'oops', '1'])
+        monkeypatch.setattr('builtins.input', lambda _prompt='': next(inputs))
+        assert _promptForGrade('Alice', 't', 'a.wav', points_possible=1) == 1.0
