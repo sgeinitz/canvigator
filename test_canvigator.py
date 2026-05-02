@@ -653,6 +653,19 @@ class TestStripHtml:
         from canvigator_llm import _strip_html
         assert _strip_html("a    b   c") == "a b c"
 
+    def test_handles_nan_and_other_non_strings(self):
+        """Non-string inputs (NaN, ints, lists) yield empty string instead of crashing.
+
+        pd.read_csv returns NaN (a float) for empty cells; bool(NaN) is True so
+        the historical `if not text` check let NaN through to the regex, which
+        crashed with 'expected string or bytes-like object, got float'.
+        """
+        from canvigator_llm import _strip_html
+        assert _strip_html(float('nan')) == ""
+        assert _strip_html(0) == ""
+        assert _strip_html(123) == ""
+        assert _strip_html([]) == ""
+
 
 class TestParseTags:
     """Tests for _parse_tags response parser."""
@@ -922,6 +935,60 @@ class TestBuildOpenEndedPrompt:
         from canvigator_llm import _build_open_ended_prompt
         result = _build_open_ended_prompt("", "", None, "explain")
         assert "Oral explanation question" in result
+
+
+class TestGenerateOpenEndedQuestionsRecovery:
+    """generate_open_ended_questions must survive a per-row LLM failure with partial output."""
+
+    def test_one_failing_row_does_not_kill_the_loop(self):
+        """A row that raises mid-pipeline yields placeholder rows; other rows succeed normally."""
+        import canvigator_llm
+        rows = [
+            {'question_id': 1, 'question_name': 'Q1', 'question_text': '<p>Q1</p>', 'keywords': 'a', 'position': 1, 'answers': '[]'},
+            {'question_id': 2, 'question_name': float('nan'), 'question_text': float('nan'), 'keywords': 'b', 'position': 2, 'answers': '[]'},
+            {'question_id': 3, 'question_name': 'Q3', 'question_text': '<p>Q3</p>', 'keywords': 'c', 'position': 3, 'answers': '[]'},
+        ]
+
+        def fake_classify(row, _client, _model):
+            # Simulate a transient API failure on the bad row.
+            if row.get('question_id') == 2:
+                raise RuntimeError("simulated API error on question 2")
+            return 'explain'
+
+        def fake_candidates(_row, _client, _model, _mode, n=3):
+            return [f'candidate {i + 1}' for i in range(n)]
+
+        def fake_guide(_row, _client, _model, _mode, _cand):
+            return 'guide'
+
+        def fake_rubric(_row, _client, _model, _mode, _cand):
+            return canvigator_llm._empty_rubric('explain')
+
+        def fake_exemplars(_row, _client, _model, _mode, _cand, _rub):
+            return dict(canvigator_llm._EMPTY_EXEMPLARS)
+
+        with patch.object(canvigator_llm, '_make_client', return_value=MagicMock()), \
+             patch.object(canvigator_llm, 'classify_question_mode', side_effect=fake_classify), \
+             patch.object(canvigator_llm, 'generate_open_ended_candidates', side_effect=fake_candidates), \
+             patch.object(canvigator_llm, 'generate_assessment_guide', side_effect=fake_guide), \
+             patch.object(canvigator_llm, 'generate_structured_rubric', side_effect=fake_rubric), \
+             patch.object(canvigator_llm, 'generate_exemplars', side_effect=fake_exemplars):
+            results = canvigator_llm.generate_open_ended_questions(rows, n=3)
+
+        # 3 questions × 3 candidates = 9 rows total, regardless of failure.
+        assert len(results) == 9
+        # Q1 and Q3 produce real candidates.
+        for qid in (1, 3):
+            qrows = [r for r in results if r['question_id'] == qid]
+            assert all(r['open_ended_question'].startswith('candidate') for r in qrows)
+            assert all(r['question_mode'] == 'explain' for r in qrows)
+        # Q2 produces 3 placeholder rows: empty open_ended_question, empty mode.
+        q2_rows = [r for r in results if r['question_id'] == 2]
+        assert len(q2_rows) == 3
+        assert all(r['open_ended_question'] == '' for r in q2_rows)
+        assert all(r['question_mode'] == '' for r in q2_rows)
+        # NaN question_text is coerced to empty string by _strip_html, not a crash.
+        assert all(r['original_question_text'] == '' for r in q2_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -2627,3 +2694,80 @@ class TestCanvigatorAssignment:
         inputs = iter(['-1', 'oops', '1'])
         monkeypatch.setattr('builtins.input', lambda _prompt='': next(inputs))
         assert _promptForGrade('Alice', 't', 'a.wav', points_possible=1) == 1.0
+
+    def test_collect_unique_tags_lowercases_and_dedupes(self):
+        """_collectUniqueTags collapses duplicates across rows, lowercases, and sorts."""
+        from canvigator_assignment import _collectUniqueTags
+        series = pd.Series([
+            'graphs, recursion, hash tables',
+            'Hash Tables, big-o',
+            'graphs',
+            None,
+            '   ',
+        ])
+        assert _collectUniqueTags(series) == ['big-o', 'graphs', 'hash tables', 'recursion']
+
+    def test_render_analysis_report_orders_tags_by_count(self):
+        """Tag-grounded analysis section ranks tags by descending student count."""
+        from canvigator_assignment import _renderAnalysisReport
+        transcripts = [('Alice', 'a'), ('Bob', 'b'), ('Carol', 'c')]
+        tag_to_indices = {
+            'graphs': [1, 2],
+            'recursion': [1, 2, 3],
+            'big-o': [],
+        }
+        report = _renderAnalysisReport(
+            'Quiz 1 Check-in', transcripts, ['big-o', 'graphs', 'recursion'],
+            tag_to_indices, '- **Confusion**: ...', 5, 2,
+        )
+        # 'recursion' appears before 'graphs' (3 > 2 students); 'big-o' is reported as unmentioned.
+        assert report.index('| recursion |') < report.index('| graphs |')
+        assert 'Tags not referenced by anyone' in report
+        assert 'big-o' in report.split('Tags not referenced by anyone')[1]
+        # Roster section lists each student with their 1-based index.
+        assert '\n1. Alice' in report
+        assert '\n3. Carol' in report
+        # Coverage line surfaces the total/empty counts.
+        assert '3 transcripts analyzed' in report
+        assert '2 empty' in report
+
+
+class TestRecordingAnalysisLLM:
+    """Tests for the recording-analysis prompt builders and parsers in canvigator_llm."""
+
+    def test_classify_response_filters_to_valid_tags(self):
+        """_parse_classify_response only keeps tags that appear in the valid list."""
+        from canvigator_llm import _parse_classify_response
+        valid = ['graphs', 'recursion', 'hash tables']
+        assert _parse_classify_response('graphs, recursion', valid) == ['graphs', 'recursion']
+        # Invented tag is dropped; valid tags are preserved.
+        assert _parse_classify_response('graphs, dynamic programming', valid) == ['graphs']
+        # Case-insensitive match canonicalizes back to the valid form.
+        assert _parse_classify_response('Graphs, RECURSION', valid) == ['graphs', 'recursion']
+
+    def test_classify_response_handles_none(self):
+        """A 'none' response yields an empty list."""
+        from canvigator_llm import _parse_classify_response
+        assert _parse_classify_response('none', ['graphs']) == []
+        assert _parse_classify_response('  None.  ', ['graphs']) == []
+        assert _parse_classify_response('', ['graphs']) == []
+
+    def test_classify_response_dedupes(self):
+        """Duplicate tags in the response are emitted once."""
+        from canvigator_llm import _parse_classify_response
+        assert _parse_classify_response('graphs, graphs, GRAPHS', ['graphs']) == ['graphs']
+
+    def test_build_classify_prompt_includes_tags_and_transcript(self):
+        """The classify prompt embeds both the tag list and the transcript verbatim."""
+        from canvigator_llm import _build_classify_recording_prompt
+        prompt = _build_classify_recording_prompt('I struggled with graphs', ['graphs', 'recursion'])
+        assert 'graphs, recursion' in prompt
+        assert 'I struggled with graphs' in prompt
+
+    def test_build_themes_prompt_numbers_students(self):
+        """The themes prompt labels each transcript with a 1-based 'Student N:' index."""
+        from canvigator_llm import _build_themes_prompt
+        prompt = _build_themes_prompt(['first', 'second'], ['graphs'])
+        assert 'Student 1: first' in prompt
+        assert 'Student 2: second' in prompt
+        assert 'graphs' in prompt

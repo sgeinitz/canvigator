@@ -22,6 +22,7 @@ task_groups = [
     ('Media Recording Check-Ins', [
         ('create-media-recording-assignment', 'Create a Canvas assignment that accepts only media_recording submissions'),
         ('get-media-recordings', 'Fetch + transcribe student audio submissions; review and grade each interactively (or use --auto-grade)'),
+        ('analyze-media-recordings', 'Analyze transcripts: tag-grounded counts + LLM-extracted themes (requires get-media-recordings + a quiz tags CSV)'),
     ]),
     ('Miscellaneous tasks', [
         ('create-quiz', 'Create an unpublished placeholder quiz on Canvas'),
@@ -64,7 +65,7 @@ def print_help():
 
 
 def _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag):
-    """Dispatch the two media-recording-assignment tasks."""
+    """Dispatch the media-recording-assignment tasks."""
     import canvigator_assignment as ca
     if task == 'create-media-recording-assignment':
         ca.createMediaRecordingAssignment(course)
@@ -72,7 +73,10 @@ def _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_
     assignment_choice = ca._selectMediaRecordingAssignment(course)
     print(f"\nSelected assignment: {assignment_choice.name}")
     cassign = ca.CanvigatorAssignment(canvas, course, assignment_choice, canv_config)
-    cassign.getMediaRecordings(auto_grade=auto_grade_flag, dry_run=dry_run)
+    if task == 'analyze-media-recordings':
+        cassign.analyzeRecordings()
+    else:
+        cassign.getMediaRecordings(auto_grade=auto_grade_flag, dry_run=dry_run)
 
 
 def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
@@ -301,7 +305,7 @@ elif task == 'send-quiz-reminder' and all_quizzes_flag:
 elif task == 'create-quiz':
     course.createQuiz()
 
-elif task in ('create-media-recording-assignment', 'get-media-recordings'):
+elif task in ('create-media-recording-assignment', 'get-media-recordings', 'analyze-media-recordings'):
     _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag)
 
 elif task == 'get-gradebook':

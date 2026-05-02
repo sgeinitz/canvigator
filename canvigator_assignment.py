@@ -14,8 +14,15 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from canvigator_utils import today_str, selectFromList
-from canvigator_llm import transcribe_audio, _make_client, DEFAULT_AUDIO_MODEL
+from canvigator_utils import today_str, selectFromList, selectCSVFromList, find_latest_csv
+from canvigator_llm import (
+    transcribe_audio,
+    _make_client,
+    DEFAULT_AUDIO_MODEL,
+    DEFAULT_MODEL,
+    analyze_recording_tags,
+    extract_recording_themes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +191,79 @@ def createMediaRecordingAssignment(course):
     if hasattr(assignment, 'html_url'):
         print(f"  Canvas URL: {assignment.html_url}")
     logger.info(f"Created media-recording assignment: '{assignment.name}' (id={assignment.id})")
+
+
+def _collectUniqueTags(keywords_series):
+    """Collect a sorted, deduped list of tags from a pandas ``keywords`` column.
+
+    Each cell in ``keywords_series`` is a comma-separated string (or NaN).
+    Tags are lowercased and stripped; duplicates across rows are dropped.
+    """
+    seen = set()
+    tags = []
+    for raw in keywords_series.dropna():
+        for piece in str(raw).split(','):
+            t = piece.strip().lower()
+            if t and t not in seen:
+                seen.add(t)
+                tags.append(t)
+    tags.sort()
+    return tags
+
+
+def _renderAnalysisReport(assignment_name, transcripts_with_names, all_tags, tag_to_indices, themes_md, n_total, n_empty):
+    """Render the recording-analysis Markdown report.
+
+    ``transcripts_with_names`` is a list of (student_name, transcript) tuples for
+    students whose transcripts were non-empty (1-based indices in the report
+    correspond to position in this list). ``tag_to_indices`` maps each tag to a
+    list of 1-based indices into that same list. ``themes_md`` is the LLM's
+    Markdown bullet output.
+    """
+    lines = []
+    lines.append(f"# Media Recording Analysis — {assignment_name}")
+    lines.append("")
+    lines.append(f"_Generated {today_str()} ({len(transcripts_with_names)} transcripts analyzed; "
+                 f"{n_empty} empty / {n_total} total recordings.)_")
+    lines.append("")
+
+    lines.append("## Tag-grounded analysis")
+    lines.append("")
+    lines.append("How often each quiz topic was discussed across the cohort, "
+                 "ranked by number of students who mentioned it (LLM-classified, "
+                 "matched against quiz tags rather than raw substring search).")
+    lines.append("")
+    ranked = sorted(tag_to_indices.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    nonzero = [(t, idxs) for t, idxs in ranked if idxs]
+    if nonzero:
+        lines.append("| Tag | Students | Names |")
+        lines.append("|---|---:|---|")
+        for tag, idxs in nonzero:
+            names = ", ".join(transcripts_with_names[i - 1][0] for i in idxs)
+            lines.append(f"| {tag} | {len(idxs)} | {names} |")
+    else:
+        lines.append("_(no quiz tags were referenced in any transcript)_")
+    lines.append("")
+    unmentioned = [t for t, idxs in ranked if not idxs]
+    if unmentioned:
+        lines.append(f"_Tags not referenced by anyone ({len(unmentioned)}): "
+                     f"{', '.join(unmentioned)}_")
+        lines.append("")
+
+    lines.append("## LLM-identified themes")
+    lines.append("")
+    lines.append(themes_md or "_(no themes extracted)_")
+    lines.append("")
+
+    lines.append("## Roster")
+    lines.append("")
+    lines.append("Index → student (for resolving the indices in the themes section above).")
+    lines.append("")
+    for i, (name, _t) in enumerate(transcripts_with_names, start=1):
+        lines.append(f"{i}. {name}")
+    lines.append("")
+    lines.append(f"_(Tag list considered: {', '.join(all_tags) if all_tags else '—'})_")
+    return "\n".join(lines)
 
 
 class CanvigatorAssignment:
@@ -364,3 +444,83 @@ class CanvigatorAssignment:
             f"getMediaRecordings: wrote {len(df)} rows to {csv_path} "
             f"(auto_grade={auto_grade}, dry_run={dry_run}, n_graded={n_graded})"
         )
+
+    def analyzeRecordings(self):
+        """Analyze the latest recordings CSV against quiz tags and LLM-extracted themes.
+
+        Loads the most recent ``assignment<id>_recordings_*.csv``, prompts the
+        instructor to pick a ``*_questions_w_tags_*.csv`` from the same course
+        directory, runs a per-transcript classification (gemma4:31b, local) to
+        find which quiz tags each student is actually discussing, then a single
+        cohort-level theme-extraction call. Renders both into one Markdown report.
+        """
+        recordings_csv = find_latest_csv(self.config.data_path, f"{self.assignment_prefix}recordings_")
+        if recordings_csv is None:
+            raise FileNotFoundError(
+                f"No '{self.assignment_prefix}recordings_*.csv' found in {self.config.data_path}. "
+                "Run 'get-media-recordings' first."
+            )
+        print(f"\nUsing recordings file: {recordings_csv.name}")
+
+        tags_csv = selectCSVFromList(
+            self.config.data_path,
+            '_questions_w_tags_',
+            "\nSelect a quiz tags CSV (using index in '[ ]'): ",
+        )
+
+        rec_df = pd.read_csv(recordings_csv)
+        rec_df['transcript'] = rec_df['transcript'].fillna('').astype(str)
+        n_total = len(rec_df)
+        non_empty = rec_df[rec_df['transcript'].str.strip() != '']
+        n_empty = n_total - len(non_empty)
+        if non_empty.empty:
+            print("No non-empty transcripts to analyze.")
+            return
+        transcripts_with_names = [
+            (str(row.get('student_name') or f"id={row.get('student_id')}"), row['transcript'])
+            for _, row in non_empty.iterrows()
+        ]
+
+        tags_df = pd.read_csv(tags_csv)
+        if 'keywords' not in tags_df.columns:
+            raise ValueError(
+                f"'{tags_csv.name}' has no 'keywords' column — was it produced by 'get-quiz-questions --tag'?"
+            )
+        all_tags = _collectUniqueTags(tags_df['keywords'])
+        if not all_tags:
+            raise ValueError(f"No tags found in 'keywords' column of {tags_csv.name}.")
+
+        client = _make_client(cloud=False)
+        try:
+            client.list()
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not reach Ollama at its configured host ({os.environ.get('OLLAMA_HOST', 'http://localhost:11434')}). "
+                f"Is the Ollama server running? Original error: {e}"
+            ) from e
+        model = DEFAULT_MODEL
+
+        print(f"\nAnalyzing {len(transcripts_with_names)} transcript(s) against {len(all_tags)} unique tag(s)...")
+        transcripts_only = [t for _, t in transcripts_with_names]
+
+        def _progress(i, total):
+            print(f"  classified {i}/{total}", end="\r", flush=True)
+        tag_to_indices = analyze_recording_tags(transcripts_only, all_tags, client, model, progress=_progress)
+        print()  # newline after progress
+
+        print("Extracting cohort-level themes...")
+        themes_md = extract_recording_themes(transcripts_only, all_tags, client, model)
+
+        report = _renderAnalysisReport(
+            self.canvas_assignment.name,
+            transcripts_with_names,
+            all_tags,
+            tag_to_indices,
+            themes_md,
+            n_total,
+            n_empty,
+        )
+        out_path = self.config.data_path / f"{self.assignment_prefix}analysis_{today_str()}.md"
+        out_path.write_text(report)
+        print(f"\nSaved analysis to {out_path.name}")
+        logger.info(f"analyzeRecordings: wrote report to {out_path}")
