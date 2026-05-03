@@ -1,10 +1,12 @@
 """Tests for canvigator utility functions and core algorithms."""
 import hashlib
+import subprocess
 import pytest
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +653,19 @@ class TestStripHtml:
         from canvigator_llm import _strip_html
         assert _strip_html("a    b   c") == "a b c"
 
+    def test_handles_nan_and_other_non_strings(self):
+        """Non-string inputs (NaN, ints, lists) yield empty string instead of crashing.
+
+        pd.read_csv returns NaN (a float) for empty cells; bool(NaN) is True so
+        the historical `if not text` check let NaN through to the regex, which
+        crashed with 'expected string or bytes-like object, got float'.
+        """
+        from canvigator_llm import _strip_html
+        assert _strip_html(float('nan')) == ""
+        assert _strip_html(0) == ""
+        assert _strip_html(123) == ""
+        assert _strip_html([]) == ""
+
 
 class TestParseTags:
     """Tests for _parse_tags response parser."""
@@ -920,6 +935,60 @@ class TestBuildOpenEndedPrompt:
         from canvigator_llm import _build_open_ended_prompt
         result = _build_open_ended_prompt("", "", None, "explain")
         assert "Oral explanation question" in result
+
+
+class TestGenerateOpenEndedQuestionsRecovery:
+    """generate_open_ended_questions must survive a per-row LLM failure with partial output."""
+
+    def test_one_failing_row_does_not_kill_the_loop(self):
+        """A row that raises mid-pipeline yields placeholder rows; other rows succeed normally."""
+        import canvigator_llm
+        rows = [
+            {'question_id': 1, 'question_name': 'Q1', 'question_text': '<p>Q1</p>', 'keywords': 'a', 'position': 1, 'answers': '[]'},
+            {'question_id': 2, 'question_name': float('nan'), 'question_text': float('nan'), 'keywords': 'b', 'position': 2, 'answers': '[]'},
+            {'question_id': 3, 'question_name': 'Q3', 'question_text': '<p>Q3</p>', 'keywords': 'c', 'position': 3, 'answers': '[]'},
+        ]
+
+        def fake_classify(row, _client, _model):
+            # Simulate a transient API failure on the bad row.
+            if row.get('question_id') == 2:
+                raise RuntimeError("simulated API error on question 2")
+            return 'explain'
+
+        def fake_candidates(_row, _client, _model, _mode, n=3):
+            return [f'candidate {i + 1}' for i in range(n)]
+
+        def fake_guide(_row, _client, _model, _mode, _cand):
+            return 'guide'
+
+        def fake_rubric(_row, _client, _model, _mode, _cand):
+            return canvigator_llm._empty_rubric('explain')
+
+        def fake_exemplars(_row, _client, _model, _mode, _cand, _rub):
+            return dict(canvigator_llm._EMPTY_EXEMPLARS)
+
+        with patch.object(canvigator_llm, '_make_client', return_value=MagicMock()), \
+             patch.object(canvigator_llm, 'classify_question_mode', side_effect=fake_classify), \
+             patch.object(canvigator_llm, 'generate_open_ended_candidates', side_effect=fake_candidates), \
+             patch.object(canvigator_llm, 'generate_assessment_guide', side_effect=fake_guide), \
+             patch.object(canvigator_llm, 'generate_structured_rubric', side_effect=fake_rubric), \
+             patch.object(canvigator_llm, 'generate_exemplars', side_effect=fake_exemplars):
+            results = canvigator_llm.generate_open_ended_questions(rows, n=3)
+
+        # 3 questions × 3 candidates = 9 rows total, regardless of failure.
+        assert len(results) == 9
+        # Q1 and Q3 produce real candidates.
+        for qid in (1, 3):
+            qrows = [r for r in results if r['question_id'] == qid]
+            assert all(r['open_ended_question'].startswith('candidate') for r in qrows)
+            assert all(r['question_mode'] == 'explain' for r in qrows)
+        # Q2 produces 3 placeholder rows: empty open_ended_question, empty mode.
+        q2_rows = [r for r in results if r['question_id'] == 2]
+        assert len(q2_rows) == 3
+        assert all(r['open_ended_question'] == '' for r in q2_rows)
+        assert all(r['question_mode'] == '' for r in q2_rows)
+        # NaN question_text is coerced to empty string by _strip_html, not a crash.
+        assert all(r['original_question_text'] == '' for r in q2_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -2414,3 +2483,291 @@ class TestSendAllQuizRemindersFiltering:
         assert any("Skipping 'Quiz Z'" in r.message for r in caplog.records)
         # No reminder-worthy state, so we hit the "all caught up" branch
         assert 'All students are caught up' in captured
+
+
+# ---------------------------------------------------------------------------
+# canvigator_assignment tests
+# ---------------------------------------------------------------------------
+
+class TestCanvigatorAssignment:
+    """Tests for canvigator_assignment helpers and class methods."""
+
+    def _make_assignment_obj(self, points_possible=1):
+        """Build a minimal stand-in for a Canvas Assignment object."""
+        return SimpleNamespace(id=999, points_possible=points_possible)
+
+    def _make_instance(self, points_possible=1):
+        """Build a CanvigatorAssignment with mocked dependencies."""
+        from canvigator_assignment import CanvigatorAssignment
+        return CanvigatorAssignment(
+            canvas=MagicMock(),
+            course=MagicMock(),
+            canvas_assignment=self._make_assignment_obj(points_possible),
+            config=MagicMock(),
+        )
+
+    def test_is_media_recording_assignment_filter(self):
+        """Filter passes only assignments whose submission_types is exactly ['media_recording']."""
+        from canvigator_assignment import _isMediaRecordingAssignment
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=['media_recording'])) is True
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=['online_text_entry'])) is False
+        # Mixed types must NOT match — we want recording-only assignments.
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=['media_recording', 'online_upload'])) is False
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=None)) is False
+        assert _isMediaRecordingAssignment(SimpleNamespace(submission_types=[])) is False
+
+    def test_extract_audio_url_from_media_comment(self):
+        """media_comment with an audio media_type yields a .m4a extension."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(media_comment={'url': 'https://canvas/audio.m4a', 'media_type': 'audio'})
+        url, ext = ca._extractAudioUrl(sub)
+        assert url == 'https://canvas/audio.m4a'
+        assert ext == '.m4a'
+
+    def test_extract_audio_url_video_media_comment_uses_mp4(self):
+        """A video media_comment yields an .mp4 extension instead of .m4a."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(media_comment={'url': 'https://canvas/v.mp4', 'media_type': 'video'})
+        url, ext = ca._extractAudioUrl(sub)
+        assert url == 'https://canvas/v.mp4'
+        assert ext == '.mp4'
+
+    def test_extract_audio_url_from_attachment_fallback(self):
+        """When no media_comment is present, audio attachments are picked up by mime type."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(
+            media_comment=None,
+            attachments=[{
+                'url': 'https://canvas/file.webm',
+                'filename': 'recording.webm',
+                'content-type': 'audio/webm',
+            }],
+        )
+        url, ext = ca._extractAudioUrl(sub)
+        assert url == 'https://canvas/file.webm'
+        assert ext == '.webm'
+
+    def test_extract_audio_url_returns_none_when_empty(self):
+        """A submission with neither media_comment nor attachments returns (None, None)."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(media_comment=None, attachments=[])
+        assert ca._extractAudioUrl(sub) == (None, None)
+
+    def test_extract_audio_url_skips_non_audio_attachments(self):
+        """Non-audio attachments (e.g. PDFs) are ignored."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(
+            media_comment=None,
+            attachments=[
+                {'url': 'https://canvas/notes.pdf', 'filename': 'notes.pdf', 'content-type': 'application/pdf'},
+            ],
+        )
+        assert ca._extractAudioUrl(sub) == (None, None)
+
+    def test_build_recording_row_shape(self):
+        """_buildRecordingRow returns a dict with all expected columns populated; grade defaults to empty."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(user_id=42, id=7, submitted_at='2026-05-01T12:00:00Z')
+        row = ca._buildRecordingRow(sub, 'Alice', 'data/course/media_recordings/assignment999/42_7.wav', 'hello')
+        assert row['student_id'] == 42
+        assert row['student_name'] == 'Alice'
+        assert row['submission_id'] == 7
+        assert row['submitted_at'] == '2026-05-01T12:00:00Z'
+        assert row['audio_path'] == 'data/course/media_recordings/assignment999/42_7.wav'
+        assert row['transcript'] == 'hello'
+        assert 'transcribed_at' in row and row['transcribed_at']
+        # Default grade=None yields empty grade and graded_at columns.
+        assert row['grade'] == ''
+        assert row['graded_at'] == ''
+
+    def test_build_recording_row_records_grade_and_graded_at(self):
+        """When a grade is passed, _buildRecordingRow records the value and a graded_at timestamp."""
+        ca = self._make_instance()
+        sub = SimpleNamespace(user_id=42, id=7, submitted_at='2026-05-01T12:00:00Z')
+        row = ca._buildRecordingRow(sub, 'Alice', 'audio.wav', 'hello', grade=0.5)
+        assert row['grade'] == 0.5
+        assert row['graded_at']  # non-empty ISO timestamp
+
+    def test_post_grade_dry_run_does_not_call_edit(self):
+        """In dry-run mode, _postGrade skips Submission.edit and returns False."""
+        ca = self._make_instance(points_possible=3)
+        sub = MagicMock()
+        sub.user_id = 42
+        result = ca._postGrade(sub, 3, dry_run=True)
+        assert result is False
+        sub.edit.assert_not_called()
+
+    def test_post_grade_real_call_uses_points_possible(self):
+        """A real grade post calls Submission.edit with posted_grade=points_possible."""
+        ca = self._make_instance(points_possible=5)
+        sub = MagicMock()
+        sub.user_id = 42
+        result = ca._postGrade(sub, 5, dry_run=False)
+        assert result is True
+        sub.edit.assert_called_once_with(submission={'posted_grade': 5})
+
+    def test_post_grade_logs_warning_on_failure(self, caplog):
+        """When Submission.edit raises, _postGrade logs a warning and returns False."""
+        import logging as _logging
+        ca = self._make_instance(points_possible=2)
+        sub = MagicMock()
+        sub.user_id = 42
+        sub.edit.side_effect = RuntimeError("Canvas down")
+        with caplog.at_level(_logging.WARNING, logger='canvigator_assignment'):
+            result = ca._postGrade(sub, 2, dry_run=False)
+        assert result is False
+        assert any('Grade post failed' in r.message for r in caplog.records)
+
+    def test_fetch_audio_invokes_ffmpeg_with_url_and_whitelist(self):
+        """_fetchAudio passes the URL directly to ffmpeg with an https-capable protocol whitelist."""
+        from canvigator_assignment import _fetchAudio
+        audio = Path('/tmp/data/course/media_recordings/assignment999/42_7.wav')
+        with patch('canvigator_assignment.subprocess.run') as mock_run:
+            mock_run.return_value = SimpleNamespace(returncode=0)
+            result = _fetchAudio('https://canvas/manifest.mpd', audio)
+        assert result is True
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == 'ffmpeg'
+        assert '-protocol_whitelist' in cmd
+        whitelist = cmd[cmd.index('-protocol_whitelist') + 1]
+        # https must be allowed so ffmpeg can follow DASH/HLS fragment URLs.
+        assert 'https' in whitelist
+        # Input URL is passed directly, not a local file.
+        assert 'https://canvas/manifest.mpd' in cmd
+        # Output is audio-only PCM WAV at 16 kHz mono — the format Gemma's
+        # audio path accepts. Anything else (e.g. AAC m4a) gets rejected as
+        # "image: unknown format" by Ollama's media-type detector.
+        assert '-vn' in cmd
+        assert 'pcm_s16le' in cmd
+        assert cmd[cmd.index('-ar') + 1] == '16000'
+        assert cmd[cmd.index('-ac') + 1] == '1'
+        assert str(audio) in cmd
+
+    def test_fetch_audio_handles_missing_ffmpeg(self, caplog):
+        """When ffmpeg is not on PATH, _fetchAudio returns False and logs a warning."""
+        import logging as _logging
+        from canvigator_assignment import _fetchAudio
+        audio = Path('/tmp/missing/v.m4a')
+        with patch('canvigator_assignment.subprocess.run', side_effect=FileNotFoundError()):
+            with caplog.at_level(_logging.WARNING, logger='canvigator_assignment'):
+                result = _fetchAudio('https://x/y', audio)
+        assert result is False
+        assert any('ffmpeg not found' in r.message for r in caplog.records)
+
+    def test_fetch_audio_handles_ffmpeg_failure(self, caplog):
+        """When ffmpeg exits non-zero, _fetchAudio returns False and logs a warning."""
+        import logging as _logging
+        from canvigator_assignment import _fetchAudio
+        audio = Path('/tmp/v.m4a')
+        err = subprocess.CalledProcessError(1, 'ffmpeg', stderr=b'bad input')
+        with patch('canvigator_assignment.subprocess.run', side_effect=err):
+            with caplog.at_level(_logging.WARNING, logger='canvigator_assignment'):
+                result = _fetchAudio('https://x/y', audio)
+        assert result is False
+        assert any('ffmpeg failed' in r.message for r in caplog.records)
+
+    def test_prompt_for_grade_returns_full_credit_on_empty(self, monkeypatch):
+        """Empty input on the prompt awards points_possible (full credit)."""
+        from canvigator_assignment import _promptForGrade
+        monkeypatch.setattr('builtins.input', lambda _prompt='': '')
+        result = _promptForGrade('Alice', 'transcript text', 'audio.wav', points_possible=1)
+        assert result == 1.0
+
+    def test_prompt_for_grade_returns_none_on_skip(self, monkeypatch):
+        """'s', 'skip' (case-insensitive) record no grade for the student."""
+        from canvigator_assignment import _promptForGrade
+        for raw in ('s', 'S', 'skip', 'SKIP'):
+            monkeypatch.setattr('builtins.input', lambda _prompt='', _raw=raw: _raw)
+            assert _promptForGrade('Alice', 'transcript', 'audio.wav', points_possible=1) is None
+
+    def test_prompt_for_grade_returns_numeric_value(self, monkeypatch):
+        """A numeric value is returned as a float, even when smaller or larger than points_possible."""
+        from canvigator_assignment import _promptForGrade
+        monkeypatch.setattr('builtins.input', lambda _prompt='': '0.5')
+        assert _promptForGrade('Alice', 't', 'a.wav', points_possible=1) == 0.5
+        monkeypatch.setattr('builtins.input', lambda _prompt='': '2')
+        assert _promptForGrade('Alice', 't', 'a.wav', points_possible=1) == 2.0
+
+    def test_prompt_for_grade_reprompts_on_invalid(self, monkeypatch):
+        """Negative and non-numeric input re-prompt; the eventual valid input is returned."""
+        from canvigator_assignment import _promptForGrade
+        inputs = iter(['-1', 'oops', '1'])
+        monkeypatch.setattr('builtins.input', lambda _prompt='': next(inputs))
+        assert _promptForGrade('Alice', 't', 'a.wav', points_possible=1) == 1.0
+
+    def test_collect_unique_tags_lowercases_and_dedupes(self):
+        """_collectUniqueTags collapses duplicates across rows, lowercases, and sorts."""
+        from canvigator_assignment import _collectUniqueTags
+        series = pd.Series([
+            'graphs, recursion, hash tables',
+            'Hash Tables, big-o',
+            'graphs',
+            None,
+            '   ',
+        ])
+        assert _collectUniqueTags(series) == ['big-o', 'graphs', 'hash tables', 'recursion']
+
+    def test_render_analysis_report_orders_tags_by_count(self):
+        """Tag-grounded analysis section ranks tags by descending student count."""
+        from canvigator_assignment import _renderAnalysisReport
+        transcripts = [('Alice', 'a'), ('Bob', 'b'), ('Carol', 'c')]
+        tag_to_indices = {
+            'graphs': [1, 2],
+            'recursion': [1, 2, 3],
+            'big-o': [],
+        }
+        report = _renderAnalysisReport(
+            'Quiz 1 Check-in', transcripts, ['big-o', 'graphs', 'recursion'],
+            tag_to_indices, '- **Confusion**: ...', 5, 2,
+        )
+        # 'recursion' appears before 'graphs' (3 > 2 students); 'big-o' is reported as unmentioned.
+        assert report.index('| recursion |') < report.index('| graphs |')
+        assert 'Tags not referenced by anyone' in report
+        assert 'big-o' in report.split('Tags not referenced by anyone')[1]
+        # Roster section lists each student with their 1-based index.
+        assert '\n1. Alice' in report
+        assert '\n3. Carol' in report
+        # Coverage line surfaces the total/empty counts.
+        assert '3 transcripts analyzed' in report
+        assert '2 empty' in report
+
+
+class TestRecordingAnalysisLLM:
+    """Tests for the recording-analysis prompt builders and parsers in canvigator_llm."""
+
+    def test_classify_response_filters_to_valid_tags(self):
+        """_parse_classify_response only keeps tags that appear in the valid list."""
+        from canvigator_llm import _parse_classify_response
+        valid = ['graphs', 'recursion', 'hash tables']
+        assert _parse_classify_response('graphs, recursion', valid) == ['graphs', 'recursion']
+        # Invented tag is dropped; valid tags are preserved.
+        assert _parse_classify_response('graphs, dynamic programming', valid) == ['graphs']
+        # Case-insensitive match canonicalizes back to the valid form.
+        assert _parse_classify_response('Graphs, RECURSION', valid) == ['graphs', 'recursion']
+
+    def test_classify_response_handles_none(self):
+        """A 'none' response yields an empty list."""
+        from canvigator_llm import _parse_classify_response
+        assert _parse_classify_response('none', ['graphs']) == []
+        assert _parse_classify_response('  None.  ', ['graphs']) == []
+        assert _parse_classify_response('', ['graphs']) == []
+
+    def test_classify_response_dedupes(self):
+        """Duplicate tags in the response are emitted once."""
+        from canvigator_llm import _parse_classify_response
+        assert _parse_classify_response('graphs, graphs, GRAPHS', ['graphs']) == ['graphs']
+
+    def test_build_classify_prompt_includes_tags_and_transcript(self):
+        """The classify prompt embeds both the tag list and the transcript verbatim."""
+        from canvigator_llm import _build_classify_recording_prompt
+        prompt = _build_classify_recording_prompt('I struggled with graphs', ['graphs', 'recursion'])
+        assert 'graphs, recursion' in prompt
+        assert 'I struggled with graphs' in prompt
+
+    def test_build_themes_prompt_numbers_students(self):
+        """The themes prompt labels each transcript with a 1-based 'Student N:' index."""
+        from canvigator_llm import _build_themes_prompt
+        prompt = _build_themes_prompt(['first', 'second'], ['graphs'])
+        assert 'Student 1: first' in prompt
+        assert 'Student 2: second' in prompt
+        assert 'graphs' in prompt

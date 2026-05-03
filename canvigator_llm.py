@@ -214,6 +214,11 @@ _ASSESSMENT_GUIDE_SYSTEM_PROMPT = (
 
 def _strip_html(text):
     """Reduce Canvas HTML question text to plain text suitable for prompting."""
+    # pd.read_csv returns NaN (a float) for empty cells — bool(NaN) is True so the
+    # `not text` check below isn't sufficient on its own. Coerce non-strings to ""
+    # up front so callers can pass row.get('question_text') without checking.
+    if not isinstance(text, str):
+        return ""
     if not text:
         return ""
 
@@ -1339,32 +1344,47 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
     frame = 0
     for i, row in enumerate(rows, start=1):
         label = row.get('question_name') or row.get('question_id')
+        if not isinstance(label, str):
+            label = str(label) if label is not None else '?'
         if spin_fn:
             spin_fn(frame, f"[{i}/{total}] {label} — classifying")
             frame += 1
         else:
             print(f"  [{i}/{total}] {label} — classifying...", end="", flush=True)
-        mode = classify_question_mode(row, client, model)
-        if spin_fn:
-            spin_fn(frame, f"[{i}/{total}] {label} — {mode} — generating {n} candidates")
-            frame += 1
-        else:
-            print(f" {mode} — generating {n} candidates...", end="", flush=True)
-        candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
-        non_empty = len([c for c in candidates if c])
-        if spin_fn:
-            spin_fn(frame, f"[{i}/{total}] {label} — writing {non_empty} guide(s) + rubric(s) + exemplars")
-            frame += 1
-        else:
-            print(f" writing {non_empty} guide(s) + rubric(s) + exemplars...", end="", flush=True)
-        guides = [generate_assessment_guide(row, client, model, mode, cand) for cand in candidates]
-        rubrics = [generate_structured_rubric(row, client, model, mode, cand) for cand in candidates]
-        exemplars = [generate_exemplars(row, client, model, mode, cand, rub) for cand, rub in zip(candidates, rubrics)]
-        if not spin_fn:
-            print(" done")
-
-        if not candidates:
-            logger.warning(f"No candidates generated for question {row.get('question_id')}")
+        # Wrap the per-question LLM pipeline so any single failure (NaN inputs,
+        # transient API errors, etc.) doesn't kill the whole run — emit empty
+        # placeholder rows for the failed question and move on. The padding logic
+        # below handles missing candidates/guides/rubrics/exemplars uniformly.
+        try:
+            mode = classify_question_mode(row, client, model)
+            if spin_fn:
+                spin_fn(frame, f"[{i}/{total}] {label} — {mode} — generating {n} candidates")
+                frame += 1
+            else:
+                print(f" {mode} — generating {n} candidates...", end="", flush=True)
+            candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
+            non_empty = len([c for c in candidates if c])
+            if spin_fn:
+                spin_fn(frame, f"[{i}/{total}] {label} — writing {non_empty} guide(s) + rubric(s) + exemplars")
+                frame += 1
+            else:
+                print(f" writing {non_empty} guide(s) + rubric(s) + exemplars...", end="", flush=True)
+            guides = [generate_assessment_guide(row, client, model, mode, cand) for cand in candidates]
+            rubrics = [generate_structured_rubric(row, client, model, mode, cand) for cand in candidates]
+            exemplars = [generate_exemplars(row, client, model, mode, cand, rub) for cand, rub in zip(candidates, rubrics)]
+            if not spin_fn:
+                print(" done")
+            if not candidates:
+                logger.warning(f"No candidates generated for question {row.get('question_id')}")
+        except Exception as e:
+            logger.warning(f"Question {row.get('question_id')} failed and was skipped: {e}")
+            if not spin_fn:
+                print(f" SKIPPED ({e})")
+            mode = ''
+            candidates = []
+            guides = []
+            rubrics = []
+            exemplars = []
 
         # Always emit exactly n rows per question so every group has a predictable shape.
         padded_candidates = (candidates + [''] * n)[:n]
@@ -1394,3 +1414,144 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
     else:
         print("Generation complete.")
     return results
+
+
+# -----------------------------------------------------------------------------
+# Recording analysis (used by analyze-media-recordings)
+# -----------------------------------------------------------------------------
+
+_RECORDING_CLASSIFY_SYSTEM_PROMPT = (
+    "You are an instructor reviewing a student's brief check-in recording. The student "
+    "was asked to discuss a topic from a recent quiz. Their speech is often informal, "
+    "rambling, or incomplete. Your job: identify which of the provided quiz topics the "
+    "student is actually discussing.\n\n"
+    "RULES:\n"
+    "- Choose ONLY from the provided list of topics. Do not invent new tags.\n"
+    "- Match on meaning, not exact words — a student saying 'I got confused on the "
+    "linked list one' counts as discussing 'linked lists'.\n"
+    "- Return matched topics as a comma-separated list on a single line, lowercase.\n"
+    "- If the student is clearly off-topic or the transcript is too vague to map to "
+    "any topic, respond with the single word 'none'.\n"
+    "- Do not include explanations, preamble, or numbering — just the comma-separated "
+    "tags or 'none'."
+)
+
+_RECORDING_THEMES_SYSTEM_PROMPT = (
+    "You are an instructor analyzing a small set of student check-in recordings to "
+    "find recurring themes. The students were asked to discuss a topic from a recent "
+    "quiz; transcripts are often informal and meandering. The quiz topics are provided "
+    "as context — themes you identify may align with those topics, or may surface "
+    "concerns that don't map to any single topic (study habits, confidence, pacing, "
+    "specific examples that confused them, etc.).\n\n"
+    "Identify 3-5 distinct themes that appear across multiple students. For each theme:\n"
+    "- A short title (3-6 words, in bold).\n"
+    "- One sentence describing what students are saying.\n"
+    "- A list of student indices (1-based) who raised this theme.\n\n"
+    "Format your response as Markdown bullets. Do not include preamble, headers, or a "
+    "summary — just the themed bullets, one per theme. If fewer than 3 distinct themes "
+    "are evident, return only what is genuinely present."
+)
+
+
+def _build_classify_recording_prompt(transcript, tags):
+    """Build the user-side prompt for classifying a single transcript against a tag list."""
+    parts = []
+    parts.append(f"Quiz topics (choose only from this list): {', '.join(tags)}")
+    parts.append(f"Student transcript: {transcript}")
+    parts.append("Topics this student is discussing (comma-separated, or 'none'):")
+    return "\n".join(parts)
+
+
+def _parse_classify_response(response, valid_tags):
+    """Parse a classify response into a list of tags drawn from ``valid_tags``.
+
+    Tags are matched case-insensitively against ``valid_tags`` so the LLM can't
+    smuggle in a tag that wasn't on the list. ``'none'`` returns an empty list.
+    """
+    if not response:
+        return []
+    line = response.strip().splitlines()[0].strip().strip(".").lower()
+    if not line or line == "none":
+        return []
+    valid_lower = {t.lower(): t for t in valid_tags}
+    out = []
+    seen = set()
+    for raw in line.split(","):
+        candidate = raw.strip().strip("\"'")
+        if not candidate or candidate == "none":
+            continue
+        canonical = valid_lower.get(candidate)
+        if canonical and canonical not in seen:
+            seen.add(canonical)
+            out.append(canonical)
+    return out
+
+
+def _build_themes_prompt(transcripts, tags):
+    """Build the user-side prompt for cohort-level theme extraction.
+
+    ``transcripts`` is a list of strings (already filtered to non-empty); the
+    1-based index of each appears in the prompt so the LLM can refer to students
+    as ``Student 1``, ``Student 2``, etc.
+    """
+    parts = [f"Quiz topics (for context): {', '.join(tags)}", "", "Transcripts:"]
+    for i, t in enumerate(transcripts, start=1):
+        parts.append(f"Student {i}: {t}")
+    parts.append("")
+    parts.append("Recurring themes across these students (Markdown bullets):")
+    return "\n".join(parts)
+
+
+def analyze_recording_tags(transcripts, tags, client, model, progress=None):
+    """Run a per-transcript LLM classification against ``tags``.
+
+    ``transcripts`` is a list of strings. Returns a dict mapping each tag (the
+    canonical form from the input ``tags`` list) to a list of 1-based transcript
+    indices that mention it. Tags that no transcript mentions are still included
+    with an empty list, so the caller can render a complete table.
+
+    ``progress`` is an optional callable invoked as ``progress(i, total)`` after
+    each transcript so the caller can update a spinner.
+    """
+    tag_to_indices = {t: [] for t in tags}
+    total = len(transcripts)
+    for i, transcript in enumerate(transcripts, start=1):
+        prompt = _build_classify_recording_prompt(transcript, tags)
+        try:
+            resp = _chat_with_retry(
+                client,
+                model=model,
+                messages=[
+                    {"role": "system", "content": _RECORDING_CLASSIFY_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                options={"temperature": 0.1},
+            )
+            matched = _parse_classify_response(resp["message"]["content"], tags)
+        except Exception as e:
+            logger.warning(f"Recording classify failed for transcript {i}: {e}")
+            matched = []
+        for tag in matched:
+            tag_to_indices[tag].append(i)
+        if progress:
+            progress(i, total)
+    return tag_to_indices
+
+
+def extract_recording_themes(transcripts, tags, client, model):
+    """Single-call cohort-level theme extraction. Returns a Markdown bullet list as a string."""
+    prompt = _build_themes_prompt(transcripts, tags)
+    try:
+        resp = _chat_with_retry(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": _RECORDING_THEMES_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.3},
+        )
+        return resp["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"Recording themes extraction failed: {e}")
+        return f"_(theme extraction failed: {e})_"
