@@ -1555,3 +1555,166 @@ def extract_recording_themes(transcripts, tags, client, model):
     except Exception as e:
         logger.warning(f"Recording themes extraction failed: {e}")
         return f"_(theme extraction failed: {e})_"
+
+
+# Auto-gradable Canvas question types we let the LLM emit. Open-ended types
+# (essay_question, file_upload_question, short_answer_question, etc.) are
+# excluded since they require manual grading.
+QUIZ_QUESTION_TYPES = (
+    "calculated_question",
+    "fill_in_multiple_blanks_question",
+    "matching_question",
+    "multiple_answers_question",
+    "multiple_choice_question",
+    "multiple_dropdowns_question",
+    "true_false_question",
+)
+
+_QUIZ_QUESTION_SYSTEM_PROMPT = (
+    "You are an expert university instructor drafting auto-gradable Canvas quiz questions. "
+    "Given an instructor's natural-language prompt, produce ONE complete quiz question as a "
+    "single JSON object — no prose, no markdown fences, no commentary.\n\n"
+    "Pick the question_type that best fits the prompt from this exact list:\n"
+    "  - multiple_choice_question  (one correct answer among 4)\n"
+    "  - multiple_answers_question (two or more correct answers among 4-6)\n"
+    "  - true_false_question       (single correct answer: True or False)\n"
+    "  - fill_in_multiple_blanks_question  (question_text contains [blank_id] tokens)\n"
+    "  - multiple_dropdowns_question       (question_text contains [dropdown_id] tokens)\n"
+    "  - matching_question         (left/right pairs)\n"
+    "  - calculated_question       (numeric formula with variables)\n\n"
+    "JSON schema (only include fields relevant to the chosen type):\n"
+    "{\n"
+    "  \"question_type\": \"<one of the types above>\",\n"
+    "  \"question_name\": \"<short title>\",\n"
+    "  \"question_text\": \"<the question, as plain text or simple HTML>\",\n"
+    "  \"answers\": [ ... ]    # see per-type rules below\n"
+    "}\n\n"
+    "Per-type answers schema:\n"
+    "  multiple_choice_question / multiple_answers_question / true_false_question:\n"
+    "    [{\"answer_text\": \"...\", \"answer_weight\": 100|0}, ...]  "
+    "(weight 100 = correct, 0 = incorrect)\n"
+    "  fill_in_multiple_blanks_question:\n"
+    "    [{\"blank_id\": \"name\", \"answer_text\": \"...\", \"answer_weight\": 100}, ...] "
+    "and question_text MUST contain matching [name] tokens\n"
+    "  multiple_dropdowns_question:\n"
+    "    [{\"blank_id\": \"name\", \"answer_text\": \"...\", \"answer_weight\": 100|0}, ...] "
+    "and question_text MUST contain matching [name] tokens\n"
+    "  matching_question:\n"
+    "    [{\"answer_match_left\": \"...\", \"answer_match_right\": \"...\"}, ...] "
+    "and you may also include \"matching_answer_incorrect_matches\": "
+    "\"distractor1\\ndistractor2\" (newline-separated string)\n"
+    "  calculated_question:\n"
+    "    [] (empty list); also include \"variables\": [{\"name\": \"x\", \"min\": 1, \"max\": 10, "
+    "\"scale\": 0\"}, ...] and \"formulas\": [{\"formula\": \"x*2\"}], plus "
+    "\"formula_decimal_places\": 0\n\n"
+    "Rules:\n"
+    "  - Output ONLY the JSON object — no ```json fences, no leading/trailing text.\n"
+    "  - Do NOT include points_possible (the caller fixes points to 1).\n"
+    "  - Write content suitable for a college-level course.\n"
+    "  - Prefer correctness and completeness over polish — the instructor will refine in Canvas.\n"
+    "  - For multiple_choice_question, supply exactly 4 answers with exactly 1 weighted 100.\n"
+    "  - For multiple_answers_question, supply 4-6 answers with 2 or more weighted 100.\n"
+    "  - For true_false_question, supply exactly 2 answers (\"True\" weighted 100 and \"False\" "
+    "weighted 0, or vice-versa).\n"
+)
+
+
+def _build_quiz_question_prompt(user_seed):
+    """Wrap the instructor's natural-language seed into the user message."""
+    seed = (user_seed or "").strip()
+    return (
+        f"Instructor prompt: {seed}\n\n"
+        "Produce the JSON object now."
+    )
+
+
+def _parse_quiz_question(content):
+    """Parse the LLM's JSON-only response into a Canvas-shaped question dict, or None.
+
+    Tolerates accidental ```json fences and prose around the object. Validates
+    that question_type is in the allowlist and that question_text is non-empty.
+    Strips any points_possible the model emitted (the caller forces 1).
+    """
+    if not content:
+        return None
+
+    text = content.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```\s*$', '', text)
+    brace_start = text.find('{')
+    brace_end = text.rfind('}')
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        text = text[brace_start:brace_end + 1]
+
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        logger.warning(f"Quiz-question JSON parse failed; raw response starts with: {content[:200]!r}")
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    qtype = data.get("question_type")
+    if qtype not in QUIZ_QUESTION_TYPES:
+        logger.warning(f"Quiz-question rejected: unknown question_type {qtype!r}")
+        return None
+
+    qtext = data.get("question_text")
+    if not isinstance(qtext, str) or not qtext.strip():
+        logger.warning("Quiz-question rejected: missing or empty question_text")
+        return None
+
+    name = data.get("question_name")
+    if not isinstance(name, str) or not name.strip():
+        name = "Generated question"
+
+    answers = data.get("answers")
+    if answers is None:
+        answers = []
+    if not isinstance(answers, list):
+        logger.warning(f"Quiz-question rejected: answers is not a list ({type(answers).__name__})")
+        return None
+
+    out = dict(data)
+    out["question_type"] = qtype
+    out["question_name"] = name.strip()
+    out["question_text"] = qtext.strip()
+    out["answers"] = answers
+    out.pop("points_possible", None)
+    return out
+
+
+def generate_quiz_question(user_seed, client=None, model=None):
+    """Cloud-LLM call: turn an instructor's natural-language seed into a Canvas question dict.
+
+    Returns the validated dict (without points_possible/position — the caller
+    stamps those) or None if the model failed or produced an invalid payload.
+    """
+    if not user_seed or not user_seed.strip():
+        return None
+    try:
+        import ollama  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            "The 'ollama' package is required for question generation. Install with: pip install ollama"
+        ) from e
+
+    if client is None:
+        client = _make_client(cloud=True)
+    model = model or DEFAULT_TEXT_MODEL
+
+    prompt = _build_quiz_question_prompt(user_seed)
+    try:
+        resp = _chat_with_retry(
+            client,
+            model=model,
+            messages=[
+                {"role": "system", "content": _QUIZ_QUESTION_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            options={"temperature": 0.4},
+        )
+        return _parse_quiz_question(resp["message"]["content"])
+    except Exception as e:
+        logger.warning(f"LLM quiz-question generation failed: {e}")
+        return None

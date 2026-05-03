@@ -83,11 +83,11 @@ This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 
 ### Ollama setup (optional)
 
-Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) to tag questions, generate open-ended follow-ups, transcribe student audio, and assess student replies. You can skip this section if you will not be running any of these tasks (`get-quiz-questions --tag`, `generate-follow-up-questions`, `send-quiz-reminder`, `send-follow-up-question`, `assess-replies`).
+Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) to draft and tag questions, generate open-ended follow-ups, transcribe student audio, and assess student replies. You can skip this section if you will not be running any of these tasks (`create-quiz` with the `[g]enerate w/ LLM` option, `get-quiz-questions --tag`, `generate-follow-up-questions`, `send-quiz-reminder`, `send-follow-up-question`, `assess-replies`).
 
 Canvigator uses two kinds of models:
 
-1. **A cloud-hosted text model** (default `gemini-3-flash-preview`, set via `OLLAMA_TEXT_MODEL`) for instructor-side text generation — tagging quiz questions and generating open-ended questions. These tasks never see student data, so a larger cloud model is a good fit.
+1. **A cloud-hosted text model** (default `gemini-3-flash-preview`, set via `OLLAMA_TEXT_MODEL`) for instructor-side text generation — drafting quiz questions in `create-quiz`, tagging quiz questions, and generating open-ended follow-up questions. These tasks never see student data, so a larger cloud model is a good fit.
 2. **Local models** for tasks that process student input — `gemma4:31b` (default `OLLAMA_MODEL`) for assessing text/image replies, and `gemma4:e4b` (default `OLLAMA_AUDIO_MODEL`) for transcribing student audio. Keeping these local is deliberate: student submissions should not leave your machine.
 
 **To use the cloud text model:**
@@ -318,13 +318,39 @@ required format (columns: `name`, `id`, `present` where 1 = present).
 
 ---
 
-#### `create-quiz` — Create an unpublished placeholder quiz on Canvas
+#### `create-quiz` — Create an unpublished quiz on Canvas, with placeholder or LLM-generated questions
 
 Interactively creates a new unpublished quiz on Canvas. Prompts the user for a
-quiz title, then iteratively prompts for question descriptions. Each question is
-added as a multiple-choice placeholder with 1 point possible. The quiz is
-created with default settings: `quiz_type='assignment'`, `time_limit=30`,
-`one_question_at_a_time=True`, `cant_go_back=True`, `shuffle_answers=True`.
+quiz title, then for each question prompts:
+
+```
+QN — [p]laceholder, [g]enerate w/ LLM, [e]nd quiz:
+```
+
+- **`p`** (placeholder) — asks for a one-line description and creates a
+  multiple-choice placeholder with 1 point possible (and no answer choices).
+- **`g`** (generate w/ LLM) — asks the user for a natural-language seed prompt
+  (e.g. *"a question about combinatorics asking how many ways 11 soccer players
+  can be selected from a team of 23"*) and routes it through the cloud text
+  model (default `gemini-3-flash-preview`, requires `OLLAMA_API_KEY` — see
+  [Ollama setup](#ollama-setup-optional)). The LLM returns a complete
+  Canvas-shaped question of one of seven auto-gradable types: multiple-choice,
+  multiple-answers, true/false, fill-in-multiple-blanks, multiple-dropdowns,
+  matching, or calculated. The proposed question is rendered inline (type,
+  name, text, answer choices with `*` marking the correct one, plus per-type
+  extras like match pairs or formula variables) and the user is prompted
+  `[y]/[r]/[s]` — accept, regenerate (re-call the LLM with the same seed), or
+  skip.
+- **`e`** or empty input — finalizes the quiz with the questions added so far.
+
+`points_possible` is forced to `1` for both placeholder and LLM-generated
+questions; the instructor can refine wording, distractors, and points later in
+the Canvas UI. The quiz is created with default settings:
+`quiz_type='assignment'`, `time_limit=30`, `one_question_at_a_time=True`,
+`cant_go_back=True`, `shuffle_answers=True`.
+
+The cloud text model is lazy-loaded only on the first `g` choice, so a
+pure-placeholder run still works without `OLLAMA_API_KEY` set.
 
 | | Files |
 |---|---|

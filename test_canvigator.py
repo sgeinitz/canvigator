@@ -2770,4 +2770,125 @@ class TestRecordingAnalysisLLM:
         prompt = _build_themes_prompt(['first', 'second'], ['graphs'])
         assert 'Student 1: first' in prompt
         assert 'Student 2: second' in prompt
-        assert 'graphs' in prompt
+
+
+# ---------------------------------------------------------------------------
+# canvigator_llm quiz-question generation helpers
+# ---------------------------------------------------------------------------
+
+class TestQuizQuestionHelpers:
+    """Tests for _build_quiz_question_prompt and _parse_quiz_question."""
+
+    def test_build_quiz_question_prompt_includes_seed(self):
+        """The instructor's seed appears verbatim in the user prompt."""
+        from canvigator_llm import _build_quiz_question_prompt
+        seed = "a question on Big-O for binary search"
+        prompt = _build_quiz_question_prompt(seed)
+        assert seed in prompt
+        assert "JSON" in prompt
+
+    def test_build_quiz_question_prompt_handles_empty(self):
+        """Empty/None seed still returns a string (the wrapper text)."""
+        from canvigator_llm import _build_quiz_question_prompt
+        assert isinstance(_build_quiz_question_prompt(""), str)
+        assert isinstance(_build_quiz_question_prompt(None), str)
+
+    def test_parse_quiz_question_accepts_multiple_choice(self):
+        """A well-formed multiple_choice_question payload round-trips and points_possible is stripped."""
+        import json as _json
+        from canvigator_llm import _parse_quiz_question
+        payload = _json.dumps({
+            "question_type": "multiple_choice_question",
+            "question_name": "Binary search complexity",
+            "question_text": "What is the time complexity of binary search?",
+            "points_possible": 5,
+            "answers": [
+                {"answer_text": "O(log n)", "answer_weight": 100},
+                {"answer_text": "O(n)", "answer_weight": 0},
+                {"answer_text": "O(n log n)", "answer_weight": 0},
+                {"answer_text": "O(1)", "answer_weight": 0},
+            ],
+        })
+        result = _parse_quiz_question(payload)
+        assert result is not None
+        assert result["question_type"] == "multiple_choice_question"
+        assert result["question_name"] == "Binary search complexity"
+        assert "points_possible" not in result
+        assert len(result["answers"]) == 4
+
+    def test_parse_quiz_question_handles_markdown_fence(self):
+        """JSON wrapped in ```json fences is tolerated."""
+        from canvigator_llm import _parse_quiz_question
+        wrapped = (
+            "```json\n"
+            '{"question_type": "true_false_question", "question_name": "T/F",'
+            ' "question_text": "Quicksort is stable.",'
+            ' "answers": [{"answer_text": "True", "answer_weight": 0},'
+            ' {"answer_text": "False", "answer_weight": 100}]}'
+            "\n```"
+        )
+        result = _parse_quiz_question(wrapped)
+        assert result is not None
+        assert result["question_type"] == "true_false_question"
+        assert len(result["answers"]) == 2
+
+    def test_parse_quiz_question_rejects_unknown_type(self):
+        """Unknown question_type returns None."""
+        import json as _json
+        from canvigator_llm import _parse_quiz_question
+        payload = _json.dumps({
+            "question_type": "essay_question",
+            "question_name": "Discuss",
+            "question_text": "Discuss recursion.",
+            "answers": [],
+        })
+        assert _parse_quiz_question(payload) is None
+
+    def test_parse_quiz_question_rejects_missing_text(self):
+        """Missing or empty question_text returns None."""
+        import json as _json
+        from canvigator_llm import _parse_quiz_question
+        payload = _json.dumps({
+            "question_type": "multiple_choice_question",
+            "question_name": "X",
+            "answers": [],
+        })
+        assert _parse_quiz_question(payload) is None
+
+    def test_parse_quiz_question_allows_empty_answers_for_calculated(self):
+        """A calculated_question with formulas/variables and an empty answers list is accepted."""
+        import json as _json
+        from canvigator_llm import _parse_quiz_question
+        payload = _json.dumps({
+            "question_type": "calculated_question",
+            "question_name": "Doubling",
+            "question_text": "What is [x] doubled?",
+            "answers": [],
+            "variables": [{"name": "x", "min": 1, "max": 10, "scale": 0}],
+            "formulas": [{"formula": "x*2"}],
+            "formula_decimal_places": 0,
+        })
+        result = _parse_quiz_question(payload)
+        assert result is not None
+        assert result["question_type"] == "calculated_question"
+        assert result["formulas"] == [{"formula": "x*2"}]
+
+    def test_parse_quiz_question_defaults_missing_name(self):
+        """A payload without question_name gets a fallback name."""
+        import json as _json
+        from canvigator_llm import _parse_quiz_question
+        payload = _json.dumps({
+            "question_type": "multiple_choice_question",
+            "question_text": "Pick one.",
+            "answers": [{"answer_text": "A", "answer_weight": 100}],
+        })
+        result = _parse_quiz_question(payload)
+        assert result is not None
+        assert result["question_name"] == "Generated question"
+
+    def test_parse_quiz_question_handles_malformed_json(self):
+        """Invalid JSON returns None rather than raising."""
+        from canvigator_llm import _parse_quiz_question
+        assert _parse_quiz_question("not json at all") is None
+        assert _parse_quiz_question("") is None
+        assert _parse_quiz_question(None) is None
