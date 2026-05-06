@@ -2892,3 +2892,67 @@ class TestQuizQuestionHelpers:
         assert _parse_quiz_question("not json at all") is None
         assert _parse_quiz_question("") is None
         assert _parse_quiz_question(None) is None
+
+    def test_summarize_draft_renders_multiple_choice(self):
+        """A multiple-choice draft summary marks the correct answer with '*' and lists distractors with '-'."""
+        from canvigator_llm import _summarize_draft_for_prompt
+        draft = {
+            "question_type": "multiple_choice_question",
+            "question_text": "What is 2+2?",
+            "answers": [
+                {"answer_text": "3", "answer_weight": 0},
+                {"answer_text": "4", "answer_weight": 100},
+                {"answer_text": "5", "answer_weight": 0},
+            ],
+        }
+        summary = _summarize_draft_for_prompt(draft)
+        assert "What is 2+2?" in summary
+        assert "* 4" in summary
+        assert "- 3" in summary
+        assert "- 5" in summary
+
+    def test_summarize_draft_renders_matching(self):
+        """A matching-question draft summary lists 'left -> right' pairs."""
+        from canvigator_llm import _summarize_draft_for_prompt
+        draft = {
+            "question_type": "matching_question",
+            "question_text": "Match terms.",
+            "answers": [
+                {"answer_match_left": "Tree", "answer_match_right": "Hierarchical"},
+                {"answer_match_left": "Graph", "answer_match_right": "Network"},
+            ],
+        }
+        summary = _summarize_draft_for_prompt(draft)
+        assert "Tree -> Hierarchical" in summary
+        assert "Graph -> Network" in summary
+
+    def test_summarize_draft_handles_non_dict(self):
+        """Non-dict input returns an empty string rather than raising."""
+        from canvigator_llm import _summarize_draft_for_prompt
+        assert _summarize_draft_for_prompt(None) == ""
+        assert _summarize_draft_for_prompt("not a dict") == ""
+
+    def test_build_quiz_question_prompt_no_prior_drafts(self):
+        """Without prior_drafts the prompt has no rejected-drafts section."""
+        from canvigator_llm import _build_quiz_question_prompt
+        prompt = _build_quiz_question_prompt("a Big-O question", prior_drafts=None)
+        assert "REJECTED" not in prompt
+        assert "SUBSTANTIVELY DIFFERENT" not in prompt
+        assert "a Big-O question" in prompt
+
+    def test_build_quiz_question_prompt_with_prior_drafts(self):
+        """With prior_drafts the prompt instructs the model to diverge and includes draft summaries."""
+        from canvigator_llm import _build_quiz_question_prompt
+        prior = [{
+            "question_type": "multiple_choice_question",
+            "question_text": "What is the time complexity of binary search?",
+            "answers": [
+                {"answer_text": "O(log n)", "answer_weight": 100},
+                {"answer_text": "O(n)", "answer_weight": 0},
+            ],
+        }]
+        prompt = _build_quiz_question_prompt("a Big-O question", prior_drafts=prior)
+        assert "REJECTED" in prompt
+        assert "SUBSTANTIVELY DIFFERENT" in prompt
+        assert "What is the time complexity of binary search?" in prompt
+        assert "Rejected draft 1" in prompt

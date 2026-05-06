@@ -1619,13 +1619,61 @@ _QUIZ_QUESTION_SYSTEM_PROMPT = (
 )
 
 
-def _build_quiz_question_prompt(user_seed):
-    """Wrap the instructor's natural-language seed into the user message."""
+def _summarize_draft_for_prompt(draft):
+    """Render a previously-generated draft as a compact summary for the prompt."""
+    if not isinstance(draft, dict):
+        return ""
+    qtype = draft.get("question_type", "?")
+    qtext = draft.get("question_text", "")
+    parts = [f"  Type: {qtype}", f"  Question: {qtext}"]
+    answers = draft.get("answers") or []
+    if qtype == "matching_question":
+        for a in answers:
+            if isinstance(a, dict):
+                left = a.get("answer_match_left", "")
+                right = a.get("answer_match_right", "")
+                parts.append(f"  Match: {left} -> {right}")
+    elif qtype == "calculated_question":
+        for v in draft.get("variables") or []:
+            parts.append(f"  Variable: {v}")
+        for f in draft.get("formulas") or []:
+            parts.append(f"  Formula: {f}")
+    else:
+        for a in answers:
+            if not isinstance(a, dict):
+                continue
+            mark = "*" if a.get("answer_weight") == 100 else "-"
+            blank = a.get("blank_id")
+            label = f"[{blank}] " if blank else ""
+            parts.append(f"  {mark} {label}{a.get('answer_text', '')}")
+    return "\n".join(parts)
+
+
+def _build_quiz_question_prompt(user_seed, prior_drafts=None):
+    """Wrap the instructor's natural-language seed into the user message.
+
+    If ``prior_drafts`` is non-empty, append a section listing the rejected
+    drafts and instructing the model to produce a substantively different
+    question — used by the [r]egenerate flow so successive drafts diverge.
+    """
     seed = (user_seed or "").strip()
-    return (
-        f"Instructor prompt: {seed}\n\n"
-        "Produce the JSON object now."
-    )
+    parts = [f"Instructor prompt: {seed}"]
+    if prior_drafts:
+        parts.append("")
+        parts.append(
+            "The instructor REJECTED the following draft(s) on this topic. "
+            "Produce a SUBSTANTIVELY DIFFERENT new draft — different scenario, "
+            "different numbers/values, different angle, different specific examples, "
+            "and ideally a different question_type if the topic supports it. "
+            "Do NOT paraphrase, trivially modify, or repeat any of these:"
+        )
+        for i, draft in enumerate(prior_drafts, start=1):
+            summary = _summarize_draft_for_prompt(draft)
+            if summary:
+                parts.append(f"\nRejected draft {i}:\n{summary}")
+    parts.append("")
+    parts.append("Produce the JSON object now.")
+    return "\n".join(parts)
 
 
 def _parse_quiz_question(content):
@@ -1684,8 +1732,13 @@ def _parse_quiz_question(content):
     return out
 
 
-def generate_quiz_question(user_seed, client=None, model=None):
+def generate_quiz_question(user_seed, client=None, model=None, prior_drafts=None):
     """Cloud-LLM call: turn an instructor's natural-language seed into a Canvas question dict.
+
+    When ``prior_drafts`` is provided (a list of previously rejected question
+    dicts), the prompt asks for a substantively different draft and the
+    sampling temperature is bumped from 0.4 to 0.8 to encourage variety
+    across the [r]egenerate loop.
 
     Returns the validated dict (without points_possible/position — the caller
     stamps those) or None if the model failed or produced an invalid payload.
@@ -1703,7 +1756,8 @@ def generate_quiz_question(user_seed, client=None, model=None):
         client = _make_client(cloud=True)
     model = model or DEFAULT_TEXT_MODEL
 
-    prompt = _build_quiz_question_prompt(user_seed)
+    prompt = _build_quiz_question_prompt(user_seed, prior_drafts=prior_drafts)
+    temperature = 0.8 if prior_drafts else 0.4
     try:
         resp = _chat_with_retry(
             client,
@@ -1712,7 +1766,7 @@ def generate_quiz_question(user_seed, client=None, model=None):
                 {"role": "system", "content": _QUIZ_QUESTION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            options={"temperature": 0.4},
+            options={"temperature": temperature},
         )
         return _parse_quiz_question(resp["message"]["content"])
     except Exception as e:

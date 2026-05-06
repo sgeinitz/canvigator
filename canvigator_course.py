@@ -1183,12 +1183,18 @@ def _renderQuestionPreview(question_dict):
 def _reviewGeneratedQuestion(cl, client, model, seed, position):
     """Generate a question via the LLM, preview it, and prompt the instructor [y]/[r]/[s].
 
-    Returns the finalized Canvas question dict (with points_possible=1 and
-    position stamped) on accept, or None on skip / generation failure.
+    Rejected drafts are accumulated and passed back to the LLM on each
+    [r]egenerate so successive drafts diverge instead of recycling the same
+    angle. Returns the finalized Canvas question dict (with points_possible=1
+    and position stamped) on accept, or None on skip / generation failure.
     """
+    rejected = []
     while True:
-        print(f"    Generating Q{position} via {model}...")
-        question_dict = cl.generate_quiz_question(seed, client=client, model=model)
+        label = f" (regenerate, {len(rejected)} prior)" if rejected else ""
+        print(f"    Generating Q{position} via {model}{label}...")
+        question_dict = cl.generate_quiz_question(
+            seed, client=client, model=model, prior_drafts=rejected or None,
+        )
         if question_dict is None:
             print("    ERROR: generation failed or response was invalid. Skipping.")
             return None
@@ -1206,6 +1212,7 @@ def _reviewGeneratedQuestion(cl, client, model, seed, position):
         if choice == 's':
             return None
         if choice == 'r':
+            rejected.append(question_dict)
             continue
         # 'y' — finalize
         if not question_dict.get('question_name'):
