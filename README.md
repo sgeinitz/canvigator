@@ -83,11 +83,11 @@ This will prompt the creation of the _data/_ and _figures/_ subdirectories.
 
 ### Ollama setup (optional)
 
-Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) to tag questions, generate open-ended follow-ups, transcribe student audio, and assess student replies. You can skip this section if you will not be running any of these tasks (`get-quiz-questions --tag`, `generate-follow-up-questions`, `send-quiz-reminder`, `send-follow-up-question`, `assess-replies`).
+Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) to draft and tag questions, generate open-ended follow-ups, transcribe student audio, and assess student replies. You can skip this section if you will not be running any of these tasks (`create-quiz` with the `[g]enerate w/ LLM` option, `get-quiz-questions --tag`, `generate-follow-up-questions`, `send-quiz-reminder`, `send-follow-up-question`, `assess-replies`).
 
 Canvigator uses two kinds of models:
 
-1. **A cloud-hosted text model** (default `gemini-3-flash-preview`, set via `OLLAMA_TEXT_MODEL`) for instructor-side text generation — tagging quiz questions and generating open-ended questions. These tasks never see student data, so a larger cloud model is a good fit.
+1. **A cloud-hosted text model** (default `gemini-3-flash-preview`, set via `OLLAMA_TEXT_MODEL`) for instructor-side text generation — drafting quiz questions in `create-quiz`, tagging quiz questions, and generating open-ended follow-up questions. These tasks never see student data, so a larger cloud model is a good fit.
 2. **Local models** for tasks that process student input — `gemma4:31b` (default `OLLAMA_MODEL`) for assessing text/image replies, and `gemma4:e4b` (default `OLLAMA_AUDIO_MODEL`) for transcribing student audio. Keeping these local is deliberate: student submissions should not leave your machine.
 
 **To use the cloud text model:**
@@ -112,17 +112,18 @@ All model names are overridable via env vars (`OLLAMA_TEXT_MODEL`, `OLLAMA_MODEL
 source set_env.sh                            # set Canvas (and optional Ollama) environment variables (once per terminal session)
 python canvigator.py <task>                  # run a task (prompts for course selection)
 python canvigator.py --crn <CRN> <task>      # select course by CRN (last 5 digits of course code)
-python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus, reminder, follow-up, and delete-old-conversations tasks)
+python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus, reminder, follow-up, delete-old-conversations, get-media-recordings)
 python canvigator.py --tag get-quiz-questions     # add LLM-generated topic tags to the quiz questions export
 python canvigator.py --reply-window-days N <task>  # set the days-after-send window for assess-replies (default: 5)
 python canvigator.py --months N delete-old-conversations  # cutoff age in months for delete-old-conversations (default: 6)
+python canvigator.py --auto-grade get-media-recordings  # skip per-student review and auto-grade every submission at full credit
 ```
 
 The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 get-activity`.
 
-Available tasks: `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-pairs`, `create-quiz`, `delete-old-conversations`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-conversations`, `get-gradebook`, `get-quiz-questions`, `get-quiz-submission-events`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
+Available tasks: `analyze-media-recordings`, `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-media-recording-assignment`, `create-pairs`, `create-quiz`, `delete-old-conversations`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-conversations`, `get-gradebook`, `get-media-recordings`, `get-quiz-questions`, `get-quiz-submission-events`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -318,13 +319,39 @@ required format (columns: `name`, `id`, `present` where 1 = present).
 
 ---
 
-#### `create-quiz` — Create an unpublished placeholder quiz on Canvas
+#### `create-quiz` — Create an unpublished quiz on Canvas, with placeholder or LLM-generated questions
 
 Interactively creates a new unpublished quiz on Canvas. Prompts the user for a
-quiz title, then iteratively prompts for question descriptions. Each question is
-added as a multiple-choice placeholder with 1 point possible. The quiz is
-created with default settings: `quiz_type='assignment'`, `time_limit=30`,
-`one_question_at_a_time=True`, `cant_go_back=True`, `shuffle_answers=True`.
+quiz title, then for each question prompts:
+
+```
+QN — [p]laceholder, [g]enerate w/ LLM, [e]nd quiz:
+```
+
+- **`p`** (placeholder) — asks for a one-line description and creates a
+  multiple-choice placeholder with 1 point possible (and no answer choices).
+- **`g`** (generate w/ LLM) — asks the user for a natural-language seed prompt
+  (e.g. *"a question about combinatorics asking how many ways 11 soccer players
+  can be selected from a team of 23"*) and routes it through the cloud text
+  model (default `gemini-3-flash-preview`, requires `OLLAMA_API_KEY` — see
+  [Ollama setup](#ollama-setup-optional)). The LLM returns a complete
+  Canvas-shaped question of one of seven auto-gradable types: multiple-choice,
+  multiple-answers, true/false, fill-in-multiple-blanks, multiple-dropdowns,
+  matching, or calculated. The proposed question is rendered inline (type,
+  name, text, answer choices with `*` marking the correct one, plus per-type
+  extras like match pairs or formula variables) and the user is prompted
+  `[y]/[r]/[s]` — accept, regenerate (re-call the LLM with the same seed), or
+  skip.
+- **`e`** or empty input — finalizes the quiz with the questions added so far.
+
+`points_possible` is forced to `1` for both placeholder and LLM-generated
+questions; the instructor can refine wording, distractors, and points later in
+the Canvas UI. The quiz is created with default settings:
+`quiz_type='assignment'`, `time_limit=30`, `one_question_at_a_time=True`,
+`cant_go_back=True`, `shuffle_answers=True`.
+
+The cloud text model is lazy-loaded only on the first `g` choice, so a
+pure-placeholder run still works without `OLLAMA_API_KEY` set.
 
 | | Files |
 |---|---|
@@ -659,3 +686,105 @@ every send is reviewed before going to Canvas.
 
 Use `--dry-run` to preview all messages (recipient, subject, body, and reason)
 without sending anything to Canvas and without the interactive prompt.
+
+---
+
+#### Media-recording check-in workflow
+
+Three tasks form an end-to-end loop for short audio check-ins where each
+student records a brief reflection (e.g. *"What was hardest on this week's
+quiz?"*), the recording is downloaded and transcribed locally, the instructor
+grades each submission, and the cohort's transcripts are then summarized
+against the quiz topics:
+
+1. `create-media-recording-assignment` — create the assignment on Canvas.
+2. `get-media-recordings` — fetch and transcribe each submission, and grade.
+3. `analyze-media-recordings` — surface tag coverage and recurring themes
+   across the cohort.
+
+Audio handling is local-only: transcripts are produced via the local
+`OLLAMA_AUDIO_MODEL` (default `gemma4:e4b`) and the cohort analysis runs
+against the local `OLLAMA_MODEL` (default `gemma4:31b`). Student audio never
+leaves your machine.
+
+---
+
+#### `create-media-recording-assignment` — Create a media-recording assignment on Canvas
+
+Interactively creates a Canvas assignment with `submission_types=['media_recording']`.
+Prompts for the title, prompt body (becomes the HTML `description`),
+`points_possible` (default 1), an optional ISO `due_at`, and whether to publish
+immediately (default unpublished so you can review before exposing it to
+students). Logs the new assignment's ID and Canvas URL on success.
+
+| | Files |
+|---|---|
+| **Input** | _(none — interactive prompts only)_ |
+| **Output** | _(none — assignment is created directly on Canvas)_ |
+
+---
+
+#### `get-media-recordings` — Fetch, transcribe, and grade student audio submissions
+
+Pulls every media-recording submission for a chosen assignment, re-encodes the
+audio to 16 kHz mono PCM WAV (via ffmpeg directly on Canvas's playback URL —
+DASH manifests are handled in one pass), and transcribes each WAV locally
+using `OLLAMA_AUDIO_MODEL` (default `gemma4:e4b`). Audio files are saved to
+`data/<course>/media_recordings/assignment<id>/<student_id>_<submission_id>.wav`.
+
+By default, after each transcription the transcript is displayed and the
+instructor is prompted for the points to award:
+
+- **Enter** — award `points_possible` (full credit).
+- **A number** — award that value.
+- **`s` / `skip`** — leave the submission ungraded.
+
+The chosen value is posted via Canvas's `Submission.edit({'posted_grade': ...})`.
+
+Pass `--auto-grade` to skip the per-student review and award `points_possible`
+to every submitter automatically. Combine with `--dry-run` to preview the
+auto-graded writes without mutating Canvas; in dry-run, transcripts are still
+shown and the CSV is still written, but the grade write is suppressed.
+
+Pressing Ctrl-C mid-loop flushes a partial CSV before re-raising, so review
+progress is never lost.
+
+| | Files |
+|---|---|
+| **Input** | _(Canvas — selected interactively)_ |
+| **Output** | `data/<course>/assignment<id>_recordings_YYYYMMDD.csv` — columns: `student_id`, `student_name`, `submission_id`, `submitted_at`, `audio_path`, `transcript`, `transcribed_at`, `grade`, `graded_at` |
+| | `data/<course>/media_recordings/assignment<id>/<student_id>_<submission_id>.wav` — one WAV per submission |
+| **Canvas side-effect** | Posts `posted_grade` on each graded submission (skipped in `--dry-run` mode) |
+
+---
+
+#### `analyze-media-recordings` — Summarize cohort transcripts against quiz tags
+
+Loads the most recent `assignment<id>_recordings_*.csv` produced by
+`get-media-recordings`, prompts the instructor to pick a `*_questions_w_tags_*.csv`
+from the same course directory (so tag vocabulary stays grounded in actual
+quiz content), then runs two local-LLM passes against `OLLAMA_MODEL` (default
+`gemma4:31b`):
+
+1. **Tag classification** — one call per non-empty transcript, asking which of
+   the unique tags from the quiz CSV's `keywords` column the student is
+   actually discussing. Paraphrase-tolerant, so *"I got confused on the linked
+   list one"* maps to `linked lists` even when the literal substring isn't
+   present.
+2. **Theme extraction** — a single cohort-level call that surfaces 3–5
+   recurring themes across all transcripts, with the tag list as background
+   context.
+
+The output is a Markdown report with three sections: a tag-grounded table
+ranked by descending student count (the *"specialized word cloud"*), the
+LLM-extracted themes, and a roster mapping the 1-based student indices used
+in the themes section back to names.
+
+**Prerequisites**: run `get-media-recordings` (to produce the recordings CSV)
+and `get-quiz-questions --tag` (to produce the tags CSV) first.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/assignment<id>_recordings_YYYYMMDD.csv` (from `get-media-recordings`) |
+| | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
+| **Output** | `data/<course>/assignment<id>_analysis_YYYYMMDD.md` — Markdown report |

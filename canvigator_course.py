@@ -154,7 +154,7 @@ class CanvigatorCourse:
                 _saveCourseReminderManifest(sent_messages, student_state, subject_str, dry_run, self.config.data_path)
 
     def createQuiz(self):
-        """Create a new placeholder quiz with stub questions on Canvas."""
+        """Create a new quiz on Canvas, with each question chosen as a placeholder or LLM-generated draft."""
         title = input("Enter quiz title: ").strip()
         if not title:
             print("Quiz title cannot be empty.")
@@ -175,24 +175,53 @@ class CanvigatorCourse:
         logger.info(f"Created quiz: '{quiz.title}' (id={quiz.id})")
 
         position = 1
-        print("\nAdd placeholder questions (press Enter on an empty line to finish):")
+        print("\nAdd questions (choose [e] or press Enter at the prompt to finish):")
+        cl = None  # lazy-imported canvigator_llm module
+        llm_client = None
+        llm_model = None
         while True:
-            description = input(f"  Q{position} description: ").strip()
-            if not description:
+            choice = input(f"  Q{position} — [p]laceholder, [g]enerate w/ LLM, [e]nd quiz: ").strip().lower()
+            if not choice or choice == 'e':
                 break
-            quiz.create_question(question={
-                'question_name': f"Question {position}",
-                'question_text': description,
-                'question_type': 'multiple_choice_question',
-                'points_possible': 1,
-                'position': position,
-            })
-            print(f"    Added Q{position}: {description}")
-            logger.info(f"  Added question {position}: {description}")
+            if choice not in ('p', 'g'):
+                print("    Please enter 'p', 'g', or 'e' (or Enter to end).")
+                continue
+
+            if choice == 'p':
+                description = input(f"    Q{position} description: ").strip()
+                if not description:
+                    continue
+                question_dict = {
+                    'question_name': f"Question {position}",
+                    'question_text': description,
+                    'question_type': 'multiple_choice_question',
+                    'points_possible': 1,
+                    'position': position,
+                }
+            else:
+                seed = input(f"    Q{position} prompt for LLM: ").strip()
+                if not seed:
+                    continue
+                if cl is None:
+                    import canvigator_llm as cl
+                    try:
+                        llm_client = cl._make_client(cloud=True)
+                    except RuntimeError as e:
+                        print(f"    ERROR: {e}")
+                        cl = None
+                        continue
+                    llm_model = cl.DEFAULT_TEXT_MODEL
+                question_dict = _reviewGeneratedQuestion(cl, llm_client, llm_model, seed, position)
+                if question_dict is None:
+                    continue
+
+            quiz.create_question(question=question_dict)
+            print(f"    Added Q{position} ({question_dict['question_type']}): {question_dict['question_name']}")
+            logger.info(f"  Added question {position} ({question_dict['question_type']}): {question_dict['question_name']}")
             position += 1
 
         n_questions = position - 1
-        print(f"\nQuiz '{title}' created with {n_questions} placeholder question{'s' if n_questions != 1 else ''}.")
+        print(f"\nQuiz '{title}' created with {n_questions} question{'s' if n_questions != 1 else ''}.")
         logger.info(f"Quiz '{title}' complete: {n_questions} questions")
 
     def exportRoster(self, data_path):
@@ -1113,3 +1142,81 @@ def exportAnonymizedData(data_path):
     n_total = len(csv_files)
     print(f"Exported {n_total} file{'s' if n_total != 1 else ''} ({n_anonymized} anonymized) to {anon_dir.name}/")
     logger.info(f"Exported {n_total} anonymized files to {zip_path}.zip")
+
+
+def _renderQuestionPreview(question_dict):
+    """Print a compact human-readable preview of an LLM-generated question dict."""
+    qtype = question_dict.get('question_type', '?')
+    name = question_dict.get('question_name', '')
+    text = question_dict.get('question_text', '')
+    print(f"      type:    {qtype}")
+    print(f"      name:    {name}")
+    print(f"      text:    {text}")
+
+    answers = question_dict.get('answers') or []
+    if qtype == 'matching_question':
+        for a in answers:
+            left = a.get('answer_match_left', '') if isinstance(a, dict) else ''
+            right = a.get('answer_match_right', '') if isinstance(a, dict) else ''
+            print(f"      match:   {left}  ->  {right}")
+        distractors = question_dict.get('matching_answer_incorrect_matches')
+        if distractors:
+            print(f"      distractors: {distractors!r}")
+    elif qtype == 'calculated_question':
+        for v in question_dict.get('variables') or []:
+            print(f"      var:     {v}")
+        for f in question_dict.get('formulas') or []:
+            print(f"      formula: {f}")
+        dp = question_dict.get('formula_decimal_places')
+        if dp is not None:
+            print(f"      decimals: {dp}")
+    else:
+        for a in answers:
+            if not isinstance(a, dict):
+                continue
+            mark = '*' if a.get('answer_weight') == 100 else ' '
+            blank = a.get('blank_id')
+            label = f"[{blank}] " if blank else ""
+            print(f"      {mark} {label}{a.get('answer_text', '')}")
+
+
+def _reviewGeneratedQuestion(cl, client, model, seed, position):
+    """Generate a question via the LLM, preview it, and prompt the instructor [y]/[r]/[s].
+
+    Rejected drafts are accumulated and passed back to the LLM on each
+    [r]egenerate so successive drafts diverge instead of recycling the same
+    angle. Returns the finalized Canvas question dict (with points_possible=1
+    and position stamped) on accept, or None on skip / generation failure.
+    """
+    rejected = []
+    while True:
+        label = f" (regenerate, {len(rejected)} prior)" if rejected else ""
+        print(f"    Generating Q{position} via {model}{label}...")
+        question_dict = cl.generate_quiz_question(
+            seed, client=client, model=model, prior_drafts=rejected or None,
+        )
+        if question_dict is None:
+            print("    ERROR: generation failed or response was invalid. Skipping.")
+            return None
+
+        print(f"\n    --- Q{position} preview ---")
+        _renderQuestionPreview(question_dict)
+        print("    -------------------")
+
+        while True:
+            choice = input("    Accept this question? [y]es / [r]egenerate / [s]kip: ").strip().lower()
+            if choice in ('y', 'r', 's'):
+                break
+            print("    Please enter 'y', 'r', or 's'.")
+
+        if choice == 's':
+            return None
+        if choice == 'r':
+            rejected.append(question_dict)
+            continue
+        # 'y' — finalize
+        if not question_dict.get('question_name'):
+            question_dict['question_name'] = f"Question {position}"
+        question_dict['points_possible'] = 1
+        question_dict['position'] = position
+        return question_dict
