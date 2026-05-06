@@ -1605,7 +1605,7 @@ _QUIZ_QUESTION_SYSTEM_PROMPT = (
     "\"distractor1\\ndistractor2\" (newline-separated string)\n"
     "  calculated_question:\n"
     "    [] (empty list); also include \"variables\": [{\"name\": \"x\", \"min\": 1, \"max\": 10, "
-    "\"scale\": 0\"}, ...] and \"formulas\": [{\"formula\": \"x*2\"}], plus "
+    "\"scale\": 0}, ...] and \"formulas\": [{\"formula\": \"x*2\"}], plus "
     "\"formula_decimal_places\": 0\n\n"
     "Rules:\n"
     "  - Output ONLY the JSON object — no ```json fences, no leading/trailing text.\n"
