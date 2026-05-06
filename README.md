@@ -186,14 +186,25 @@ with both models pulled.
 | | `data/<course>/<quiz>_<id>_followup_assessments.csv` (persistent — merged across runs) |
 
 The replies CSV contains columns: `student_id`, `student_name`, `question_id`,
-`question_mode`, `message_id`, `reply_text`, `has_attachment`, `attachment_path`,
-`has_audio`, `audio_path`, `replied_at`, `latest`, `conversation_id`. The
+`question_mode`, `conversation_id`, `message_id`, `reply_text`, `has_attachment`,
+`attachment_path`, `has_audio`, `audio_path`, `replied_at`, `latest`. The
 `latest` flag marks the most recent reply per student (used for assessment).
 
 The assessments CSV contains columns: `student_id`, `student_name`, `question_id`,
-`question_mode`, `conversation_id`, `result` (`pass` or `fail`), `feedback`,
-`transcript` (for `explain` mode), `assessed_at`, `sent_assessment`
-(`0` until `send-follow-up-assessments` posts the row, then `1`), `sent_at`.
+`question_mode`, `conversation_id`, `result` (`pass` or `fail`), `confidence`
+(`high` when all self-consistency runs agreed, `borderline` when they split),
+`feedback`, `transcript` (for `explain` mode), `criteria_evaluations` (a JSON
+blob with the per-criterion `met`/`partial`/`missing` ratings the grader produced),
+`assessed_at`, `sent_assessment` (`0` until `send-follow-up-assessments` posts
+the row, then `1`), `sent_at`.
+
+Each reply is graded with N=3 self-consistency passes and a majority vote;
+`confidence=borderline` flags the rows worth instructor review before sending.
+The grader is also primed with the structured rubric and exemplars from
+`*_open_ended_*.csv`, plus up to 3 prior pass + 3 prior fail
+`sent_assessment=1` responses for the same question (sampled from the
+assessments file itself) as in-context calibration — so once you correct a few
+borderline cases and send them, future re-runs anchor to your judgment.
 
 Re-running this task is safe: rows with `sent_assessment=1` are skipped and
 preserved verbatim, so previously sent feedback is never overwritten. Rows
@@ -340,8 +351,11 @@ QN — [p]laceholder, [g]enerate w/ LLM, [e]nd quiz:
   matching, or calculated. The proposed question is rendered inline (type,
   name, text, answer choices with `*` marking the correct one, plus per-type
   extras like match pairs or formula variables) and the user is prompted
-  `[y]/[r]/[s]` — accept, regenerate (re-call the LLM with the same seed), or
-  skip.
+  `[y]/[r]/[s]` — accept, regenerate, or skip. Each `[r]egenerate` accumulates
+  the rejected draft and passes the full list back to the LLM as anti-context
+  (with sampling temperature bumped from 0.4 to 0.8) so successive drafts
+  diverge in scenario / values / question_type instead of recycling the same
+  angle.
 - **`e`** or empty input — finalizes the quiz with the questions added so far.
 
 `points_possible` is forced to `1` for both placeholder and LLM-generated
@@ -385,7 +399,7 @@ subdirectories (by `--crn` or interactively).
 Reads the tagged questions CSV for a selected quiz and uses a cloud-hosted LLM
 (via Ollama's hosted endpoint, default `gemini-3-flash-preview`) to produce
 open-ended follow-up candidates. For each original quiz question the task runs
-three steps:
+five steps:
 
 1. **Classify** — The LLM decides whether an oral explanation ("explain") or a
    hand-drawn diagram ("draw") would be the better way to assess student
@@ -403,11 +417,21 @@ three steps:
    the CSV and used as backup rubric material in `assess-replies`.
 4. **Structured rubric** — For each candidate, the LLM also emits a JSON
    object in the `rubric_json` column with fields `canonical_answer`,
-   `pass_criteria`, `acceptable_alternatives`, `common_misconceptions`,
-   `fatal_errors` (plus `required_visual_elements` for draw questions). This
-   structured rubric is what the local Gemma grader uses during
-   `assess-replies`; edit the JSON blob if you want to tighten the criteria.
-   Do not open the CSV in Excel and save — Excel will mangle the JSON quoting.
+   `model_answer` (an 80–120-word A-grade exemplar response in a real
+   student's voice), `pass_criteria`, `acceptable_alternatives`,
+   `common_misconceptions`, `fatal_errors` (plus `required_visual_elements`
+   for draw questions). This structured rubric is what the local Gemma grader
+   uses during `assess-replies`; edit the JSON blob if you want to tighten the
+   criteria. Do not open the CSV in Excel and save — Excel will mangle the
+   JSON quoting.
+5. **Calibration exemplars** — A separate LLM call drafts one passing and one
+   failing example response (for explain mode, a transcript fragment; for
+   draw mode, a prose description of the drawing) plus a one-sentence note
+   explaining what makes each one pass or fail. These land in the
+   `exemplar_pass`, `exemplar_pass_note`, `exemplar_fail`,
+   `exemplar_fail_note` columns and are passed to the grader at assessment
+   time as an "anchor the bar here" reference (separate from the live
+   instructor-approved examples that `assess-replies` accumulates).
 
 The output CSV is intended for instructor review. Three rows are written per
 original question (one per candidate) with `selected_question=0`; **the
@@ -427,6 +451,7 @@ see [Ollama setup](#ollama-setup-optional).
 The output CSV contains columns: `selected_question`, `question_id`,
 `position`, `question_name`, `keywords`, `question_mode` (`explain` or
 `draw`), `open_ended_question`, `assessment_guide`, `rubric_json`,
+`exemplar_pass`, `exemplar_pass_note`, `exemplar_fail`, `exemplar_fail_note`,
 `original_question_text`.
 
 **Typical workflow:**
