@@ -95,6 +95,31 @@ def find_latest_csv(data_path, pattern, exclude_substr=None):
     return Path(data_path) / matches[-1][1]
 
 
+def find_csvs_in_window(data_path, pattern, since_date, exclude_substr=None):
+    """Return all CSVs in data_path matching `pattern` whose embedded YYYYMMDD is >= since_date.
+
+    Companion to ``find_latest_csv``. ``since_date`` is a ``datetime.date`` (or
+    anything with a ``strftime('%Y%m%d')`` method); files are matched on the
+    same ``_YYYYMMDD.csv`` suffix and the same ``exclude_substr`` filter. Result
+    is sorted ascending by date so callers can reason about chronological order.
+    """
+    if not os.path.isdir(data_path):
+        return []
+    cutoff = since_date.strftime('%Y%m%d')
+    matches = []
+    for f in os.listdir(data_path):
+        if exclude_substr and exclude_substr in f:
+            continue
+        m = re.search(r'(\d{8})\.csv$', f)
+        if not m or pattern not in f:
+            continue
+        if m.group(1) >= cutoff:
+            matches.append((m.group(1), f))
+
+    matches.sort(key=lambda t: t[0])
+    return [Path(data_path) / fname for _, fname in matches]
+
+
 def selectCSVFromList(directory, keyword, prompt_msg, verbose=False):
     """
     List CSV files in directory matching keyword, prompt user to select one,

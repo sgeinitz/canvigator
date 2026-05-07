@@ -117,13 +117,15 @@ python canvigator.py --tag get-quiz-questions     # add LLM-generated topic tags
 python canvigator.py --reply-window-days N <task>  # set the days-after-send window for assess-replies (default: 5)
 python canvigator.py --months N delete-old-conversations  # cutoff age in months for delete-old-conversations (default: 6)
 python canvigator.py --auto-grade get-media-recordings  # skip per-student review and auto-grade every submission at full credit
+python canvigator.py --days N prep-class-digest          # synthesize a 1-page brief on cohort gaps from the last N days (default 7)
+python canvigator.py --cloud-questions prep-class-digest # opt the discussion-question step into cloud Gemini 3 with a redacted prompt (default: local Gemma 4)
 ```
 
 The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
 for automated/scheduled runs, e.g. `python canvigator.py --crn 12345 get-activity`.
 
-Available tasks: `analyze-media-recordings`, `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-media-recording-assignment`, `create-pairs`, `create-quiz`, `delete-old-conversations`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-conversations`, `get-gradebook`, `get-media-recordings`, `get-quiz-questions`, `get-quiz-submission-events`, `get-roster`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
+Available tasks: `analyze-media-recordings`, `assess-replies`, `award-bonus`, `award-bonus-partner-only`, `award-bonus-retake-only`, `create-media-recording-assignment`, `create-pairs`, `create-quiz`, `delete-old-conversations`, `export-anon-data`, `generate-follow-up-questions`, `get-activity`, `get-conversations`, `get-gradebook`, `get-media-recordings`, `get-quiz-questions`, `get-quiz-submission-events`, `get-roster`, `prep-class-digest`, `send-follow-up-assessments`, `send-follow-up-question`, `send-quiz-reminder`
 
 All tasks begin by prompting you to select a course. Output files are written to
 `data/<course>/` and `figures/<course>/`, where `<course>` is derived from the
@@ -813,3 +815,53 @@ and `get-quiz-questions --tag` (to produce the tags CSV) first.
 | **Input** | `data/<course>/assignment<id>_recordings_YYYYMMDD.csv` (from `get-media-recordings`) |
 | | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (from `get-quiz-questions --tag`) |
 | **Output** | `data/<course>/assignment<id>_analysis_YYYYMMDD.md` — Markdown report |
+
+---
+
+#### `prep-class-digest` — Pre-class "where the cohort actually is" Markdown brief
+
+Synthesizes a 1-page brief from three signal sources collected over a
+configurable lookback window (default 7 days, override with `--days N`):
+
+- **Recent quiz misses** — joined to the topic tags from
+  `*_questions_w_tags_*.csv` so misses are aggregated by concept rather than
+  by individual question.
+- **Follow-up reply themes** — failing/borderline rows in
+  `*_followup_assessments.csv` (within the window) are summarized by a local
+  Gemma 4 call into "where students went wrong" bullets, one block per
+  quiz/question.
+- **Media-recording transcripts** — every
+  `assignment<id>_recordings_*.csv` in the window is run through the existing
+  tag-classification + theme-extraction Gemma 4 pipeline (the same one used
+  by `analyze-media-recordings`).
+
+The brief ends with **2–3 suggested in-class discussion questions** targeted
+at the highest-priority gaps. By default these are drafted by the local
+Gemma 4 model with a full-fidelity prompt that includes the derived theme
+bullets and evidence snippets. With `--cloud-questions` (`-q`) the step
+routes to cloud Gemini 3 instead, but only with a *redacted* prompt that
+contains tag names + integer miss counts + integer theme-cluster counts —
+no transcripts, no `criteria_evaluations`, no theme text. Student-derived
+content stays local in either configuration.
+
+Empty windows (no quiz/follow-up/recording activity in the lookback
+period) short-circuit with a friendly message and write no file. Same-day
+re-runs overwrite.
+
+| | Files |
+|---|---|
+| **Input** | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` files in window (from `get-quiz-submission-events`) |
+| | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` per quiz (from `get-quiz-questions --tag`) |
+| | `data/<course>/<quiz>_<id>_followup_assessments.csv` (from `assess-replies`, persistent) |
+| | `data/<course>/assignment<id>_recordings_YYYYMMDD.csv` files in window (from `get-media-recordings`) |
+| **Output** | `data/<course>/class_digest_YYYYMMDD.md` — Markdown report (5 sections: header, quiz performance table, follow-up reply themes, media-recording themes, suggested discussion questions) |
+
+**Typical workflow:**
+1. Mid-week, after a quiz has been returned and any follow-ups assessed:
+   ```bash
+   python canvigator.py prep-class-digest                  # default 7-day window, Gemma-only
+   python canvigator.py --days 14 prep-class-digest        # widen the window
+   python canvigator.py --cloud-questions prep-class-digest  # opt the question step into Gemini
+   ```
+2. Open the generated `class_digest_*.md`, scan the priority gaps, and use
+   the suggested questions to seed a 5–10 minute in-class discussion.
