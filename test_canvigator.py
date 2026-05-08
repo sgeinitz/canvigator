@@ -3436,3 +3436,154 @@ class TestPrepClassDigestEmptyWindow:
         # User-facing message confirms the no-op.
         captured = capsys.readouterr()
         assert 'nothing to digest' in captured.out
+
+
+# ---------------------------------------------------------------------------
+# canvigator_help tests (per-task --help)
+# ---------------------------------------------------------------------------
+
+class TestPerTaskHelp:
+    """Integrity + rendering + CLI-dispatch tests for the per-task help system."""
+
+    def _all_task_names(self):
+        """Pull the list of tasks from canvigator.py without executing it."""
+        # canvigator.py is a top-level script; importing it would attempt to
+        # parse sys.argv. We instead read task_groups via runpy in a guarded
+        # mode that stops before the parse loop.
+        import ast
+        src = Path(__file__).parent.joinpath('canvigator.py').read_text()
+        tree = ast.parse(src)
+        names = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id == 'task_groups':
+                        # task_groups = [(header, [(name, desc), ...]), ...]
+                        for group_tuple in node.value.elts:
+                            items_list = group_tuple.elts[1]
+                            for entry in items_list.elts:
+                                names.append(entry.elts[0].value)
+        return names
+
+    def test_every_task_has_help_entry(self):
+        """Every task name in canvigator.py has a TASK_HELP entry."""
+        from canvigator_help import TASK_HELP
+        task_names = self._all_task_names()
+        assert task_names, "expected to find tasks in canvigator.py"
+        missing = sorted(set(task_names) - set(TASK_HELP))
+        assert not missing, f"missing TASK_HELP entries: {missing}"
+        extra = sorted(set(TASK_HELP) - set(task_names))
+        assert not extra, f"TASK_HELP has stale entries: {extra}"
+
+    def test_required_fields_non_empty(self):
+        """Every entry has non-empty description, inputs, outputs, examples."""
+        from canvigator_help import TASK_HELP
+        for name, entry in TASK_HELP.items():
+            assert entry.get('description', '').strip(), f"{name}: empty description"
+            assert entry.get('inputs'), f"{name}: empty inputs"
+            assert entry.get('outputs'), f"{name}: empty outputs"
+            assert entry.get('examples'), f"{name}: empty examples"
+            # These keys must exist (may be empty lists) so the renderer can
+            # iterate without KeyError.
+            for key in ('prerequisites', 'flags', 'run_before', 'run_after'):
+                assert key in entry, f"{name}: missing key '{key}'"
+                assert isinstance(entry[key], list), f"{name}: '{key}' must be a list"
+
+    def test_flag_references_resolve(self):
+        """Every flag listed in any entry is defined in FLAG_DESCRIPTIONS."""
+        from canvigator_help import TASK_HELP, FLAG_DESCRIPTIONS
+        for name, entry in TASK_HELP.items():
+            for flag in entry.get('flags', []):
+                assert flag in FLAG_DESCRIPTIONS, (
+                    f"{name}: references unknown flag '{flag}'"
+                )
+
+    def test_run_before_after_targets_exist(self):
+        """run_before / run_after entries are themselves valid task names."""
+        from canvigator_help import TASK_HELP
+        all_tasks = set(TASK_HELP)
+        for name, entry in TASK_HELP.items():
+            for ref in entry.get('run_before', []) + entry.get('run_after', []):
+                assert ref in all_tasks, (
+                    f"{name}: run_before/run_after references unknown task '{ref}'"
+                )
+
+    def test_print_task_help_render(self, capsys):
+        """The rendered output contains the description, prereq, flags, and example."""
+        from canvigator_help import print_task_help
+        print_task_help('send-quiz-reminder')
+        out = capsys.readouterr().out
+        assert 'send-quiz-reminder' in out
+        assert 'Send Canvas reminder messages' in out
+        assert 'Prerequisites:' in out
+        assert 'get-quiz-questions' in out  # cited as a prerequisite
+        assert '--all' in out
+        assert '--dry-run' in out
+        assert 'Examples:' in out
+        assert 'python canvigator.py' in out
+        assert 'Workflow:' in out
+        assert 'Run before this:' in out
+        # Universal --crn flag should be auto-appended to the Flags section.
+        assert '--crn' in out
+
+    def test_print_task_help_unknown_task(self, capsys):
+        """Unknown task names render a friendly message instead of crashing."""
+        from canvigator_help import print_task_help
+        print_task_help('not-a-real-task')
+        out = capsys.readouterr().out
+        assert 'not-a-real-task' in out
+
+    def _run_cli(self, *args):
+        """Invoke canvigator.py as a subprocess; return (rc, stdout, stderr).
+
+        Sets CANVAS_URL/CANVAS_TOKEN to empty so the subprocess can prove the
+        --help path exits before constructing the Canvas client.
+        """
+        env = {'PATH': '/usr/bin:/bin', 'PYTHONPATH': ''}
+        # Inherit some basics so Python can find its stdlib in the test runner.
+        import os
+        for k in ('PATH', 'HOME', 'PYTHONPATH', 'PYTHONHOME'):
+            if k in os.environ:
+                env[k] = os.environ[k]
+        # Explicitly NOT setting CANVAS_URL / CANVAS_TOKEN — the help path
+        # must short-circuit before the env-var check.
+        env['CANVAS_URL'] = ''
+        env['CANVAS_TOKEN'] = ''
+        import sys
+        cwd = Path(__file__).parent
+        result = subprocess.run(
+            [sys.executable, 'canvigator.py', *args],
+            capture_output=True, text=True, cwd=cwd, env=env, timeout=15,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_cli_dispatch_global_help(self):
+        """`canvigator.py --help` exits 0 and prints the task list."""
+        rc, stdout, stderr = self._run_cli('--help')
+        assert rc == 0, f"stderr={stderr!r}"
+        assert 'Usage: canvigator.py' in stdout
+        # The new footer line should be present.
+        assert "<task> --help" in stdout
+        # A representative task name should appear.
+        assert 'send-quiz-reminder' in stdout
+
+    def test_cli_dispatch_task_help(self):
+        """`canvigator.py <task> --help` exits 0 and prints task-specific help."""
+        rc, stdout, stderr = self._run_cli('create-pairs', '--help')
+        assert rc == 0, f"stderr={stderr!r}"
+        assert 'create-pairs' in stdout
+        assert 'Prerequisites:' in stdout
+        assert 'present_*.csv' in stdout
+
+    def test_cli_dispatch_task_help_short_form(self):
+        """`canvigator.py <task> -h` works the same as --help."""
+        rc, stdout, stderr = self._run_cli('send-quiz-reminder', '-h')
+        assert rc == 0, f"stderr={stderr!r}"
+        assert 'send-quiz-reminder' in stdout
+        assert 'Workflow:' in stdout
+
+    def test_cli_invalid_task_with_help(self):
+        """`canvigator.py bogus --help` still rejects the unknown task."""
+        rc, stdout, _ = self._run_cli('bogus-task', '--help')
+        assert rc == 1
+        assert 'Invalid task' in stdout
