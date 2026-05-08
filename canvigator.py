@@ -33,7 +33,7 @@ task_groups = [
         ('delete-old-conversations', 'Delete Canvas conversations older than N months (account-wide; default 6; override with --months/-m)'),
         ('get-gradebook', 'Export course gradebook'),
         ('get-roster', 'Export the full course roster (name, id, sis_id, enrollment_type)'),
-        ('send-quiz-reminder', 'Send quiz reminder messages to students'),
+        ('send-quiz-reminder', 'Send quiz reminder messages to students (use --all for one consolidated message across every published, future-due quiz)'),
         ('prep-class-digest', 'Synthesize a 1-page Markdown brief on cohort gaps from the last N days (default 7; override with --days/-n)'),
     ]),
 ]

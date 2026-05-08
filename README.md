@@ -714,6 +714,16 @@ every send is reviewed before going to Canvas.
 Use `--dry-run` to preview all messages (recipient, subject, body, and reason)
 without sending anything to Canvas and without the interactive prompt.
 
+Pass `--all` (or `-a`) to skip the interactive quiz picker and instead
+iterate every published quiz with a future `due_at`. Each student's state is
+aggregated across those quizzes and the task sends **one consolidated Canvas
+message per student** listing every eligible quiz they still have work to do
+on (no attempt, imperfect score, page-blur, or perfect-clean), with a single
+course-level manifest `course_reminder_sent[_dryrun]_YYYYMMDD.csv` instead of
+the per-quiz manifest. Quizzes without a `*_questions_w_tags_*.csv` are
+skipped with a warning. Combine with `--dry-run` to preview the consolidated
+messages without sending.
+
 ---
 
 #### Media-recording check-in workflow
