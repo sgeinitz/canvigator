@@ -2956,3 +2956,634 @@ class TestQuizQuestionHelpers:
         assert "SUBSTANTIVELY DIFFERENT" in prompt
         assert "What is the time complexity of binary search?" in prompt
         assert "Rejected draft 1" in prompt
+
+
+# ---------------------------------------------------------------------------
+# canvigator_digest tests
+# ---------------------------------------------------------------------------
+
+
+class TestFindCsvsInWindow:
+    """Tests for canvigator_utils.find_csvs_in_window."""
+
+    def _write(self, tmp_path, name):
+        (tmp_path / name).write_text('x')
+
+    def test_returns_only_files_at_or_after_cutoff(self, tmp_path):
+        """Files dated >= since_date are returned; older are filtered out."""
+        from canvigator_utils import find_csvs_in_window
+        from datetime import date
+        self._write(tmp_path, 'foo_20260420.csv')
+        self._write(tmp_path, 'foo_20260424.csv')
+        self._write(tmp_path, 'foo_20260501.csv')
+        result = find_csvs_in_window(tmp_path, 'foo', date(2026, 4, 24))
+        names = [p.name for p in result]
+        assert names == ['foo_20260424.csv', 'foo_20260501.csv']
+
+    def test_pattern_substring_filter(self, tmp_path):
+        """Only files whose name contains the pattern substring are returned."""
+        from canvigator_utils import find_csvs_in_window
+        from datetime import date
+        self._write(tmp_path, 'recordings_20260501.csv')
+        self._write(tmp_path, 'gradebook_20260501.csv')
+        result = find_csvs_in_window(tmp_path, 'recordings', date(2026, 1, 1))
+        assert [p.name for p in result] == ['recordings_20260501.csv']
+
+    def test_exclude_substr_skips_matches(self, tmp_path):
+        """Files containing exclude_substr are dropped even if they match the pattern."""
+        from canvigator_utils import find_csvs_in_window
+        from datetime import date
+        self._write(tmp_path, 'foo_20260501.csv')
+        self._write(tmp_path, 'foo_dryrun_20260501.csv')
+        result = find_csvs_in_window(tmp_path, 'foo', date(2026, 1, 1), exclude_substr='dryrun')
+        assert [p.name for p in result] == ['foo_20260501.csv']
+
+    def test_missing_directory_returns_empty(self, tmp_path):
+        """A non-existent data_path returns an empty list rather than raising."""
+        from canvigator_utils import find_csvs_in_window
+        from datetime import date
+        result = find_csvs_in_window(tmp_path / 'does_not_exist', 'foo', date(2026, 1, 1))
+        assert result == []
+
+    def test_results_sorted_ascending_by_date(self, tmp_path):
+        """Output is sorted ascending so callers can reason chronologically."""
+        from canvigator_utils import find_csvs_in_window
+        from datetime import date
+        self._write(tmp_path, 'foo_20260501.csv')
+        self._write(tmp_path, 'foo_20260424.csv')
+        self._write(tmp_path, 'foo_20260427.csv')
+        result = find_csvs_in_window(tmp_path, 'foo', date(2026, 4, 1))
+        assert [p.name for p in result] == ['foo_20260424.csv', 'foo_20260427.csv', 'foo_20260501.csv']
+
+
+class TestLoadQuizMisses:
+    """Tests for canvigator_digest._loadQuizMisses."""
+
+    def _write_subs(self, tmp_path, prefix, date_str, rows):
+        df = pd.DataFrame(rows)
+        df.to_csv(tmp_path / f"{prefix}all_subs_by_question_{date_str}.csv", index=False)
+
+    def _write_tags(self, tmp_path, prefix, date_str, rows):
+        df = pd.DataFrame(rows)
+        df.to_csv(tmp_path / f"{prefix}questions_w_tags_{date_str}.csv", index=False)
+
+    def test_per_tag_miss_count_basic(self, tmp_path):
+        """A miss row credits each of its question's keywords once."""
+        from canvigator_digest import _loadQuizMisses
+        from datetime import date
+        self._write_subs(tmp_path, 'quiz1_111_', '20260501', [
+            {'id': 7, 'question_id': 1, 'points': 0, 'points_possible': 1},
+            {'id': 7, 'question_id': 2, 'points': 1, 'points_possible': 1},
+            {'id': 8, 'question_id': 1, 'points': 0, 'points_possible': 1},
+        ])
+        self._write_tags(tmp_path, 'quiz1_111_', '20260501', [
+            {'question_id': 1, 'keywords': 'recursion, base case'},
+            {'question_id': 2, 'keywords': 'sorting'},
+        ])
+        result = _loadQuizMisses(tmp_path, date(2026, 4, 1))
+        assert len(result) == 1
+        entry = result[0]
+        assert entry['quiz_id'] == '111'
+        assert entry['quiz_name'] == 'quiz1'
+        assert entry['n_missed_per_tag'] == {'recursion': 2, 'base case': 2}
+
+    def test_partial_credit_counts_as_miss(self, tmp_path):
+        """`points < points_possible` is the miss rule — partial credit counts."""
+        from canvigator_digest import _loadQuizMisses
+        from datetime import date
+        self._write_subs(tmp_path, 'quiz1_111_', '20260501', [
+            {'id': 7, 'question_id': 1, 'points': 0.5, 'points_possible': 1},
+        ])
+        self._write_tags(tmp_path, 'quiz1_111_', '20260501', [
+            {'question_id': 1, 'keywords': 'recursion'},
+        ])
+        result = _loadQuizMisses(tmp_path, date(2026, 4, 1))
+        assert result[0]['n_missed_per_tag']['recursion'] == 1
+
+    def test_quiz_without_tags_csv_is_skipped(self, tmp_path):
+        """A quiz with subs in window but no questions_w_tags CSV is skipped with a warning."""
+        from canvigator_digest import _loadQuizMisses
+        from datetime import date
+        self._write_subs(tmp_path, 'quiz1_111_', '20260501', [
+            {'id': 7, 'question_id': 1, 'points': 0, 'points_possible': 1},
+        ])
+        result = _loadQuizMisses(tmp_path, date(2026, 4, 1))
+        assert result == []
+
+    def test_subs_outside_window_excluded(self, tmp_path):
+        """Subs files dated before since_date are not loaded."""
+        from canvigator_digest import _loadQuizMisses
+        from datetime import date
+        self._write_subs(tmp_path, 'quiz1_111_', '20260301', [
+            {'id': 7, 'question_id': 1, 'points': 0, 'points_possible': 1},
+        ])
+        self._write_tags(tmp_path, 'quiz1_111_', '20260301', [
+            {'question_id': 1, 'keywords': 'recursion'},
+        ])
+        result = _loadQuizMisses(tmp_path, date(2026, 4, 1))
+        assert result == []
+
+
+class TestLoadFollowupAssessments:
+    """Tests for canvigator_digest._loadFollowupAssessments."""
+
+    def _write_assessments(self, tmp_path, prefix, rows):
+        df = pd.DataFrame(rows)
+        df.to_csv(tmp_path / f"{prefix}followup_assessments.csv", index=False)
+
+    def test_filters_to_window_and_struggling_rows(self, tmp_path):
+        """Only fail or borderline rows whose assessed_at >= since_date are kept."""
+        from canvigator_digest import _loadFollowupAssessments
+        from datetime import date
+        self._write_assessments(tmp_path, 'quiz1_111_', [
+            {'student_id': 1, 'question_id': 5, 'question_mode': 'explain',
+             'result': 'fail', 'confidence': 'high',
+             'transcript': 'I missed it', 'criteria_evaluations': '',
+             'feedback': 'wrong on X', 'assessed_at': '2026-05-01T12:00:00+00:00'},
+            {'student_id': 2, 'question_id': 5, 'question_mode': 'explain',
+             'result': 'pass', 'confidence': 'high',
+             'transcript': 'good answer', 'criteria_evaluations': '',
+             'feedback': 'great', 'assessed_at': '2026-05-01T12:00:00+00:00'},
+            {'student_id': 3, 'question_id': 5, 'question_mode': 'explain',
+             'result': 'pass', 'confidence': 'borderline',
+             'transcript': 'shaky', 'criteria_evaluations': '',
+             'feedback': 'almost', 'assessed_at': '2026-05-01T12:00:00+00:00'},
+            {'student_id': 4, 'question_id': 5, 'question_mode': 'explain',
+             'result': 'fail', 'confidence': 'high',
+             'transcript': 'old miss', 'criteria_evaluations': '',
+             'feedback': 'wrong', 'assessed_at': '2026-03-01T12:00:00+00:00'},
+        ])
+        result = _loadFollowupAssessments(tmp_path, date(2026, 4, 1))
+        assert len(result) == 1
+        entry = result[0]
+        assert entry['quiz_id'] == '111'
+        assert entry['quiz_name'] == 'quiz1'
+        # Pass+high is dropped; fail+high and pass+borderline are kept.
+        kept_ids = {row['student_id'] for row in entry['rows_by_question'][5]}
+        assert kept_ids == {1, 3}
+
+    def test_drops_nat_rows_and_records_count(self, tmp_path):
+        """Rows whose assessed_at is unparseable are dropped and counted via n_dropped_nat."""
+        from canvigator_digest import _loadFollowupAssessments
+        from datetime import date
+        self._write_assessments(tmp_path, 'quiz1_111_', [
+            {'student_id': 1, 'question_id': 5, 'question_mode': 'explain',
+             'result': 'fail', 'confidence': 'high', 'transcript': '',
+             'criteria_evaluations': '', 'feedback': '', 'assessed_at': 'not-a-date'},
+            {'student_id': 2, 'question_id': 5, 'question_mode': 'explain',
+             'result': 'fail', 'confidence': 'high', 'transcript': '',
+             'criteria_evaluations': '', 'feedback': '', 'assessed_at': '2026-05-01T12:00:00+00:00'},
+        ])
+        result = _loadFollowupAssessments(tmp_path, date(2026, 4, 1))
+        assert len(result) == 1
+        assert result[0]['n_dropped_nat'] == 1
+
+
+class TestBuildFollowupThemePrompt:
+    """Tests for canvigator_digest._buildFollowupThemePrompt."""
+
+    def test_explain_mode_includes_transcript(self):
+        """Explain-mode prompts include the transcript and the grader feedback."""
+        from canvigator_digest import _buildFollowupThemePrompt
+        rows = [
+            {'result': 'fail', 'confidence': 'high',
+             'transcript': 'I confused base case with recursive case',
+             'feedback': 'missed key idea', 'criteria_evaluations': ''},
+        ]
+        prompt = _buildFollowupThemePrompt('quiz1', 5, rows, 'explain')
+        assert 'Mode: explain' in prompt
+        assert 'I confused base case' in prompt
+        assert 'missed key idea' in prompt
+
+    def test_draw_mode_omits_transcript_includes_feedback(self):
+        """Draw-mode prompts skip transcript (always empty for draw) but keep feedback."""
+        from canvigator_digest import _buildFollowupThemePrompt
+        rows = [
+            {'result': 'fail', 'confidence': 'high',
+             'transcript': '', 'feedback': 'BST drawn without root',
+             'criteria_evaluations': ''},
+        ]
+        prompt = _buildFollowupThemePrompt('quiz1', 5, rows, 'draw')
+        assert 'Mode: draw' in prompt
+        assert 'BST drawn without root' in prompt
+
+    def test_caps_rows_at_max(self):
+        """Row count is capped at _MAX_FOLLOWUP_ROWS_PER_PROMPT to bound context size."""
+        from canvigator_digest import _buildFollowupThemePrompt, _MAX_FOLLOWUP_ROWS_PER_PROMPT
+        rows = [
+            {'result': 'fail', 'confidence': 'high',
+             'transcript': f'transcript {i}', 'feedback': '', 'criteria_evaluations': ''}
+            for i in range(50)
+        ]
+        prompt = _buildFollowupThemePrompt('quiz1', 5, rows, 'explain')
+        assert f"Number of struggling responses: {_MAX_FOLLOWUP_ROWS_PER_PROMPT}" in prompt
+        # Student 13+ should not appear (we keep only the first 12).
+        assert "Student 13" not in prompt
+
+    def test_criteria_evaluations_rendered_as_bullets(self):
+        """JSON criteria_evaluations are summarized as compact bullets in the prompt."""
+        from canvigator_digest import _buildFollowupThemePrompt
+        import json as _json
+        crit_blob = _json.dumps({
+            'pass_criteria_evaluations': [
+                {'criterion': 'mentions base case', 'status': 'missing'},
+                {'criterion': 'explains stack frames', 'status': 'partial'},
+            ],
+            'fatal_errors_evaluations': [
+                {'error': 'asserts recursion is just a loop', 'status': 'present'},
+            ],
+        })
+        rows = [{'result': 'fail', 'confidence': 'high', 'transcript': '',
+                 'feedback': '', 'criteria_evaluations': crit_blob}]
+        prompt = _buildFollowupThemePrompt('quiz1', 5, rows, 'explain')
+        assert 'mentions base case' in prompt
+        assert 'asserts recursion is just a loop' in prompt
+        assert '[FATAL]' in prompt
+
+
+class TestBuildDigestPriorities:
+    """Tests for canvigator_digest._buildDigestPriorities."""
+
+    def test_ranks_by_descending_miss_count(self):
+        """Higher miss counts come first; tied tags break alphabetically."""
+        from canvigator_digest import _buildDigestPriorities
+        quiz_misses = [{
+            'quiz_id': '111', 'quiz_name': 'quiz1', 'total_attempts': 10,
+            'n_missed_per_tag': {'recursion': 5, 'sorting': 2, 'arrays': 5},
+        }]
+        result = _buildDigestPriorities(quiz_misses, {}, [], top_n=10)
+        tags = [p['tag'] for p in result]
+        assert tags[:3] == ['arrays', 'recursion', 'sorting']
+
+    def test_three_sources_attributed(self):
+        """A tag that appears via quiz misses + recordings credits both sources."""
+        from canvigator_digest import _buildDigestPriorities
+        quiz_misses = [{
+            'quiz_id': '111', 'quiz_name': 'quiz1', 'total_attempts': 10,
+            'n_missed_per_tag': {'recursion': 3},
+        }]
+        recording_results = [{
+            'assignment_id': '999',
+            'transcripts_with_names': [],
+            'tags': ['recursion'],
+            'tag_to_indices': {'recursion': [1, 2]},
+            'themes_md': '',
+        }]
+        result = _buildDigestPriorities(quiz_misses, {}, recording_results, top_n=10)
+        recursion_entry = next(p for p in result if p['tag'] == 'recursion')
+        assert set(recursion_entry['sources']) == {'quiz', 'recording'}
+        # 3 quiz misses + 2 recording mentions = 5
+        assert recursion_entry['miss_count'] == 5
+
+    def test_followup_themes_become_synthetic_tags(self):
+        """Follow-up themes get a synthetic tag attribution since they aren't tag-keyed."""
+        from canvigator_digest import _buildDigestPriorities
+        followup_themes = {('111', 5): '- **Base case confusion**: students forget terminator'}
+        result = _buildDigestPriorities([], followup_themes, [], top_n=10)
+        assert len(result) == 1
+        entry = result[0]
+        assert 'quiz 111' in entry['tag']
+        assert entry['sources'] == ['followup']
+        assert entry['evidence_snippets'] == ['- **Base case confusion**: students forget terminator']
+
+    def test_top_n_caps_results(self):
+        """top_n trims the priorities list to that many entries."""
+        from canvigator_digest import _buildDigestPriorities
+        quiz_misses = [{
+            'quiz_id': '111', 'quiz_name': 'quiz1', 'total_attempts': 10,
+            'n_missed_per_tag': {f't{i}': i for i in range(20)},
+        }]
+        result = _buildDigestPriorities(quiz_misses, {}, [], top_n=3)
+        assert len(result) == 3
+
+
+class TestBuildDiscussionPromptCloud:
+    """Privacy guardrail: cloud prompt must not leak transcripts or theme content."""
+
+    def test_cloud_prompt_excludes_evidence_snippets(self):
+        """The redacted prompt embeds tag names + counts but no snippet text."""
+        from canvigator_digest import _buildDiscussionPromptCloud
+        priorities = [{
+            'tag': 'recursion',
+            'miss_count': 7,
+            'sources': ['quiz', 'followup'],
+            'evidence_snippets': [
+                'STUDENT_TRANSCRIPT: I confused base case with recursive call',
+                'CRITERIA: missing(mentions base case)',
+            ],
+        }]
+        prompt = _buildDiscussionPromptCloud(priorities)
+        assert 'recursion' in prompt
+        assert '7' in prompt
+        # Privacy: no snippet text leaks through the redacted prompt.
+        assert 'STUDENT_TRANSCRIPT' not in prompt
+        assert 'CRITERIA' not in prompt
+        assert 'base case' not in prompt
+
+    def test_cloud_prompt_includes_theme_count_only(self):
+        """The cloud prompt mentions how many evidence snippets exist, not their content."""
+        from canvigator_digest import _buildDiscussionPromptCloud
+        priorities = [{
+            'tag': 'sorting',
+            'miss_count': 4,
+            'sources': ['quiz'],
+            'evidence_snippets': ['snip A', 'snip B'],
+        }]
+        prompt = _buildDiscussionPromptCloud(priorities)
+        assert '2 related theme cluster(s)' in prompt
+        assert 'snip A' not in prompt
+        assert 'snip B' not in prompt
+
+    def test_local_prompt_includes_evidence(self):
+        """By contrast, the local prompt does include the evidence snippets verbatim."""
+        from canvigator_digest import _buildDiscussionPromptLocal
+        priorities = [{
+            'tag': 'recursion',
+            'miss_count': 7,
+            'sources': ['quiz'],
+            'evidence_snippets': ['STUDENT_TRANSCRIPT: I confused base case'],
+        }]
+        prompt = _buildDiscussionPromptLocal(priorities)
+        assert 'STUDENT_TRANSCRIPT' in prompt
+        assert 'base case' in prompt
+
+
+class TestSuggestDiscussionQuestions:
+    """Tests for canvigator_digest._suggestDiscussionQuestions."""
+
+    def test_empty_priorities_skips_llm_call(self):
+        """An empty priorities list returns the no-gaps string and never builds a client."""
+        from canvigator_digest import _suggestDiscussionQuestions
+        with patch('canvigator_digest._make_client') as mk:
+            result = _suggestDiscussionQuestions([], cloud_questions=False)
+        mk.assert_not_called()
+        assert 'no significant gaps' in result
+
+    def test_local_path_uses_local_client(self):
+        """cloud_questions=False routes through _make_client(cloud=False)."""
+        from canvigator_digest import _suggestDiscussionQuestions
+        priorities = [{'tag': 'recursion', 'miss_count': 3, 'sources': ['quiz'], 'evidence_snippets': []}]
+        fake_client = MagicMock()
+        with patch('canvigator_digest._make_client', return_value=fake_client) as mk, \
+             patch('canvigator_digest._chat_with_retry',
+                   return_value={'message': {'content': '- discuss recursion'}}):
+            result = _suggestDiscussionQuestions(priorities, cloud_questions=False)
+        mk.assert_called_once_with(cloud=False)
+        assert '- discuss recursion' in result
+
+    def test_cloud_path_uses_cloud_client(self):
+        """cloud_questions=True routes through _make_client(cloud=True)."""
+        from canvigator_digest import _suggestDiscussionQuestions
+        priorities = [{'tag': 'recursion', 'miss_count': 3, 'sources': ['quiz'], 'evidence_snippets': ['secret']}]
+        fake_client = MagicMock()
+        captured = {}
+
+        def _capture(client, **kwargs):
+            captured['messages'] = kwargs.get('messages')
+            return {'message': {'content': '- discuss recursion'}}
+
+        with patch('canvigator_digest._make_client', return_value=fake_client) as mk, \
+             patch('canvigator_digest._chat_with_retry', side_effect=_capture):
+            _suggestDiscussionQuestions(priorities, cloud_questions=True)
+        mk.assert_called_once_with(cloud=True)
+        # Privacy guardrail: the secret evidence snippet must not appear in the user message.
+        user_msg = captured['messages'][1]['content']
+        assert 'secret' not in user_msg
+
+
+class TestRenderDigest:
+    """Tests for canvigator_digest._renderDigest."""
+
+    def test_five_sections_present_in_order(self):
+        """The rendered Markdown contains all five sections in the documented order."""
+        from canvigator_digest import _renderDigest
+        from datetime import date
+        out = _renderDigest(
+            course_label='CSI-3300',
+            since_date=date(2026, 4, 24),
+            today=date(2026, 5, 1),
+            quiz_misses=[],
+            followup_themes={},
+            followup_blocks=[],
+            recording_results=[],
+            discussion_md='- example question',
+            days=7,
+        )
+        # All four data-source sections plus the discussion section are present.
+        for header in ['## Quiz performance', '## Follow-up reply themes',
+                       '## Media-recording themes', '## Suggested in-class discussion questions']:
+            assert header in out
+        # And they appear in order.
+        idx_quiz = out.index('## Quiz performance')
+        idx_followup = out.index('## Follow-up reply themes')
+        idx_recording = out.index('## Media-recording themes')
+        idx_discussion = out.index('## Suggested in-class discussion questions')
+        assert idx_quiz < idx_followup < idx_recording < idx_discussion
+
+    def test_header_surfaces_window_dates(self):
+        """The header line includes the window range and day count."""
+        from canvigator_digest import _renderDigest
+        from datetime import date
+        out = _renderDigest(
+            course_label='CSI-3300',
+            since_date=date(2026, 4, 24),
+            today=date(2026, 5, 1),
+            quiz_misses=[],
+            followup_themes={},
+            followup_blocks=[],
+            recording_results=[],
+            discussion_md='',
+            days=7,
+        )
+        assert '2026-04-24' in out
+        assert '2026-05-01' in out
+        assert '7 day' in out
+
+    def test_quiz_performance_table_renders_with_data(self):
+        """When quiz misses exist, the section renders a Markdown table sorted by descending miss count."""
+        from canvigator_digest import _renderDigest
+        from datetime import date
+        from collections import Counter
+        quiz_misses = [{
+            'quiz_id': '111', 'quiz_name': 'quiz1', 'total_attempts': 10,
+            'n_missed_per_tag': Counter({'recursion': 5, 'sorting': 1}),
+        }]
+        out = _renderDigest(
+            'CSI-3300', date(2026, 4, 24), date(2026, 5, 1),
+            quiz_misses, {}, [], [], 'discussion', 7,
+        )
+        assert '| Tag | Total misses | Contributing quizzes |' in out
+        # recursion (5) listed before sorting (1)
+        idx_r = out.index('| recursion |')
+        idx_s = out.index('| sorting |')
+        assert idx_r < idx_s
+
+
+class TestPrepClassDigestEmptyWindow:
+    """Tests for the orchestrator's empty-window guardrail."""
+
+    def test_empty_window_writes_no_file(self, tmp_path, capsys):
+        """With no CSVs in the data directory, the orchestrator returns None and writes nothing."""
+        from canvigator_digest import prepClassDigest
+        course = SimpleNamespace(
+            config=SimpleNamespace(data_path=tmp_path),
+            canvas_course=SimpleNamespace(course_code='CSI-3300', name='Test'),
+        )
+        result = prepClassDigest(course, days=7, cloud_questions=False)
+        assert result is None
+        # No output file created.
+        assert list(tmp_path.glob('class_digest_*.md')) == []
+        # User-facing message confirms the no-op.
+        captured = capsys.readouterr()
+        assert 'nothing to digest' in captured.out
+
+
+# ---------------------------------------------------------------------------
+# canvigator_help tests (per-task --help)
+# ---------------------------------------------------------------------------
+
+class TestPerTaskHelp:
+    """Integrity + rendering + CLI-dispatch tests for the per-task help system."""
+
+    def _all_task_names(self):
+        """Pull the list of tasks from canvigator.py without executing it."""
+        # canvigator.py is a top-level script; importing it would attempt to
+        # parse sys.argv. We instead read task_groups via runpy in a guarded
+        # mode that stops before the parse loop.
+        import ast
+        src = Path(__file__).parent.joinpath('canvigator.py').read_text()
+        tree = ast.parse(src)
+        names = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id == 'task_groups':
+                        # task_groups = [(header, [(name, desc), ...]), ...]
+                        for group_tuple in node.value.elts:
+                            items_list = group_tuple.elts[1]
+                            for entry in items_list.elts:
+                                names.append(entry.elts[0].value)
+        return names
+
+    def test_every_task_has_help_entry(self):
+        """Every task name in canvigator.py has a TASK_HELP entry."""
+        from canvigator_help import TASK_HELP
+        task_names = self._all_task_names()
+        assert task_names, "expected to find tasks in canvigator.py"
+        missing = sorted(set(task_names) - set(TASK_HELP))
+        assert not missing, f"missing TASK_HELP entries: {missing}"
+        extra = sorted(set(TASK_HELP) - set(task_names))
+        assert not extra, f"TASK_HELP has stale entries: {extra}"
+
+    def test_required_fields_non_empty(self):
+        """Every entry has non-empty description, inputs, outputs, examples."""
+        from canvigator_help import TASK_HELP
+        for name, entry in TASK_HELP.items():
+            assert entry.get('description', '').strip(), f"{name}: empty description"
+            assert entry.get('inputs'), f"{name}: empty inputs"
+            assert entry.get('outputs'), f"{name}: empty outputs"
+            assert entry.get('examples'), f"{name}: empty examples"
+            # These keys must exist (may be empty lists) so the renderer can
+            # iterate without KeyError.
+            for key in ('prerequisites', 'flags', 'run_before', 'run_after'):
+                assert key in entry, f"{name}: missing key '{key}'"
+                assert isinstance(entry[key], list), f"{name}: '{key}' must be a list"
+
+    def test_flag_references_resolve(self):
+        """Every flag listed in any entry is defined in FLAG_DESCRIPTIONS."""
+        from canvigator_help import TASK_HELP, FLAG_DESCRIPTIONS
+        for name, entry in TASK_HELP.items():
+            for flag in entry.get('flags', []):
+                assert flag in FLAG_DESCRIPTIONS, (
+                    f"{name}: references unknown flag '{flag}'"
+                )
+
+    def test_run_before_after_targets_exist(self):
+        """run_before / run_after entries are themselves valid task names."""
+        from canvigator_help import TASK_HELP
+        all_tasks = set(TASK_HELP)
+        for name, entry in TASK_HELP.items():
+            for ref in entry.get('run_before', []) + entry.get('run_after', []):
+                assert ref in all_tasks, (
+                    f"{name}: run_before/run_after references unknown task '{ref}'"
+                )
+
+    def test_print_task_help_render(self, capsys):
+        """The rendered output contains the description, prereq, flags, and example."""
+        from canvigator_help import print_task_help
+        print_task_help('send-quiz-reminder')
+        out = capsys.readouterr().out
+        assert 'send-quiz-reminder' in out
+        assert 'Send Canvas reminder messages' in out
+        assert 'Prerequisites:' in out
+        assert 'get-quiz-questions' in out  # cited as a prerequisite
+        assert '--all' in out
+        assert '--dry-run' in out
+        assert 'Examples:' in out
+        assert 'python canvigator.py' in out
+        assert 'Workflow:' in out
+        assert 'Run before this:' in out
+        # Universal --crn flag should be auto-appended to the Flags section.
+        assert '--crn' in out
+
+    def test_print_task_help_unknown_task(self, capsys):
+        """Unknown task names render a friendly message instead of crashing."""
+        from canvigator_help import print_task_help
+        print_task_help('not-a-real-task')
+        out = capsys.readouterr().out
+        assert 'not-a-real-task' in out
+
+    def _run_cli(self, *args):
+        """Invoke canvigator.py as a subprocess; return (rc, stdout, stderr).
+
+        Sets CANVAS_URL/CANVAS_TOKEN to empty so the subprocess can prove the
+        --help path exits before constructing the Canvas client.
+        """
+        env = {'PATH': '/usr/bin:/bin', 'PYTHONPATH': ''}
+        # Inherit some basics so Python can find its stdlib in the test runner.
+        import os
+        for k in ('PATH', 'HOME', 'PYTHONPATH', 'PYTHONHOME'):
+            if k in os.environ:
+                env[k] = os.environ[k]
+        # Explicitly NOT setting CANVAS_URL / CANVAS_TOKEN — the help path
+        # must short-circuit before the env-var check.
+        env['CANVAS_URL'] = ''
+        env['CANVAS_TOKEN'] = ''
+        import sys
+        cwd = Path(__file__).parent
+        result = subprocess.run(
+            [sys.executable, 'canvigator.py', *args],
+            capture_output=True, text=True, cwd=cwd, env=env, timeout=15,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_cli_dispatch_global_help(self):
+        """`canvigator.py --help` exits 0 and prints the task list."""
+        rc, stdout, stderr = self._run_cli('--help')
+        assert rc == 0, f"stderr={stderr!r}"
+        assert 'Usage: canvigator.py' in stdout
+        # The new footer line should be present.
+        assert "<task> --help" in stdout
+        # A representative task name should appear.
+        assert 'send-quiz-reminder' in stdout
+
+    def test_cli_dispatch_task_help(self):
+        """`canvigator.py <task> --help` exits 0 and prints task-specific help."""
+        rc, stdout, stderr = self._run_cli('create-pairs', '--help')
+        assert rc == 0, f"stderr={stderr!r}"
+        assert 'create-pairs' in stdout
+        assert 'Prerequisites:' in stdout
+        assert 'present_*.csv' in stdout
+
+    def test_cli_dispatch_task_help_short_form(self):
+        """`canvigator.py <task> -h` works the same as --help."""
+        rc, stdout, stderr = self._run_cli('send-quiz-reminder', '-h')
+        assert rc == 0, f"stderr={stderr!r}"
+        assert 'send-quiz-reminder' in stdout
+        assert 'Workflow:' in stdout
+
+    def test_cli_invalid_task_with_help(self):
+        """`canvigator.py bogus --help` still rejects the unknown task."""
+        rc, stdout, _ = self._run_cli('bogus-task', '--help')
+        assert rc == 1
+        assert 'Invalid task' in stdout

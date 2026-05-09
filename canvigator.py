@@ -33,7 +33,8 @@ task_groups = [
         ('delete-old-conversations', 'Delete Canvas conversations older than N months (account-wide; default 6; override with --months/-m)'),
         ('get-gradebook', 'Export course gradebook'),
         ('get-roster', 'Export the full course roster (name, id, sis_id, enrollment_type)'),
-        ('send-quiz-reminder', 'Send quiz reminder messages to students'),
+        ('send-quiz-reminder', 'Send quiz reminder messages to students (use --all for one consolidated message across every published, future-due quiz)'),
+        ('prep-class-digest', 'Synthesize a 1-page Markdown brief on cohort gaps from the last N days (default 7; override with --days/-n)'),
     ]),
 ]
 task_descriptions = {name: desc for _, items in task_groups for name, desc in items}
@@ -42,26 +43,8 @@ tasks = list(task_descriptions.keys())
 
 def print_help():
     """Print usage information with grouped task descriptions."""
-    print("Usage: canvigator.py [OPTIONS] <task>\n")
-    print("Options (short and long forms are interchangeable):")
-    print("  -d, --dry-run                Preview changes without modifying Canvas (applies to bonus, reminder, follow-up,")
-    print("                               feedback, delete-old-conversations, get-media-recordings — CSV is still written)")
-    print("  -t, --tag                    Use a cloud LLM via Ollama to tag questions (get-quiz-questions only)")
-    print("  -a, --all                    Run across every quiz in the course (get-quiz-questions, get-quiz-submission-events, send-quiz-reminder)")
-    print("  -c, --crn <CRN>              Select course by CRN (last 5 digits of course code)")
-    print("  -m, --months <N>             Age threshold in months for delete-old-conversations (default: 6)")
-    print("  -w, --reply-window-days <N>  Days to accept replies after follow-up sent (default: 5, assess-replies only)")
-    print("  -g, --auto-grade             Skip per-student review prompt and auto-award points_possible (get-media-recordings only)")
-    max_name = max(len(t) for t in tasks)
-    for header, items in task_groups:
-        print(f"\n{header}")
-        for name, desc in items:
-            print(f"  {name:<{max_name}}  {desc}")
-    print("\nNotes:")
-    print("  generate-follow-up-questions uses a cloud LLM (via Ollama) in two steps:")
-    print("    1. Classifies each question as 'explain' (oral) or 'draw' (visual)")
-    print("    2. Generates a mode-appropriate open-ended question for instructor review")
-    print("  Output CSV includes a question_mode column so the instructor can override choices.")
+    import canvigator_help as ch
+    ch.print_global_help(task_groups)
 
 
 def _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag):
@@ -77,6 +60,31 @@ def _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_
         cassign.analyzeRecordings()
     else:
         cassign.getMediaRecordings(auto_grade=auto_grade_flag, dry_run=dry_run)
+
+
+# Course-level tasks that need only `course` + a few primitives. Kept in a
+# helper to keep the main if/elif chain under flake8's max-complexity limit.
+COURSE_TASKS = frozenset({
+    'get-activity', 'create-quiz', 'get-gradebook', 'get-roster',
+    'get-conversations', 'prep-class-digest',
+})
+
+
+def _run_course_task(task, course, canv_config, n_days, cloud_questions):
+    """Dispatch a course-level task that doesn't need quiz/assignment selection."""
+    if task == 'get-activity':
+        course.saveStudentActivity(canv_config.data_path)
+    elif task == 'create-quiz':
+        course.createQuiz()
+    elif task == 'get-gradebook':
+        course.exportGradebook(canv_config.data_path)
+    elif task == 'get-roster':
+        course.exportRoster(canv_config.data_path)
+    elif task == 'get-conversations':
+        course.exportConversations(canv_config.data_path)
+    elif task == 'prep-class-digest':
+        import canvigator_digest as cd
+        cd.prepClassDigest(course, days=n_days, cloud_questions=cloud_questions)
 
 
 def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
@@ -122,8 +130,19 @@ _SHORT_TO_LONG = {
     '-m': '--months',
     '-w': '--reply-window-days',
     '-g': '--auto-grade',
+    '-n': '--days',
+    '-q': '--cloud-questions',
+    '-h': '--help',
 }
 args = [_SHORT_TO_LONG.get(a, a) for a in sys.argv[1:]]
+
+# --help is intentionally stripped before the rest of the parser so that
+# `canvigator.py <task> --help` and `canvigator.py --help <task>` behave the
+# same. The bare `canvigator.py --help` case falls through to the empty-args
+# branch below, which prints global help.
+help_requested = '--help' in args
+while '--help' in args:
+    args.remove('--help')
 
 dry_run = '--dry-run' in args
 if dry_run:
@@ -140,6 +159,10 @@ if all_quizzes_flag:
 auto_grade_flag = '--auto-grade' in args
 if auto_grade_flag:
     args.remove('--auto-grade')
+
+cloud_questions_flag = '--cloud-questions' in args
+if cloud_questions_flag:
+    args.remove('--cloud-questions')
 
 crn = None
 if '--crn' in args:
@@ -186,19 +209,42 @@ if '--reply-window-days' in args:
     args.pop(rw_idx)  # remove '--reply-window-days'
     args.pop(rw_idx)  # remove the value
 
+n_days = 7
+if '--days' in args:
+    nd_idx = args.index('--days')
+    if nd_idx + 1 >= len(args):
+        print("Error: --days/-n requires a numeric value (number of days)")
+        sys.exit(1)
+    try:
+        n_days = int(args[nd_idx + 1])
+        if n_days < 1:
+            raise ValueError
+    except ValueError:
+        print(f"Error: --days/-n must be a positive integer, got '{args[nd_idx + 1]}'")
+        sys.exit(1)
+    args.pop(nd_idx)  # remove '--days'
+    args.pop(nd_idx)  # remove the value
+
 if len(args) < 1:
     print_help()
-    sys.exit(1)
+    # Distinguish bare `canvigator.py --help` (success) from `canvigator.py`
+    # with no args at all (usage error).
+    sys.exit(0 if help_requested else 1)
 
 task = args[0]
 
-if task in ("help", "--help"):
+if task == "help":
     print_help()
     sys.exit(0)
 
 if task not in tasks:
     print(f"Invalid task: '{task}'. Run with --help to see available tasks.")
     sys.exit(1)
+
+if help_requested:
+    import canvigator_help as ch
+    ch.print_task_help(task)
+    sys.exit(0)
 
 # export-anon-data works with local files only — no Canvas API needed
 if task == 'export-anon-data':
@@ -293,8 +339,8 @@ print(f"\nSelected course: {course_choice.name}")
 
 course = cc.CanvigatorCourse(canvas, course_choice, canv_config, verbose=False)
 
-if task == 'get-activity':
-    course.saveStudentActivity(canv_config.data_path)
+if task in COURSE_TASKS:
+    _run_course_task(task, course, canv_config, n_days, cloud_questions_flag)
 
 elif task == 'get-quiz-submission-events' and all_quizzes_flag:
     course.getAllQuizzesAndSubmissions()
@@ -302,20 +348,8 @@ elif task == 'get-quiz-submission-events' and all_quizzes_flag:
 elif task == 'send-quiz-reminder' and all_quizzes_flag:
     course.sendAllQuizReminders(dry_run=dry_run)
 
-elif task == 'create-quiz':
-    course.createQuiz()
-
 elif task in ('create-media-recording-assignment', 'get-media-recordings', 'analyze-media-recordings'):
     _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag)
-
-elif task == 'get-gradebook':
-    course.exportGradebook(canv_config.data_path)
-
-elif task == 'get-roster':
-    course.exportRoster(canv_config.data_path)
-
-elif task == 'get-conversations':
-    course.exportConversations(canv_config.data_path)
 
 elif task == 'generate-follow-up-questions':
     # Driven by a pre-selected tagged-questions CSV, not a Canvas quiz
