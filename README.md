@@ -111,6 +111,8 @@ All model names are overridable via env vars (`OLLAMA_TEXT_MODEL`, `OLLAMA_MODEL
 ```bash
 source set_env.sh                            # set Canvas (and optional Ollama) environment variables (once per terminal session)
 python canvigator.py <task>                  # run a task (prompts for course selection)
+python canvigator.py --help                  # print the grouped task list and global options
+python canvigator.py <task> --help           # print a per-task cheat-sheet (prerequisites, inputs/outputs, applicable flags, examples, related tasks)
 python canvigator.py --crn <CRN> <task>      # select course by CRN (last 5 digits of course code)
 python canvigator.py --dry-run <task>        # preview changes without modifying Canvas (bonus, reminder, follow-up, delete-old-conversations, get-media-recordings)
 python canvigator.py --tag get-quiz-questions     # add LLM-generated topic tags to the quiz questions export
@@ -120,6 +122,12 @@ python canvigator.py --auto-grade get-media-recordings  # skip per-student revie
 python canvigator.py --days N prep-class-digest          # synthesize a 1-page brief on cohort gaps from the last N days (default 7)
 python canvigator.py --cloud-questions prep-class-digest # opt the discussion-question step into cloud Gemini 3 with a redacted prompt (default: local Gemma 4)
 ```
+
+Every flag has a single-dash short alias: `-d` (`--dry-run`), `-t` (`--tag`),
+`-a` (`--all`), `-c` (`--crn`), `-m` (`--months`), `-w`
+(`--reply-window-days`), `-g` (`--auto-grade`), `-n` (`--days`), `-q`
+(`--cloud-questions`), `-h` (`--help`). Short and long forms are
+interchangeable.
 
 The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas
 course code), bypassing the interactive course selection prompt. This is useful
@@ -182,7 +190,7 @@ with both models pulled.
 | | Files |
 |---|---|
 | **Input** | `data/<course>/<quiz>_<id>_followup_sent_YYYYMMDD.csv` (from `send-follow-up-question`) |
-| | `data/<course>/<quiz>_<id>_questions_w_tags_YYYYMMDD.csv` (for question context) |
+| | `data/<course>/<quiz>_<id>_open_ended_YYYYMMDD.csv` (provides the rubric, assessment guide, and exemplars used by the grader) |
 | **Output** | `data/<course>/<quiz>_<id>_followup_replies_YYYYMMDD.csv` |
 | | `data/<course>/replies/` — downloaded image attachments and audio recordings |
 | | `data/<course>/<quiz>_<id>_followup_assessments.csv` (persistent — merged across runs) |
@@ -283,8 +291,9 @@ incentive.
 
 | | Files |
 |---|---|
-| **Input** | `data/<course>/<quiz>_<id>_all_subs_and_events_YYYYMMDD.csv` (from `get-quiz-submission-events`) |
+| **Input** | `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv` (from `get-quiz-submission-events`) |
 | | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` (from `get-quiz-submission-events`) |
+| | `data/<course>/<quiz>_<id>_all_subs_and_events_YYYYMMDD.csv` (from `get-quiz-submission-events`) |
 | **Output** | `data/<course>/<quiz>_<id>_detected_partners_YYYYMMDD.csv` — detected partner groups |
 | | `data/<course>/<quiz>_<id>_scores_w_bonus_YYYYMMDD.csv` — scores with bonus column |
 | **Canvas side-effect** | Sets `fudge_points` on the student's highest-scoring attempt and leaves a submission comment (skipped in `--dry-run` mode) |
@@ -512,7 +521,9 @@ task that exports event history and per-question histogram figures.
 | | `data/<course>/<quiz>_<id>_all_submissions_YYYYMMDD.csv` — all submission attempts with scores |
 | | `data/<course>/<quiz>_<id>_all_subs_by_question_YYYYMMDD.csv` — per-question results for each attempt |
 | | `data/<course>/<quiz>_<id>_all_subs_and_events_YYYYMMDD.csv` — timestamped submission events |
-| **Output — figures** | `figures/<course>/<quiz>_<id>_histograms_YYYYMMDD.png` — per-question score histograms |
+| **Output — figures** | `figures/<course>/<quiz>_<id>_score_histograms_YYYYMMDD.png` — per-question score histograms |
+| | `figures/<course>/<quiz>_<id>_timing_first_attempt_YYYYMMDD.png` — per-question first-attempt timing histograms (minutes) |
+| | `figures/<course>/<quiz>_<id>_blurs_first_attempt_YYYYMMDD.png` — per-question first-attempt page-blur counts |
 
 ---
 
@@ -568,9 +579,14 @@ can still fetch those threads by ID.
 | **Output** | `data/<course>/conversations_YYYYMMDD.csv` |
 
 The output CSV is sorted newest first and contains columns: `conversation_id`,
-`subject`, `last_message_at`, `message_count`, `workflow_state`, `student_ids`
-(comma-separated), `student_names` (semicolon-separated), `n_student_participants`,
-`last_message`.
+`subject`, `last_message_at`, `first_message_at`, `message_count`,
+`workflow_state`, `student_ids` (comma-separated), `student_names`
+(semicolon-separated), `n_student_participants`, `last_message`.
+`first_message_at` is derived by fetching each matched conversation (one extra
+API call per conversation) and taking the earliest message `created_at`; it
+is also substituted into `last_message_at` when the list endpoint returns an
+empty value (occasionally happens for older/archived threads), so sort order
+stays meaningful.
 
 ---
 

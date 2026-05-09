@@ -133,11 +133,13 @@ TASK_HELP = {
         ),
         'prerequisites': [
             "get-quiz-submission-events must have been run for the quiz so the "
-            "*_all_submissions_*.csv and *_all_subs_and_events_*.csv exist.",
+            "*_all_submissions_*.csv, *_all_subs_by_question_*.csv, and "
+            "*_all_subs_and_events_*.csv all exist.",
         ],
         'inputs': [
             "Canvas quiz (selected interactively or via --crn).",
             "data/<course>/quiz<id>_all_submissions_*.csv",
+            "data/<course>/quiz<id>_all_subs_by_question_*.csv",
             "data/<course>/quiz<id>_all_subs_and_events_*.csv",
         ],
         'outputs': [
@@ -167,6 +169,8 @@ TASK_HELP = {
         ],
         'inputs': [
             "Canvas quiz (selected interactively or via --crn).",
+            "data/<course>/quiz<id>_all_submissions_*.csv",
+            "data/<course>/quiz<id>_all_subs_by_question_*.csv",
             "data/<course>/quiz<id>_all_subs_and_events_*.csv",
         ],
         'outputs': [
@@ -193,7 +197,7 @@ TASK_HELP = {
         ],
         'inputs': [
             "Canvas quiz (selected interactively or via --crn).",
-            "data/<course>/quiz<id>_all_subs_and_events_*.csv",
+            "data/<course>/quiz<id>_all_submissions_*.csv",
         ],
         'outputs': [
             "Canvas: fudge points + submission comments on retake-qualified "
