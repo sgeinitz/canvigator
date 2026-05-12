@@ -1080,17 +1080,17 @@ def _make_quiz_stub():
     return CanvigatorQuiz
 
 
-class TestFindStudentsWhoMissed:
-    """Tests for CanvigatorQuiz._findStudentsWhoMissed."""
+class TestClassifyStudentsByQuestionResult:
+    """Tests for CanvigatorQuiz._classifyStudentsByQuestionResult."""
 
     def _call(self, question_id, subs_rows, question_info):
-        """Helper to call _findStudentsWhoMissed without a full quiz instance."""
+        """Helper to call the classifier without a full quiz instance."""
         cls = _make_quiz_stub()
         df = _make_subs_by_question_df(subs_rows)
-        return cls._findStudentsWhoMissed(None, question_id, df, question_info)
+        return cls._classifyStudentsByQuestionResult(None, question_id, df, question_info)
 
-    def test_returns_students_who_missed(self):
-        """Only students who scored below points_possible are returned."""
+    def test_classifies_correct_and_missed(self):
+        """Each attempter is labeled 'missed' (points < pp) or 'correct' (points == pp)."""
         question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
         rows = [
             ('A', 1, 1, 1, 100, 0.0, 1.0, False),
@@ -1098,26 +1098,39 @@ class TestFindStudentsWhoMissed:
             ('C', 3, 1, 1, 100, 0.5, 1.0, False),
         ]
         result = self._call(100, rows, question_info)
-        assert sorted(result) == [1, 3]
+        assert result == {1: 'missed', 2: 'correct', 3: 'missed'}
 
     def test_uses_latest_attempt(self):
-        """Student who fixed the question on a later attempt is excluded."""
+        """A later attempt overrides the earlier one (fixed on retry → 'correct')."""
         question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
         rows = [
             ('A', 1, 1, 1, 100, 0.0, 1.0, False),
             ('A', 1, 2, 1, 100, 1.0, 1.0, True),
         ]
         result = self._call(100, rows, question_info)
-        assert result == []
+        assert result == {1: 'correct'}
 
-    def test_empty_when_no_misses(self):
-        """Returns empty list when all students scored perfectly."""
+    def test_all_correct(self):
+        """When every latest attempt scored perfectly, every student is 'correct'."""
         question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
         rows = [
             ('A', 1, 1, 1, 100, 1.0, 1.0, True),
+            ('B', 2, 1, 1, 100, 1.0, 1.0, True),
         ]
         result = self._call(100, rows, question_info)
-        assert result == []
+        assert result == {1: 'correct', 2: 'correct'}
+
+    def test_question_missing_from_info_returns_empty(self):
+        """Without a points_possible entry the classifier can't label anyone."""
+        rows = [('A', 1, 1, 1, 100, 1.0, 1.0, True)]
+        result = self._call(100, rows, question_info={})
+        assert result == {}
+
+    def test_no_attempts_returns_empty(self):
+        """Students who never attempted the quiz are absent from the result."""
+        question_info = {100: {'position': 1, 'keywords': 'topic a', 'points_possible': 1.0}}
+        result = self._call(100, [], question_info)
+        assert result == {}
 
 
 # ---------------------------------------------------------------------------
@@ -3014,6 +3027,81 @@ class TestFindCsvsInWindow:
         self._write(tmp_path, 'foo_20260427.csv')
         result = find_csvs_in_window(tmp_path, 'foo', date(2026, 4, 1))
         assert [p.name for p in result] == ['foo_20260424.csv', 'foo_20260427.csv', 'foo_20260501.csv']
+
+
+class TestFindRecentSubmissionCsvs:
+    """Tests for canvigator_quiz._findRecentSubmissionCsvs."""
+
+    SUFFIXES = ('all_submissions', 'all_subs_by_question', 'all_subs_and_events')
+
+    def _write_csv(self, tmp_path, name, age_seconds=0):
+        """Write a CSV in ``tmp_path``; backdate its mtime by ``age_seconds`` if positive."""
+        import os
+        import time
+        path = tmp_path / name
+        path.write_text('id\n1\n')
+        if age_seconds > 0:
+            ts = time.time() - age_seconds
+            os.utime(path, (ts, ts))
+
+    def _write_all_three(self, tmp_path, prefix='quiz', quiz_id=123, date_str='20260510', age_seconds=0):
+        """Write all three submission CSVs for ``prefix{quiz_id}`` with the given mtime offset."""
+        for suffix in self.SUFFIXES:
+            self._write_csv(tmp_path, f"{prefix}{quiz_id}_{suffix}_{date_str}.csv", age_seconds=age_seconds)
+
+    def test_all_three_fresh_returns_paths(self, tmp_path):
+        """When all three CSVs exist with current mtimes, the helper returns a 3-tuple of Paths."""
+        from canvigator_quiz import _findRecentSubmissionCsvs
+        self._write_all_three(tmp_path)
+        result = _findRecentSubmissionCsvs(tmp_path, 'quiz', 123, max_age_minutes=10)
+        assert result is not None
+        assert len(result) == 3
+        for p, suffix in zip(result, self.SUFFIXES):
+            assert suffix in p.name
+
+    def test_missing_one_returns_none(self, tmp_path):
+        """If any of the three CSVs is absent, the helper returns None."""
+        from canvigator_quiz import _findRecentSubmissionCsvs
+        self._write_csv(tmp_path, 'quiz123_all_submissions_20260510.csv')
+        self._write_csv(tmp_path, 'quiz123_all_subs_by_question_20260510.csv')
+        # all_subs_and_events deliberately missing
+        assert _findRecentSubmissionCsvs(tmp_path, 'quiz', 123, max_age_minutes=10) is None
+
+    def test_one_stale_returns_none(self, tmp_path):
+        """A single file outside the freshness window invalidates the cache."""
+        from canvigator_quiz import _findRecentSubmissionCsvs
+        self._write_csv(tmp_path, 'quiz123_all_submissions_20260510.csv')
+        self._write_csv(tmp_path, 'quiz123_all_subs_by_question_20260510.csv')
+        # 15 minutes is past the 10-minute window
+        self._write_csv(tmp_path, 'quiz123_all_subs_and_events_20260510.csv', age_seconds=15 * 60)
+        assert _findRecentSubmissionCsvs(tmp_path, 'quiz', 123, max_age_minutes=10) is None
+
+    def test_all_stale_returns_none(self, tmp_path):
+        """All-stale CSVs return None."""
+        from canvigator_quiz import _findRecentSubmissionCsvs
+        self._write_all_three(tmp_path, age_seconds=20 * 60)
+        assert _findRecentSubmissionCsvs(tmp_path, 'quiz', 123, max_age_minutes=10) is None
+
+    def test_respects_quiz_prefix(self, tmp_path):
+        """A non-default quiz_prefix is honored when looking up files."""
+        from canvigator_quiz import _findRecentSubmissionCsvs
+        self._write_all_three(tmp_path, prefix='midterm')
+        # Default prefix should miss
+        assert _findRecentSubmissionCsvs(tmp_path, 'quiz', 123, max_age_minutes=10) is None
+        # Matching prefix should hit
+        result = _findRecentSubmissionCsvs(tmp_path, 'midterm', 123, max_age_minutes=10)
+        assert result is not None
+
+    def test_picks_latest_dated_per_pattern(self, tmp_path):
+        """When multiple dated copies exist, the helper inherits ``find_latest_csv``'s newest-wins semantics."""
+        from canvigator_quiz import _findRecentSubmissionCsvs
+        # Older copies are stale; newer copies are fresh — newest dated should win and pass freshness.
+        self._write_all_three(tmp_path, date_str='20260401', age_seconds=60 * 60)
+        self._write_all_three(tmp_path, date_str='20260510')
+        result = _findRecentSubmissionCsvs(tmp_path, 'quiz', 123, max_age_minutes=10)
+        assert result is not None
+        for p in result:
+            assert '20260510' in p.name
 
 
 class TestLoadQuizMisses:

@@ -96,8 +96,9 @@ class CanvigatorCourse:
                 logger.warning(msg)
                 continue
 
-            print("  Fetching latest submissions...")
-            quiz.getAllSubmissionsAndEvents()
+            if not quiz._tryLoadRecentSubmissions():
+                print("  Fetching latest submissions...")
+                quiz.getAllSubmissionsAndEvents()
             subs_by_q_df = quiz.all_subs_by_question
             events_df = quiz.all_subs_and_events
             quiz_scores = quiz._buildQuizScores()

@@ -466,7 +466,10 @@ TASK_HELP = {
             "message; imperfect-score students get a bulleted list of the "
             "questions they missed on their most recent attempt. With --all, "
             "sends ONE consolidated message per student covering every "
-            "published, future-due quiz."
+            "published, future-due quiz. If the quiz's submission CSVs were "
+            "written within the last 10 minutes, they are reused instead of "
+            "refetching from Canvas — making the typical dry-run-then-real "
+            "workflow fast on the second run."
         ),
         'prerequisites': [
             "get-quiz-questions --tag must have produced "
@@ -499,10 +502,16 @@ TASK_HELP = {
         'description': (
             "Send the instructor-selected open-ended follow-up question (the "
             "row marked selected_question=1 in *_open_ended_*.csv) via Canvas "
-            "message to each student who missed the corresponding original "
-            "quiz question on their latest attempt. Mode-aware instructions: "
-            "'explain' asks for a voice recording, 'draw' asks for an attached "
-            "photo. Uses force_new=True so the thread is dedicated."
+            "message to every student who has attempted the quiz. The intro "
+            "sentence is tailored to whether the student got the corresponding "
+            "original question right on their latest attempt ('nice job, here "
+            "is a more challenging follow-up to confirm mastery') or wrong "
+            "('here is a follow-up to reinforce your understanding'). "
+            "Mode-aware instructions: 'explain' asks for a voice recording, "
+            "'draw' asks for an attached photo. Uses force_new=True so the "
+            "thread is dedicated. Reuses the quiz's submission CSVs if they "
+            "were written within the last 10 minutes (e.g. just after a "
+            "send-quiz-reminder run) instead of refetching from Canvas."
         ),
         'prerequisites': [
             "get-quiz-questions --tag must have produced "
