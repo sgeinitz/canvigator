@@ -584,12 +584,14 @@ TASK_HELP = {
     'send-follow-up-assessments': {
         'description': (
             "For every row in the persistent *_followup_assessments.csv with "
-            "sent_assessment=0 and a non-empty 'feedback' value, post the "
-            "feedback as a reply on the existing follow-up conversation using "
-            "the row's conversation_id. On success, sets sent_assessment=1 and "
-            "stamps sent_at. The instructor edits the 'feedback' column "
-            "between assess-replies and this task — feedback already sent is "
-            "never overwritten."
+            "sent_assessment=0 and a non-empty 'feedback' value, preview the "
+            "feedback and prompt the instructor [y/N] before posting it as a "
+            "reply on the existing follow-up conversation (using the row's "
+            "conversation_id). Default is SKIP — only an exact 'y' sends. "
+            "On a confirmed send, sets sent_assessment=1 and stamps sent_at. "
+            "Skipped rows stay at sent_assessment=0 so they can be revisited. "
+            "The instructor edits the 'feedback' column between assess-replies "
+            "and this task — feedback already sent is never overwritten."
         ),
         'prerequisites': [
             "assess-replies must have produced "

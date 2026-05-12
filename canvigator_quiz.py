@@ -1597,6 +1597,8 @@ class CanvigatorQuiz:
             return
 
         print(f"\n{'[DRY-RUN] ' if dry_run else ''}Sending feedback for {len(to_send)} student(s).")
+        if not dry_run:
+            print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).")
         n_sent = 0
         for idx, convo_id, row in to_send:
             if self._sendOneAssessment(df, idx, convo_id, row, dry_run):
@@ -1642,7 +1644,9 @@ class CanvigatorQuiz:
         """Send (or preview) feedback for a single assessment row.
 
         Updates ``df`` in place on a successful real send and returns True;
-        returns False on dry-run or send failure.
+        returns False on dry-run, skip, or send failure. Real sends require
+        per-message [y/N] confirmation — default (bare Enter or anything
+        other than ``y``) is SKIP.
         """
         student_name = row.get('student_name', '?')
         feedback = str(row['feedback']).strip()
@@ -1653,6 +1657,10 @@ class CanvigatorQuiz:
         for line in preview.splitlines():
             print(f"     {line}")
         if dry_run:
+            return False
+        choice = input(f"     Send to {student_name}? [y/N]: ").strip().lower()
+        if choice != 'y':
+            print(f"     Skipped {student_name}.")
             return False
         try:
             convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
