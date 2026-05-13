@@ -15,7 +15,7 @@ import re
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from canvigator_utils import today_str, selectCSVFromList, prompt_for_index, find_latest_csv, spin, spin_done, format_due_date
+from canvigator_utils import today_str, selectCSVFromList, find_latest_csv, spin, spin_done, format_due_date
 
 logger = logging.getLogger(__name__)
 
@@ -2093,90 +2093,40 @@ class CanvigatorQuiz:
 
         return groups
 
-    def _selectSubmissionDate(self):
-        """Prompt user to select a date with get-quiz-submission-events data, or reuse a previously selected date."""
-        if hasattr(self, '_selected_submission_date') and self._selected_submission_date:
-            print(f"\nReusing previously selected date: {self._selected_submission_date}")
-            return self._selected_submission_date
+    def _ensureFreshSubmissions(self):
+        """Populate ``self.all_submissions`` / ``.all_subs_by_question`` / ``.all_subs_and_events``.
 
-        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
-        subs_pattern = file_prefix + "all_submissions_"
-
-        all_files = os.listdir(self.config.data_path)
-        available_dates = set()
-        for f in all_files:
-            match = re.search(r'(\d{8})\.csv$', f)
-            if match and subs_pattern in f:
-                available_dates.add(match.group(1))
-
-        available_dates = sorted(available_dates)
-        if not available_dates:
-            raise FileNotFoundError(
-                f"No all_submissions CSV found for quiz '{self.quiz_name}'. "
-                "Run the 'get-quiz-submission-events' task first to generate these files."
-            )
-
-        print("\nAvailable dates with submission data:")
-        for i, d in enumerate(available_dates, start=1):
-            print(f"[ {i} ] {d}")
-
-        date_index = prompt_for_index("\nSelect date from above using index: ", len(available_dates) - 1)
-        self._selected_submission_date = available_dates[date_index]
-        return self._selected_submission_date
+        Short-circuits if already loaded in this run; else reuses the 10-minute
+        disk cache when present (``_tryLoadRecentSubmissions``); else fetches
+        fresh from Canvas via ``getAllSubmissionsAndEvents``. Ensures the bonus
+        flow always reflects attempts the student has made through "now",
+        not whatever date the user happens to pick from a stale CSV.
+        """
+        if getattr(self, 'all_submissions', None) is not None:
+            return
+        if not self._tryLoadRecentSubmissions():
+            print("\nFetching latest submissions from Canvas...")
+            self.getAllSubmissionsAndEvents()
 
     def _selectSubmissionDataByDate(self):
-        """Prompt user to select a date for which events and subs_by_question CSVs exist, then load them."""
-        selected_date = self._selectSubmissionDate()
+        """Return first-attempt-filtered (events, subs_by_question, submissions) DataFrames."""
+        self._ensureFreshSubmissions()
 
-        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
-        events_pattern = file_prefix + "all_subs_and_events_"
-        by_question_pattern = file_prefix + "all_subs_by_question_"
-
-        events_csv = self.config.data_path / f"{events_pattern}{selected_date}.csv"
-        subs_by_q_csv = self.config.data_path / f"{by_question_pattern}{selected_date}.csv"
-
-        if not events_csv.exists() or not subs_by_q_csv.exists():
-            raise FileNotFoundError(
-                f"No matching all_subs_and_events / subs_by_question CSV pair found for date {selected_date}. "
-                "Run the 'get-quiz-submission-events' task first to generate these files."
-            )
-
-        print(f"\nUsing files from {selected_date}")
-
-        # Load and filter to first attempt
-        events_df = pd.read_csv(events_csv)
-        subs_by_q_df = pd.read_csv(subs_by_q_csv)
-
-        events_df = events_df[(events_df['attempt'] == 1) & (events_df['event'] == 'question_answered')].copy()
-        subs_by_q_df = subs_by_q_df[subs_by_q_df['attempt'] == 1].copy()
-
+        events_df = self.all_subs_and_events[
+            (self.all_subs_and_events['attempt'] == 1) &
+            (self.all_subs_and_events['event'] == 'question_answered')
+        ].copy()
         events_df['timestamp'] = pd.to_datetime(events_df['timestamp'])
 
-        # Also load the all_submissions CSV for first-attempt timestamps
-        subs_pattern = file_prefix + "all_submissions_"
-        subs_csv = self.config.data_path / f"{subs_pattern}{selected_date}.csv"
-        if subs_csv.exists():
-            subs_df = pd.read_csv(subs_csv)
-            subs_df = subs_df[subs_df['attempt'] == 1].copy()
-        else:
-            subs_df = None
+        subs_by_q_df = self.all_subs_by_question[self.all_subs_by_question['attempt'] == 1].copy()
+        subs_df = self.all_submissions[self.all_submissions['attempt'] == 1].copy()
 
         return events_df, subs_by_q_df, subs_df
 
     def _loadAllSubmissions(self):
-        """Load the all_submissions CSV for the selected date (all attempts, unfiltered)."""
-        selected_date = self._selectSubmissionDate()
-
-        file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
-        subs_pattern = file_prefix + "all_submissions_"
-        subs_csv = self.config.data_path / f"{subs_pattern}{selected_date}.csv"
-
-        if not subs_csv.exists():
-            raise FileNotFoundError(
-                f"Submissions file not found: {subs_csv}. Run the 'get-quiz-submission-events' task first."
-            )
-
-        return pd.read_csv(subs_csv)
+        """Return all-attempt submission data, refreshed from Canvas when stale."""
+        self._ensureFreshSubmissions()
+        return self.all_submissions.copy()
 
     def _buildFirstAttemptTimes(self, student_ids, events_df, first_attempt_subs):
         """Build a dict mapping student id to first-attempt start/finish/minutes from event and submission data."""
@@ -2356,11 +2306,9 @@ class CanvigatorQuiz:
     def _tryLoadRecentSubmissions(self, max_age_minutes=10):
         """Load cached submission CSVs if all three are recent; return ``True`` on hit.
 
-        On a cache hit, populates ``self.all_subs_by_question`` and
-        ``self.all_subs_and_events`` from disk so the caller can skip
-        ``getAllSubmissionsAndEvents``. The third CSV (``all_submissions``)
-        is checked for freshness but not loaded — it has no in-memory
-        consumer in the reminder flow.
+        On a cache hit, populates ``self.all_submissions``,
+        ``self.all_subs_by_question``, and ``self.all_subs_and_events`` from
+        disk so the caller can skip ``getAllSubmissionsAndEvents``.
         """
         paths = _findRecentSubmissionCsvs(
             self.config.data_path,
@@ -2370,11 +2318,12 @@ class CanvigatorQuiz:
         )
         if paths is None:
             return False
-        _submissions_csv, by_q_csv, events_csv = paths
+        submissions_csv, by_q_csv, events_csv = paths
         age_secs = int(datetime.now().timestamp() - min(p.stat().st_mtime for p in paths))
         msg = f"Reusing submissions fetched {age_secs}s ago (within {max_age_minutes}-min cache)."
         print(msg)
         logger.info(msg)
+        self.all_submissions = pd.read_csv(submissions_csv)
         self.all_subs_by_question = pd.read_csv(by_q_csv)
         self.all_subs_and_events = pd.read_csv(events_csv)
         return True
@@ -2462,6 +2411,7 @@ class CanvigatorQuiz:
         all_submissions_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_submissions_{today_str()}.csv"
         all_submissions.to_csv(all_submissions_csv, index=False)
         self._spin_done(f"Saved: {all_submissions_csv.name}")
+        self.all_submissions = all_submissions
 
         all_subs_by_question_csv = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_all_subs_by_question_{today_str()}.csv"
         all_subs_by_question.to_csv(all_subs_by_question_csv, index=False)
