@@ -129,18 +129,15 @@ TASK_HELP = {
             "Canvas submission comment with the breakdown. Partners are detected "
             "by score + answer-timing match (union-find handles triples); "
             "retakers are detected by repeated qualifying attempts on different "
-            "days. Default bonus is 15% of quiz points each (30% combined)."
+            "days. Default bonus is 15% of quiz points each (30% combined). "
+            "Submission data is auto-fetched from Canvas so detection always "
+            "reflects every attempt through now; if the quiz's submission CSVs "
+            "were written within the last 10 minutes (e.g. by a prior dry run) "
+            "they are reused instead of refetching."
         ),
-        'prerequisites': [
-            "get-quiz-submission-events must have been run for the quiz so the "
-            "*_all_submissions_*.csv, *_all_subs_by_question_*.csv, and "
-            "*_all_subs_and_events_*.csv all exist.",
-        ],
+        'prerequisites': [],
         'inputs': [
             "Canvas quiz (selected interactively or via --crn).",
-            "data/<course>/quiz<id>_all_submissions_*.csv",
-            "data/<course>/quiz<id>_all_subs_by_question_*.csv",
-            "data/<course>/quiz<id>_all_subs_and_events_*.csv",
         ],
         'outputs': [
             "Canvas: fudge points + submission comments on each bonus-eligible "
@@ -154,7 +151,7 @@ TASK_HELP = {
             "python canvigator.py --crn 12345 --dry-run award-bonus",
             "python canvigator.py --crn 12345 award-bonus",
         ],
-        'run_before': ['get-quiz-submission-events'],
+        'run_before': [],
         'run_after': [],
     },
 
@@ -162,16 +159,12 @@ TASK_HELP = {
         'description': (
             "Award only the partner bonus (no retake). Same partner detection "
             "as award-bonus; sets fudge points on each partnered student's best "
-            "attempt."
+            "attempt. Submission data is auto-fetched (with the 10-minute "
+            "cache) so detection reflects every attempt through now."
         ),
-        'prerequisites': [
-            "get-quiz-submission-events must have been run for the quiz first.",
-        ],
+        'prerequisites': [],
         'inputs': [
             "Canvas quiz (selected interactively or via --crn).",
-            "data/<course>/quiz<id>_all_submissions_*.csv",
-            "data/<course>/quiz<id>_all_subs_by_question_*.csv",
-            "data/<course>/quiz<id>_all_subs_and_events_*.csv",
         ],
         'outputs': [
             "Canvas: fudge points + submission comments on partnered students.",
@@ -182,7 +175,7 @@ TASK_HELP = {
         'examples': [
             "python canvigator.py --crn 12345 --dry-run award-bonus-partner-only",
         ],
-        'run_before': ['get-quiz-submission-events'],
+        'run_before': [],
         'run_after': [],
     },
 
@@ -190,14 +183,12 @@ TASK_HELP = {
         'description': (
             "Award only the retake bonus (no partner). Same retake detection as "
             "award-bonus; sets fudge points on each qualifying retaker's best "
-            "attempt."
+            "attempt. Submission data is auto-fetched (with the 10-minute "
+            "cache) so detection reflects every attempt through now."
         ),
-        'prerequisites': [
-            "get-quiz-submission-events must have been run for the quiz first.",
-        ],
+        'prerequisites': [],
         'inputs': [
             "Canvas quiz (selected interactively or via --crn).",
-            "data/<course>/quiz<id>_all_submissions_*.csv",
         ],
         'outputs': [
             "Canvas: fudge points + submission comments on retake-qualified "
@@ -209,7 +200,7 @@ TASK_HELP = {
         'examples': [
             "python canvigator.py --crn 12345 --dry-run award-bonus-retake-only",
         ],
-        'run_before': ['get-quiz-submission-events'],
+        'run_before': [],
         'run_after': [],
     },
 
