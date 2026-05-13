@@ -42,6 +42,31 @@ def _parse_points_possible_from_student_analysis(csv_path):
     return points_possible
 
 
+def _findRecentSubmissionCsvs(data_path, quiz_prefix, quiz_id, max_age_minutes=10):
+    """Return paths to the three submission CSVs if all are recent, else None.
+
+    Looks up the latest dated ``*_all_submissions_*.csv``,
+    ``*_all_subs_by_question_*.csv``, and ``*_all_subs_and_events_*.csv`` for
+    the given quiz. Returns the tuple ``(submissions, by_q, events)`` only when
+    all three exist AND each file's mtime is within ``max_age_minutes``. Pure
+    disk inspection — no DataFrame loading or side effects. Lets the
+    dry-run-then-real ``send-quiz-reminder`` workflow skip a Canvas refetch.
+    """
+    prefix_id = f"{quiz_prefix}{quiz_id}"
+    paths = (
+        find_latest_csv(data_path, f"{prefix_id}_all_submissions_"),
+        find_latest_csv(data_path, f"{prefix_id}_all_subs_by_question_"),
+        find_latest_csv(data_path, f"{prefix_id}_all_subs_and_events_"),
+    )
+    if any(p is None for p in paths):
+        return None
+
+    cutoff_ts = (datetime.now() - timedelta(minutes=max_age_minutes)).timestamp()
+    if not all(p.stat().st_mtime >= cutoff_ts for p in paths):
+        return None
+    return paths
+
+
 def _annotate_stats(ax, mean, std):
     """Render a small mean/sd text box in the upper-left of a matplotlib axis."""
     text = f'mean: {_fmt_stat(mean)}\nsd: {_fmt_stat(std)}'
@@ -719,9 +744,11 @@ class CanvigatorQuiz:
         # Fail fast with a clear instruction if not.
         question_info = self._loadQuestionInfo()
 
-        # Refresh submission data — may be minutes old, so always re-fetch.
-        print("\nFetching latest submissions for missed-question details...")
-        self.getAllSubmissionsAndEvents()
+        # Refresh submission data, reusing CSVs from a recent run when present
+        # (the dry-run-then-real workflow re-runs minutes apart).
+        if not self._tryLoadRecentSubmissions():
+            print("\nFetching latest submissions for missed-question details...")
+            self.getAllSubmissionsAndEvents()
         subs_by_q_df = self.all_subs_by_question
         events_df = self.all_subs_and_events
 
@@ -821,14 +848,15 @@ class CanvigatorQuiz:
         _sendOrPreviewMessages(messages, subject_str, header_label)
 
     def sendFollowUpQuestions(self, dry_run=False):
-        """Send the instructor-selected open-ended follow-up question to students who missed it.
+        """Send the instructor-selected open-ended follow-up question to every student who attempted the quiz.
 
         Picks the first row in the *_open_ended_*.csv with `selected_question == 1`
         as the question to send (the instructor curates the choice offline).
-        Recipients are still students who missed the corresponding original quiz
-        question on their latest attempt. Requires that get-quiz-questions --tag
-        and generate-follow-up-questions have both been run for this quiz.
-        Auto-refreshes submission data to pick up recent attempts.
+        Every student who has at least one attempt receives the follow-up — the
+        message wording differs based on whether their latest attempt got the
+        corresponding original question right or wrong. Requires that
+        get-quiz-questions --tag and generate-follow-up-questions have both been
+        run for this quiz. Auto-refreshes submission data to pick up recent attempts.
         """
         quiz_name = self.canvas_quiz.title
 
@@ -860,21 +888,27 @@ class CanvigatorQuiz:
         print(f"  Mode: {question_mode}")
         print(f"  Follow-up: {open_ended_text[:120]}{'...' if len(open_ended_text) > 120 else ''}")
 
-        # Refresh submission data so the recipient list reflects the latest attempts
-        print("\nFetching latest submissions to identify students who missed this question...")
-        self.getAllSubmissionsAndEvents()
+        # Refresh submission data so the recipient list reflects the latest attempts,
+        # reusing CSVs from a recent run when present (e.g. send-quiz-reminder a few minutes ago).
+        if not self._tryLoadRecentSubmissions():
+            print("\nFetching latest submissions to identify students who missed this question...")
+            self.getAllSubmissionsAndEvents()
         subs_by_q_df = self.all_subs_by_question
 
         if subs_by_q_df is None or subs_by_q_df.empty:
             print("No submission data available — cannot determine recipients.")
             return
 
-        # Build the list of students who missed this question on their latest attempt
-        students_who_missed = self._findStudentsWhoMissed(selected_qid, subs_by_q_df, question_info)
+        # Classify every attempter as 'missed' or 'correct' on this question
+        classification = self._classifyStudentsByQuestionResult(selected_qid, subs_by_q_df, question_info)
 
-        if not students_who_missed:
-            print("No students missed this question on their latest attempt — no follow-up needed!")
+        if not classification:
+            print("No students have attempted this quiz yet — no follow-up to send.")
             return
+
+        n_missed = sum(1 for v in classification.values() if v == 'missed')
+        n_correct = sum(1 for v in classification.values() if v == 'correct')
+        print(f"  Sending follow-up to {len(classification)} students ({n_correct} correct, {n_missed} missed).")
 
         # Compose messages
         if question_mode == 'draw':
@@ -899,24 +933,36 @@ class CanvigatorQuiz:
         enrolled = self.canvas_course.students
         enrolled_map = {s['id']: s['name'] for s in enrolled}
 
+        tail = (
+            f"{open_ended_text}\n\n"
+            f"{instructions}\n\n"
+            f"You can reply as many times as you'd like — only your most recent "
+            f"response will be assessed.\n\n"
+            f"NOTE: This is an auto-generated message, please let me know if you "
+            f"have any questions/concerns/suggestions about it."
+        )
+
         messages = []
-        for student_id in students_who_missed:
+        for student_id, status in classification.items():
             student_name = enrolled_map.get(student_id)
             if student_name is None:
                 continue
             first_name = student_name.split()[0]
-            message_str = (
-                f"Hello {first_name}, based on your recent attempt on {quiz_name}, "
-                f"here is a follow-up question to help reinforce your understanding "
-                f"of the topic ({keywords}):\n\n"
-                f"{open_ended_text}\n\n"
-                f"{instructions}\n\n"
-                f"You can reply as many times as you'd like — only your most recent "
-                f"response will be assessed.\n\n"
-                f"NOTE: This is an auto-generated message, please let me know if you "
-                f"have any questions/concerns/suggestions about it."
-            )
-            messages.append((student_id, student_name, message_str, f"missed Q{position}"))
+            if status == 'correct':
+                intro = (
+                    f"Hello {first_name}, nice job on {quiz_name}! Here is a slightly "
+                    f"more challenging follow-up question corresponding to one that "
+                    f"you answered correctly — this will be good practice to ensure "
+                    f"you have mastered the topic ({keywords})"
+                )
+            else:
+                intro = (
+                    f"Hello {first_name}, based on your recent attempt on {quiz_name}, "
+                    f"here is a follow-up question to help reinforce your understanding "
+                    f"of the topic ({keywords})"
+                )
+            message_str = f"{intro}:\n\n{tail}"
+            messages.append((student_id, student_name, message_str, f"{status} Q{position}"))
 
         if dry_run:
             self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
@@ -935,22 +981,29 @@ class CanvigatorQuiz:
         header_label = f"Quiz: {quiz_name} ({points_possible} points possible)"
         return _interactiveSend(self.canvas, messages, subject_str, header_label)
 
-    def _findStudentsWhoMissed(self, question_id, subs_by_q_df, question_info):
-        """Return a list of student IDs who scored below points_possible on the given question in their latest attempt."""
+    def _classifyStudentsByQuestionResult(self, question_id, subs_by_q_df, question_info):
+        """Return ``{student_id: 'missed' | 'correct'}`` for every student who attempted the quiz.
+
+        Classification is by the student's **latest** attempt on the given question:
+        ``'missed'`` if ``points < points_possible``, ``'correct'`` otherwise.
+        Students with no attempts are absent from the result entirely (the
+        follow-up question presupposes they saw the original).
+        """
         pp = question_info.get(question_id, {}).get('points_possible')
         if pp is None:
-            return []
+            return {}
 
         max_attempt_per_student = subs_by_q_df.groupby('id')['attempt'].transform('max')
         latest_attempts = subs_by_q_df[subs_by_q_df['attempt'] == max_attempt_per_student]
         q_rows = latest_attempts[latest_attempts['question_id'] == question_id]
 
-        missed_ids = []
+        result = {}
         for _, row in q_rows.iterrows():
             points = row.get('points')
-            if points is not None and pd.notna(points) and float(points) < float(pp):
-                missed_ids.append(row['id'])
-        return missed_ids
+            if points is None or pd.isna(points):
+                continue
+            result[row['id']] = 'missed' if float(points) < float(pp) else 'correct'
+        return result
 
     def _loadOpenEndedQuestions(self):
         """Load the latest *_open_ended_*.csv and return a dict keyed by question_id.
@@ -1544,6 +1597,8 @@ class CanvigatorQuiz:
             return
 
         print(f"\n{'[DRY-RUN] ' if dry_run else ''}Sending feedback for {len(to_send)} student(s).")
+        if not dry_run:
+            print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).")
         n_sent = 0
         for idx, convo_id, row in to_send:
             if self._sendOneAssessment(df, idx, convo_id, row, dry_run):
@@ -1589,7 +1644,9 @@ class CanvigatorQuiz:
         """Send (or preview) feedback for a single assessment row.
 
         Updates ``df`` in place on a successful real send and returns True;
-        returns False on dry-run or send failure.
+        returns False on dry-run, skip, or send failure. Real sends require
+        per-message [y/N] confirmation — default (bare Enter or anything
+        other than ``y``) is SKIP.
         """
         student_name = row.get('student_name', '?')
         feedback = str(row['feedback']).strip()
@@ -1600,6 +1657,10 @@ class CanvigatorQuiz:
         for line in preview.splitlines():
             print(f"     {line}")
         if dry_run:
+            return False
+        choice = input(f"     Send to {student_name}? [y/N]: ").strip().lower()
+        if choice != 'y':
+            print(f"     Skipped {student_name}.")
             return False
         try:
             convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
@@ -2291,6 +2352,32 @@ class CanvigatorQuiz:
             'points_possible': pp,
             'correct': qdata['correct'],
         }
+
+    def _tryLoadRecentSubmissions(self, max_age_minutes=10):
+        """Load cached submission CSVs if all three are recent; return ``True`` on hit.
+
+        On a cache hit, populates ``self.all_subs_by_question`` and
+        ``self.all_subs_and_events`` from disk so the caller can skip
+        ``getAllSubmissionsAndEvents``. The third CSV (``all_submissions``)
+        is checked for freshness but not loaded — it has no in-memory
+        consumer in the reminder flow.
+        """
+        paths = _findRecentSubmissionCsvs(
+            self.config.data_path,
+            self.config.quiz_prefix,
+            self.canvas_quiz.id,
+            max_age_minutes=max_age_minutes,
+        )
+        if paths is None:
+            return False
+        _submissions_csv, by_q_csv, events_csv = paths
+        age_secs = int(datetime.now().timestamp() - min(p.stat().st_mtime for p in paths))
+        msg = f"Reusing submissions fetched {age_secs}s ago (within {max_age_minutes}-min cache)."
+        print(msg)
+        logger.info(msg)
+        self.all_subs_by_question = pd.read_csv(by_q_csv)
+        self.all_subs_and_events = pd.read_csv(events_csv)
+        return True
 
     def getAllSubmissionsAndEvents(self):
         """Collect per-attempt submission history and events into three CSVs."""
