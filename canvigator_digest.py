@@ -370,7 +370,14 @@ def _summarizeFollowupThemes(quiz_blocks, client, model):
     out = {}
     for entry in quiz_blocks:
         for question_id, rows in entry['rows_by_question'].items():
-            mode = (rows[0].get('question_mode') or 'explain').lower()
+            raw_mode = rows[0].get('question_mode')
+            # NaN is truthy in Python — guard explicitly so a hand-edited CSV
+            # row with an empty question_mode falls back to 'explain' instead
+            # of crashing on `.lower()`.
+            if raw_mode is None or pd.isna(raw_mode) or not str(raw_mode).strip():
+                mode = 'explain'
+            else:
+                mode = str(raw_mode).strip().lower()
             prompt = _buildFollowupThemePrompt(
                 entry['quiz_name'], question_id, rows, mode,
             )

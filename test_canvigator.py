@@ -3289,6 +3289,96 @@ class TestBuildFollowupThemePrompt:
         assert '[FATAL]' in prompt
 
 
+class TestSummarizeFollowupThemesNanMode:
+    """_summarizeFollowupThemes must tolerate NaN/empty question_mode without crashing."""
+
+    def test_nan_mode_falls_back_to_explain(self, monkeypatch):
+        """A row with NaN question_mode must not crash on `.lower()` — fall back to 'explain'."""
+        import canvigator_digest as cd
+        import math
+
+        captured_modes = []
+
+        def _fake_chat(client, **kwargs):
+            user_msg = kwargs['messages'][-1]['content']
+            for line in user_msg.splitlines():
+                if line.startswith('Mode: '):
+                    captured_modes.append(line.split('Mode: ', 1)[1])
+            return {'message': {'content': '- theme bullet'}}
+
+        monkeypatch.setattr(cd, '_chat_with_retry', _fake_chat)
+
+        quiz_blocks = [{
+            'quiz_id': '5', 'quiz_name': 'quiz1',
+            'rows_by_question': {7: [{
+                'result': 'fail', 'confidence': 'high',
+                'transcript': 't', 'feedback': 'f',
+                'criteria_evaluations': '',
+                'question_mode': math.nan,
+            }]},
+            'n_dropped_nat': 0,
+        }]
+        out = cd._summarizeFollowupThemes(quiz_blocks, client=None, model='m')
+        assert captured_modes == ['explain']
+        assert ('5', 7) in out  # produced an entry, didn't crash
+
+    def test_empty_string_mode_falls_back_to_explain(self, monkeypatch):
+        """An empty-string question_mode also falls back to 'explain' (no `.lower()` on ''→'')."""
+        import canvigator_digest as cd
+
+        captured_modes = []
+
+        def _fake_chat(client, **kwargs):
+            user_msg = kwargs['messages'][-1]['content']
+            for line in user_msg.splitlines():
+                if line.startswith('Mode: '):
+                    captured_modes.append(line.split('Mode: ', 1)[1])
+            return {'message': {'content': ''}}
+
+        monkeypatch.setattr(cd, '_chat_with_retry', _fake_chat)
+
+        quiz_blocks = [{
+            'quiz_id': '5', 'quiz_name': 'quiz1',
+            'rows_by_question': {7: [{
+                'result': 'fail', 'confidence': 'high',
+                'transcript': 't', 'feedback': 'f',
+                'criteria_evaluations': '',
+                'question_mode': '',
+            }]},
+            'n_dropped_nat': 0,
+        }]
+        cd._summarizeFollowupThemes(quiz_blocks, client=None, model='m')
+        assert captured_modes == ['explain']
+
+    def test_real_mode_is_preserved(self, monkeypatch):
+        """A real 'draw' value passes through (lowercased) and isn't overridden by the fallback."""
+        import canvigator_digest as cd
+
+        captured_modes = []
+
+        def _fake_chat(client, **kwargs):
+            user_msg = kwargs['messages'][-1]['content']
+            for line in user_msg.splitlines():
+                if line.startswith('Mode: '):
+                    captured_modes.append(line.split('Mode: ', 1)[1])
+            return {'message': {'content': ''}}
+
+        monkeypatch.setattr(cd, '_chat_with_retry', _fake_chat)
+
+        quiz_blocks = [{
+            'quiz_id': '5', 'quiz_name': 'quiz1',
+            'rows_by_question': {7: [{
+                'result': 'fail', 'confidence': 'high',
+                'transcript': '', 'feedback': 'f',
+                'criteria_evaluations': '',
+                'question_mode': 'DRAW',
+            }]},
+            'n_dropped_nat': 0,
+        }]
+        cd._summarizeFollowupThemes(quiz_blocks, client=None, model='m')
+        assert captured_modes == ['draw']
+
+
 class TestBuildDigestPriorities:
     """Tests for canvigator_digest._buildDigestPriorities."""
 
@@ -3675,3 +3765,140 @@ class TestPerTaskHelp:
         rc, stdout, _ = self._run_cli('bogus-task', '--help')
         assert rc == 1
         assert 'Invalid task' in stdout
+
+
+# ---------------------------------------------------------------------------
+# --send-all flag tests
+# ---------------------------------------------------------------------------
+
+class TestHasRecentDryRunManifest:
+    """Tests for the 10-minute mtime gate that anchors --send-all."""
+
+    def test_missing_file_returns_false(self, tmp_path):
+        """No matching manifest in data_path → False."""
+        from canvigator_quiz import _hasRecentDryRunManifest
+        assert _hasRecentDryRunManifest(tmp_path, 'quiz1_5_reminder_sent') is False
+
+    def test_recent_file_returns_true(self, tmp_path):
+        """Fresh manifest mtime (just touched) → True."""
+        from canvigator_quiz import _hasRecentDryRunManifest
+        (tmp_path / 'quiz1_5_reminder_sent_dryrun_20260514.csv').write_text('a\n')
+        assert _hasRecentDryRunManifest(tmp_path, 'quiz1_5_reminder_sent') is True
+
+    def test_stale_file_returns_false(self, tmp_path):
+        """Manifest mtime older than max_age_minutes → False."""
+        import os
+        import time
+        from canvigator_quiz import _hasRecentDryRunManifest
+        f = tmp_path / 'quiz1_5_reminder_sent_dryrun_20260514.csv'
+        f.write_text('a\n')
+        stale = time.time() - 11 * 60
+        os.utime(f, (stale, stale))
+        assert _hasRecentDryRunManifest(tmp_path, 'quiz1_5_reminder_sent') is False
+
+    def test_pattern_isolates_dryrun_only(self, tmp_path):
+        """A non-dryrun manifest with the same prefix does NOT satisfy the check."""
+        from canvigator_quiz import _hasRecentDryRunManifest
+        (tmp_path / 'quiz1_5_reminder_sent_20260514.csv').write_text('a\n')
+        assert _hasRecentDryRunManifest(tmp_path, 'quiz1_5_reminder_sent') is False
+
+
+class TestInteractiveSendWithSendAll:
+    """Module-level _interactiveSend should bypass input() when send_all=True."""
+
+    def test_send_all_skips_input(self, monkeypatch):
+        """input() must not be called when send_all=True; canvas.create_conversation fires per message."""
+        from canvigator_quiz import _interactiveSend
+
+        def _raise_input(prompt):  # noqa: ARG001
+            raise AssertionError("input() should not be called when send_all=True")
+        monkeypatch.setattr('builtins.input', _raise_input)
+
+        fake_convo = SimpleNamespace(id=999)
+        canvas = MagicMock()
+        canvas.create_conversation.return_value = [fake_convo]
+
+        messages = [(1, 'Alice', 'msg1', 'reason1'), (2, 'Bob', 'msg2', 'reason2')]
+        sent = _interactiveSend(canvas, messages, 'subj', 'hdr', send_all=True)
+        assert len(sent) == 2
+        assert canvas.create_conversation.call_count == 2
+
+    def test_default_still_prompts(self, monkeypatch):
+        """Without send_all, input() drives the loop and 'y' sends, anything else skips."""
+        from canvigator_quiz import _interactiveSend
+
+        responses = iter(['y', ''])
+        monkeypatch.setattr('builtins.input', lambda prompt: next(responses))
+
+        fake_convo = SimpleNamespace(id=42)
+        canvas = MagicMock()
+        canvas.create_conversation.return_value = [fake_convo]
+
+        messages = [(1, 'Alice', 'msg1', 'r'), (2, 'Bob', 'msg2', 'r')]
+        sent = _interactiveSend(canvas, messages, 'subj', 'hdr')
+        assert len(sent) == 1
+        assert sent[0][1] == 'Alice'
+
+
+class TestSendOneAssessmentWithSendAll:
+    """_sendOneAssessment should bypass input() and post when send_all=True."""
+
+    def test_send_all_skips_input(self, monkeypatch):
+        """With send_all=True, the per-row [y/N] is bypassed and add_message is called."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        def _raise_input(prompt):  # noqa: ARG001
+            raise AssertionError("input() should not be called when send_all=True")
+        monkeypatch.setattr('builtins.input', _raise_input)
+
+        convo = MagicMock()
+        canvas = MagicMock()
+        canvas.get_conversation.return_value = convo
+
+        df = pd.DataFrame([{
+            'student_id': 1, 'student_name': 'Alice', 'question_id': 99,
+            'feedback': 'Nice work', 'result': 'pass',
+            'sent_assessment': 0, 'sent_at': '',
+        }])
+        row = df.iloc[0]
+
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        quiz.canvas = canvas
+
+        ok = CanvigatorQuiz._sendOneAssessment(quiz, df, 0, 555, row, dry_run=False, send_all=True)
+        assert ok is True
+        convo.add_message.assert_called_once()
+        assert df.at[0, 'sent_assessment'] == 1
+
+
+class TestSendAllFlagConflict:
+    """The CLI must reject --dry-run + --send-all together."""
+
+    def _run_cli(self, *args):
+        """Invoke canvigator.py as a subprocess; return (rc, stdout, stderr)."""
+        import os
+        import sys
+        env = {}
+        for k in ('PATH', 'HOME', 'PYTHONPATH', 'PYTHONHOME'):
+            if k in os.environ:
+                env[k] = os.environ[k]
+        env['CANVAS_URL'] = ''
+        env['CANVAS_TOKEN'] = ''
+        cwd = Path(__file__).parent
+        result = subprocess.run(
+            [sys.executable, 'canvigator.py', *args],
+            capture_output=True, text=True, cwd=cwd, env=env, timeout=15,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_dry_run_and_send_all_rejected(self):
+        """`--dry-run --send-all` must exit non-zero and explain why."""
+        rc, stdout, _ = self._run_cli('--dry-run', '--send-all', 'send-follow-up-assessments')
+        assert rc != 0
+        assert 'mutually exclusive' in stdout
+
+    def test_short_forms_also_rejected(self):
+        """`-d -s` (short forms) must also be rejected."""
+        rc, stdout, _ = self._run_cli('-d', '-s', 'send-follow-up-assessments')
+        assert rc != 0
+        assert 'mutually exclusive' in stdout

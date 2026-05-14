@@ -59,8 +59,14 @@ class CanvigatorCourse:
             else:
                 print("  Skipping (unpublished or insufficient submissions)")
 
-    def sendAllQuizReminders(self, dry_run=False):
+    def sendAllQuizReminders(self, dry_run=False, send_all=False):
         """Send one consolidated reminder per student covering every published, future-due quiz they're behind on.
+
+        With ``send_all=True``, the per-student ``[y/N]`` prompt is bypassed,
+        but the task refuses unless a ``--dry-run`` of the same task ran in
+        the last 10 minutes (verified via
+        ``canvigator_quiz._hasRecentDryRunManifest`` against the course-level
+        ``course_reminder_sent_dryrun_*.csv`` manifest).
 
         Iterates every quiz passing ``cu.is_quiz_open_for_reminder`` (published
         with a ``due_at`` strictly in the future), classifies each enrolled
@@ -68,6 +74,11 @@ class CanvigatorCourse:
         composes a single message per student listing all eligible quizzes.
         Skips quizzes lacking a ``*_questions_w_tags_*.csv`` with a warning.
         """
+        if send_all and not cq._hasRecentDryRunManifest(self.config.data_path, "course_reminder_sent"):
+            raise RuntimeError(
+                "--send-all requires a fresh --dry-run of 'send-quiz-reminder --all' "
+                "for this course within the last 10 minutes; none found."
+            )
         all_quizzes = list(self.canvas_course.get_quizzes())
         eligible = [q for q in all_quizzes if cu.is_quiz_open_for_reminder(q)]
 
@@ -150,7 +161,7 @@ class CanvigatorCourse:
             cq._sendOrPreviewMessages(messages, subject_str, header_label)
             _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, self.config.data_path)
         else:
-            sent_messages = cq._interactiveSend(self.canvas, messages, subject_str, header_label)
+            sent_messages = cq._interactiveSend(self.canvas, messages, subject_str, header_label, send_all=send_all)
             if sent_messages:
                 _saveCourseReminderManifest(sent_messages, student_state, subject_str, dry_run, self.config.data_path)
 

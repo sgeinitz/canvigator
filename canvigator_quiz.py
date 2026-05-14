@@ -42,6 +42,20 @@ def _parse_points_possible_from_student_analysis(csv_path):
     return points_possible
 
 
+def _hasRecentDryRunManifest(data_path, pattern, max_age_minutes=10):
+    """Return True iff a ``*<pattern>_dryrun_*.csv`` mtime is within ``max_age_minutes``.
+
+    The recency anchor for ``--send-all``: forces the instructor to run
+    ``--dry-run`` of the same task within the window before bulk-sending,
+    which means they've just seen the previews on screen.
+    """
+    latest = find_latest_csv(data_path, pattern + '_dryrun_')
+    if latest is None:
+        return False
+    cutoff_ts = (datetime.now() - timedelta(minutes=max_age_minutes)).timestamp()
+    return latest.stat().st_mtime >= cutoff_ts
+
+
 def _findRecentSubmissionCsvs(data_path, quiz_prefix, quiz_id, max_age_minutes=10):
     """Return paths to the three submission CSVs if all are recent, else None.
 
@@ -401,13 +415,14 @@ def _sendOrPreviewMessages(messages, subject_str, header_label):
     logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)}")
 
 
-def _interactiveSend(canvas, messages, subject_str, header_label):
+def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False):
     """Interactively prompt the instructor to send or skip each message.
 
     Default behavior is SKIP — the message is sent if and only if the user
     types ``y`` (case-insensitive) and presses Enter. Any other input,
-    including a bare Enter, skips. Returns the list of messages that were
-    actually sent as 5-tuples (..., conversation_id).
+    including a bare Enter, skips. With ``send_all=True``, the per-student
+    prompt is bypassed and every message is sent. Returns the list of
+    messages actually sent as 5-tuples (..., conversation_id).
     """
     if not messages:
         print("No messages to send!")
@@ -415,7 +430,10 @@ def _interactiveSend(canvas, messages, subject_str, header_label):
 
     print(f"\n{header_label}")
     print(f"Messages to review: {len(messages)}")
-    print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).\n")
+    if send_all:
+        print("--send-all set — sending every message without per-student confirmation.\n")
+    else:
+        print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).\n")
 
     sent_messages = []
     for i, (student_id, student_name, message_str, reason) in enumerate(messages, 1):
@@ -424,9 +442,12 @@ def _interactiveSend(canvas, messages, subject_str, header_label):
         print(f"  Subject: {subject_str}")
         print(f"  Message: {message_str}\n")
 
-        # Strict 'y' check — N is the default; anything other than 'y' (case-insensitive)
-        # skips. This includes 'yes', 'send', 'Y', empty, etc. — only a single 'y' sends.
-        choice = input(f"  Send to {student_name}? [y/N]: ").strip().lower()
+        if send_all:
+            choice = 'y'
+        else:
+            # Strict 'y' check — N is the default; anything other than 'y' (case-insensitive)
+            # skips. This includes 'yes', 'send', 'Y', empty, etc. — only a single 'y' sends.
+            choice = input(f"  Send to {student_name}? [y/N]: ").strip().lower()
         if choice == 'y':
             try:
                 convos = canvas.create_conversation(
@@ -735,8 +756,20 @@ class CanvigatorQuiz:
             return ('page blur', blur_bullets)
         return ('perfect clean', None)
 
-    def sendQuizReminders(self, dry_run=False):
-        """Send reminder messages to students who haven't taken the quiz, haven't achieved a perfect score, or had page blur events."""
+    def sendQuizReminders(self, dry_run=False, send_all=False):
+        """Send reminder messages to students who haven't taken the quiz, haven't achieved a perfect score, or had page blur events.
+
+        With ``send_all=True``, the per-student ``[y/N]`` prompt is bypassed,
+        but the task refuses unless a ``--dry-run`` of the same task ran in
+        the last 10 minutes (verified via ``_hasRecentDryRunManifest``).
+        """
+        if send_all:
+            pattern = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_reminder_sent"
+            if not _hasRecentDryRunManifest(self.config.data_path, pattern):
+                raise RuntimeError(
+                    "--send-all requires a fresh --dry-run of send-quiz-reminder "
+                    "for this quiz within the last 10 minutes; none found."
+                )
         quiz_name = self.canvas_quiz.title
         points_possible = self.canvas_quiz.points_possible
 
@@ -834,7 +867,7 @@ class CanvigatorQuiz:
             self._sendOrPreviewMessages(messages, subject_str, quiz_name, points_possible)
             self._saveReminderManifest(messages, subject_str, dry_run)
         else:
-            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, points_possible)
+            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, points_possible, send_all=send_all)
             if sent_messages:
                 self._saveReminderManifest(sent_messages, subject_str, dry_run)
 
@@ -847,8 +880,12 @@ class CanvigatorQuiz:
         header_label = f"Quiz: {quiz_name} ({points_possible} points possible)"
         _sendOrPreviewMessages(messages, subject_str, header_label)
 
-    def sendFollowUpQuestions(self, dry_run=False):
+    def sendFollowUpQuestions(self, dry_run=False, send_all=False):
         """Send the instructor-selected open-ended follow-up question to every student who attempted the quiz.
+
+        With ``send_all=True``, the per-student ``[y/N]`` prompt is bypassed,
+        but the task refuses unless a ``--dry-run`` of the same task ran in
+        the last 10 minutes (verified via ``_hasRecentDryRunManifest``).
 
         Picks the first row in the *_open_ended_*.csv with `selected_question == 1`
         as the question to send (the instructor curates the choice offline).
@@ -858,6 +895,13 @@ class CanvigatorQuiz:
         get-quiz-questions --tag and generate-follow-up-questions have both been
         run for this quiz. Auto-refreshes submission data to pick up recent attempts.
         """
+        if send_all:
+            pattern = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_followup_sent"
+            if not _hasRecentDryRunManifest(self.config.data_path, pattern):
+                raise RuntimeError(
+                    "--send-all requires a fresh --dry-run of send-follow-up-question "
+                    "for this quiz within the last 10 minutes; none found."
+                )
         quiz_name = self.canvas_quiz.title
 
         # Load question metadata (from *_questions_w_tags_*.csv)
@@ -968,18 +1012,18 @@ class CanvigatorQuiz:
             self._sendOrPreviewMessages(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
             self._saveFollowUpManifest(messages, selected_qid, question_mode, subject_str, dry_run)
         else:
-            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, self.canvas_quiz.points_possible)
+            sent_messages = self._interactiveSend(messages, subject_str, quiz_name, self.canvas_quiz.points_possible, send_all=send_all)
             if sent_messages:
                 self._saveFollowUpManifest(sent_messages, selected_qid, question_mode, subject_str, dry_run)
 
-    def _interactiveSend(self, messages, subject_str, quiz_name, points_possible):
+    def _interactiveSend(self, messages, subject_str, quiz_name, points_possible, send_all=False):
         """Interactively prompt for send/skip per message (single-quiz path).
 
         Thin wrapper around the module-level ``_interactiveSend`` that builds
         the per-quiz header label and threads ``self.canvas`` through.
         """
         header_label = f"Quiz: {quiz_name} ({points_possible} points possible)"
-        return _interactiveSend(self.canvas, messages, subject_str, header_label)
+        return _interactiveSend(self.canvas, messages, subject_str, header_label, send_all=send_all)
 
     def _classifyStudentsByQuestionResult(self, question_id, subs_by_q_df, question_info):
         """Return ``{student_id: 'missed' | 'correct'}`` for every student who attempted the quiz.
@@ -1566,8 +1610,12 @@ class CanvigatorQuiz:
         print(f"  Assessments saved: {path.name}")
         logger.info(f"Follow-up assessments saved: {path}")
 
-    def sendFollowUpAssessments(self, dry_run=False):
+    def sendFollowUpAssessments(self, dry_run=False, send_all=False):
         """Send instructor-curated feedback back to students on their follow-up threads.
+
+        With ``send_all=True``, the per-student ``[y/N]`` prompt is bypassed,
+        but the task refuses unless a ``--dry-run`` of the same task ran in
+        the last 10 minutes (verified via ``_hasRecentDryRunManifest``).
 
         Reads the persistent ``*_followup_assessments.csv`` for this quiz and, for
         every row with ``sent_assessment=0`` and a non-empty ``feedback`` value,
@@ -1576,6 +1624,13 @@ class CanvigatorQuiz:
         flip ``sent_assessment`` to ``1`` and stamp ``sent_at``; the file is then
         rewritten in place.
         """
+        if send_all:
+            pattern = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_assessments_sent"
+            if not _hasRecentDryRunManifest(self.config.data_path, pattern):
+                raise RuntimeError(
+                    "--send-all requires a fresh --dry-run of send-follow-up-assessments "
+                    "for this quiz within the last 10 minutes; none found."
+                )
         path = self._assessmentsPath()
         if not path.exists():
             raise FileNotFoundError(
@@ -1597,20 +1652,51 @@ class CanvigatorQuiz:
             return
 
         print(f"\n{'[DRY-RUN] ' if dry_run else ''}Sending feedback for {len(to_send)} student(s).")
-        if not dry_run:
+        if dry_run:
+            pass  # no per-student prompt
+        elif send_all:
+            print("--send-all set — sending every feedback without per-student confirmation.")
+        else:
             print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).")
         n_sent = 0
         for idx, convo_id, row in to_send:
-            if self._sendOneAssessment(df, idx, convo_id, row, dry_run):
+            if self._sendOneAssessment(df, idx, convo_id, row, dry_run, send_all=send_all):
                 n_sent += 1
 
         if dry_run:
+            self._saveAssessmentsDryRunManifest(to_send)
             print(f"\n[DRY-RUN] Would have sent {len(to_send)} feedback message(s). No changes written.")
             return
 
         df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
         print(f"\nSent {n_sent} feedback message(s); updated {path.name}.")
         logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
+
+    def _saveAssessmentsDryRunManifest(self, to_send):
+        """Write a *_assessments_sent_dryrun_YYYYMMDD.csv listing rows that would be sent.
+
+        Mirrors the dry-run manifest written by send-quiz-reminder and
+        send-follow-up-question, and serves as the recency anchor consulted
+        by ``--send-all`` on this task.
+        """
+        rows = []
+        for _, convo_id, row in to_send:
+            feedback = str(row.get('feedback', '')).strip()
+            preview = feedback if len(feedback) <= 200 else feedback[:200] + '...'
+            rows.append({
+                'student_id': row.get('student_id', ''),
+                'student_name': row.get('student_name', ''),
+                'question_id': row.get('question_id', ''),
+                'conversation_id': convo_id,
+                'feedback_preview': preview,
+            })
+        out_df = pd.DataFrame(rows, columns=['student_id', 'student_name', 'question_id', 'conversation_id', 'feedback_preview'])
+        csv_name = self.config.data_path / (
+            f"{self.config.quiz_prefix}{self.canvas_quiz.id}_assessments_sent_dryrun_{today_str()}.csv"
+        )
+        out_df.to_csv(csv_name, index=False)
+        print(f"  Dry-run manifest saved: {csv_name.name}")
+        logger.info(f"Assessments dry-run manifest saved: {csv_name}")
 
     def _collectAssessmentsToSend(self, df, convo_lookup):
         """Filter the assessments DataFrame to rows that should be sent now.
@@ -1640,13 +1726,14 @@ class CanvigatorQuiz:
             to_send.append((idx, int(convo_id), row))
         return to_send
 
-    def _sendOneAssessment(self, df, idx, convo_id, row, dry_run):
+    def _sendOneAssessment(self, df, idx, convo_id, row, dry_run, send_all=False):
         """Send (or preview) feedback for a single assessment row.
 
         Updates ``df`` in place on a successful real send and returns True;
-        returns False on dry-run, skip, or send failure. Real sends require
-        per-message [y/N] confirmation — default (bare Enter or anything
-        other than ``y``) is SKIP.
+        returns False on dry-run, skip, or send failure. Real sends normally
+        require per-message [y/N] confirmation — default (bare Enter or
+        anything other than ``y``) is SKIP. ``send_all=True`` bypasses the
+        per-message prompt.
         """
         student_name = row.get('student_name', '?')
         feedback = str(row['feedback']).strip()
@@ -1658,7 +1745,10 @@ class CanvigatorQuiz:
             print(f"     {line}")
         if dry_run:
             return False
-        choice = input(f"     Send to {student_name}? [y/N]: ").strip().lower()
+        if send_all:
+            choice = 'y'
+        else:
+            choice = input(f"     Send to {student_name}? [y/N]: ").strip().lower()
         if choice != 'y':
             print(f"     Skipped {student_name}.")
             return False
