@@ -3289,6 +3289,96 @@ class TestBuildFollowupThemePrompt:
         assert '[FATAL]' in prompt
 
 
+class TestSummarizeFollowupThemesNanMode:
+    """_summarizeFollowupThemes must tolerate NaN/empty question_mode without crashing."""
+
+    def test_nan_mode_falls_back_to_explain(self, monkeypatch):
+        """A row with NaN question_mode must not crash on `.lower()` — fall back to 'explain'."""
+        import canvigator_digest as cd
+        import math
+
+        captured_modes = []
+
+        def _fake_chat(client, **kwargs):
+            user_msg = kwargs['messages'][-1]['content']
+            for line in user_msg.splitlines():
+                if line.startswith('Mode: '):
+                    captured_modes.append(line.split('Mode: ', 1)[1])
+            return {'message': {'content': '- theme bullet'}}
+
+        monkeypatch.setattr(cd, '_chat_with_retry', _fake_chat)
+
+        quiz_blocks = [{
+            'quiz_id': '5', 'quiz_name': 'quiz1',
+            'rows_by_question': {7: [{
+                'result': 'fail', 'confidence': 'high',
+                'transcript': 't', 'feedback': 'f',
+                'criteria_evaluations': '',
+                'question_mode': math.nan,
+            }]},
+            'n_dropped_nat': 0,
+        }]
+        out = cd._summarizeFollowupThemes(quiz_blocks, client=None, model='m')
+        assert captured_modes == ['explain']
+        assert ('5', 7) in out  # produced an entry, didn't crash
+
+    def test_empty_string_mode_falls_back_to_explain(self, monkeypatch):
+        """An empty-string question_mode also falls back to 'explain' (no `.lower()` on ''→'')."""
+        import canvigator_digest as cd
+
+        captured_modes = []
+
+        def _fake_chat(client, **kwargs):
+            user_msg = kwargs['messages'][-1]['content']
+            for line in user_msg.splitlines():
+                if line.startswith('Mode: '):
+                    captured_modes.append(line.split('Mode: ', 1)[1])
+            return {'message': {'content': ''}}
+
+        monkeypatch.setattr(cd, '_chat_with_retry', _fake_chat)
+
+        quiz_blocks = [{
+            'quiz_id': '5', 'quiz_name': 'quiz1',
+            'rows_by_question': {7: [{
+                'result': 'fail', 'confidence': 'high',
+                'transcript': 't', 'feedback': 'f',
+                'criteria_evaluations': '',
+                'question_mode': '',
+            }]},
+            'n_dropped_nat': 0,
+        }]
+        cd._summarizeFollowupThemes(quiz_blocks, client=None, model='m')
+        assert captured_modes == ['explain']
+
+    def test_real_mode_is_preserved(self, monkeypatch):
+        """A real 'draw' value passes through (lowercased) and isn't overridden by the fallback."""
+        import canvigator_digest as cd
+
+        captured_modes = []
+
+        def _fake_chat(client, **kwargs):
+            user_msg = kwargs['messages'][-1]['content']
+            for line in user_msg.splitlines():
+                if line.startswith('Mode: '):
+                    captured_modes.append(line.split('Mode: ', 1)[1])
+            return {'message': {'content': ''}}
+
+        monkeypatch.setattr(cd, '_chat_with_retry', _fake_chat)
+
+        quiz_blocks = [{
+            'quiz_id': '5', 'quiz_name': 'quiz1',
+            'rows_by_question': {7: [{
+                'result': 'fail', 'confidence': 'high',
+                'transcript': '', 'feedback': 'f',
+                'criteria_evaluations': '',
+                'question_mode': 'DRAW',
+            }]},
+            'n_dropped_nat': 0,
+        }]
+        cd._summarizeFollowupThemes(quiz_blocks, client=None, model='m')
+        assert captured_modes == ['draw']
+
+
 class TestBuildDigestPriorities:
     """Tests for canvigator_digest._buildDigestPriorities."""
 
