@@ -87,7 +87,7 @@ def _run_course_task(task, course, canv_config, n_days, cloud_questions):
         cd.prepClassDigest(course, days=n_days, cloud_questions=cloud_questions)
 
 
-def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
+def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False):
     """Dispatch a quiz-level task to the appropriate method."""
     if task == 'get-quiz-questions':
         quiz.getQuizQuestions(tag=tag)
@@ -98,11 +98,11 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days):
     elif task == 'assess-replies':
         quiz.assessFollowUpReplies(reply_window_days=reply_window_days)
     elif task == 'send-quiz-reminder':
-        quiz.sendQuizReminders(dry_run=dry_run)
+        quiz.sendQuizReminders(dry_run=dry_run, send_all=send_all)
     elif task == 'send-follow-up-question':
-        quiz.sendFollowUpQuestions(dry_run=dry_run)
+        quiz.sendFollowUpQuestions(dry_run=dry_run, send_all=send_all)
     elif task == 'send-follow-up-assessments':
-        quiz.sendFollowUpAssessments(dry_run=dry_run)
+        quiz.sendFollowUpAssessments(dry_run=dry_run, send_all=send_all)
     elif task == 'create-pairs':
         quiz.openPresentCSV()
         quiz.generateDistanceMatrix(only_present=True)
@@ -132,6 +132,7 @@ _SHORT_TO_LONG = {
     '-g': '--auto-grade',
     '-n': '--days',
     '-q': '--cloud-questions',
+    '-s': '--send-all',
     '-h': '--help',
 }
 args = [_SHORT_TO_LONG.get(a, a) for a in sys.argv[1:]]
@@ -147,6 +148,14 @@ while '--help' in args:
 dry_run = '--dry-run' in args
 if dry_run:
     args.remove('--dry-run')
+
+send_all = '--send-all' in args
+if send_all:
+    args.remove('--send-all')
+
+if dry_run and send_all:
+    print("Error: --send-all/-s and --dry-run/-d are mutually exclusive.")
+    sys.exit(1)
 
 tag = '--tag' in args
 if tag:
@@ -346,7 +355,7 @@ elif task == 'get-quiz-submission-events' and all_quizzes_flag:
     course.getAllQuizzesAndSubmissions()
 
 elif task == 'send-quiz-reminder' and all_quizzes_flag:
-    course.sendAllQuizReminders(dry_run=dry_run)
+    course.sendAllQuizReminders(dry_run=dry_run, send_all=send_all)
 
 elif task in ('create-media-recording-assignment', 'get-media-recordings', 'analyze-media-recordings'):
     _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag)
@@ -383,6 +392,6 @@ else:
     print(f"\nSelected quiz: {quiz_choice.title}")
     skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
-    _run_quiz_task(task, quiz, dry_run, tag, reply_window_days)
+    _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=send_all)
 
 print("\n*** Done ***\n")

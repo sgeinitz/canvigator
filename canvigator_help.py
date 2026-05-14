@@ -62,6 +62,12 @@ FLAG_DESCRIPTIONS = {
         "Route the discussion-question step to cloud Gemini 3 with a redacted "
         "prompt (tag names + integer counts only — no transcripts or themes).",
     ),
+    '--send-all': (
+        '-s', None,
+        "Skip the per-student [y/N] confirmation and send every message. "
+        "Requires a matching --dry-run run on the same task within the last "
+        "10 minutes (otherwise refuses). Mutually exclusive with --dry-run.",
+    ),
 }
 
 
@@ -480,10 +486,11 @@ TASK_HELP = {
             "With --all: data/<course>/course_reminder_sent[_dryrun]_YYYYMMDD"
             ".csv (one row per student listing every quiz reminded about).",
         ],
-        'flags': ['--dry-run', '--all'],
+        'flags': ['--dry-run', '--all', '--send-all'],
         'examples': [
             "python canvigator.py --crn 12345 send-quiz-reminder",
             "python canvigator.py --crn 12345 --all --dry-run send-quiz-reminder",
+            "python canvigator.py --crn 12345 --send-all send-quiz-reminder",
         ],
         'run_before': ['get-quiz-questions', 'get-quiz-submission-events'],
         'run_after': ['generate-follow-up-questions', 'send-follow-up-question'],
@@ -522,10 +529,11 @@ TASK_HELP = {
             "(manifest with conversation_id, question_id, sent_at, "
             "question_mode columns).",
         ],
-        'flags': ['--dry-run'],
+        'flags': ['--dry-run', '--send-all'],
         'examples': [
             "python canvigator.py --crn 12345 --dry-run send-follow-up-question",
             "python canvigator.py --crn 12345 send-follow-up-question",
+            "python canvigator.py --crn 12345 --send-all send-follow-up-question",
         ],
         'run_before': ['generate-follow-up-questions'],
         'run_after': ['assess-replies', 'send-follow-up-assessments'],
@@ -599,11 +607,13 @@ TASK_HELP = {
             "data/<course>/quiz<id>_followup_assessments.csv (rewritten in "
             "place with sent_assessment=1 and updated sent_at on success).",
         ],
-        'flags': ['--dry-run'],
+        'flags': ['--dry-run', '--send-all'],
         'examples': [
             "python canvigator.py --crn 12345 --dry-run "
             "send-follow-up-assessments",
             "python canvigator.py --crn 12345 send-follow-up-assessments",
+            "python canvigator.py --crn 12345 --send-all "
+            "send-follow-up-assessments",
         ],
         'run_before': ['assess-replies'],
         'run_after': [],
@@ -871,6 +881,7 @@ def print_global_help(task_groups):
     for flag in (
         '--dry-run', '--tag', '--all', '--crn', '--months',
         '--reply-window-days', '--auto-grade', '--days', '--cloud-questions',
+        '--send-all',
     ):
         label = _flag_label(flag)
         _, _, text = FLAG_DESCRIPTIONS[flag]
