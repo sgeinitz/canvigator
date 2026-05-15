@@ -4165,3 +4165,55 @@ class TestTranscribeAudio:
             result = canvigator_llm.transcribe_audio(bad_path, MagicMock(), 'fake', save_transcript=True)
         assert result == 'still returns'
         assert any('Failed to write transcript' in r.message for r in caplog.records)
+
+    def test_long_audio_is_chunked(self, tmp_path, monkeypatch):
+        """Audio longer than the encoder window is chunked; each chunk transcribed and joined."""
+        import canvigator_llm
+        audio = tmp_path / "long.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_probe_audio_duration_secs', lambda p: 75.0)
+
+        def fake_ffmpeg(cmd, **kw):
+            Path(cmd[-1]).write_bytes(b"chunk")
+            return MagicMock(returncode=0, stdout=b'', stderr=b'')
+        monkeypatch.setattr(canvigator_llm.subprocess, 'run', fake_ffmpeg)
+
+        call_count = [0]
+
+        def fake_chat(client, **kwargs):
+            call_count[0] += 1
+            return {'message': {'content': f'seg{call_count[0]}'}}
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', fake_chat)
+
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
+        # ceil(75 / 30) = 3 chunks
+        assert call_count[0] == 3
+        assert result == 'seg1 seg2 seg3'
+
+    def test_short_audio_single_pass(self, tmp_path, monkeypatch):
+        """Audio at or under the encoder window is transcribed in one call."""
+        import canvigator_llm
+        audio = tmp_path / "short.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_probe_audio_duration_secs', lambda p: 20.0)
+        call_count = [0]
+
+        def fake_chat(client, **kwargs):
+            call_count[0] += 1
+            return {'message': {'content': 'just one'}}
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', fake_chat)
+
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
+        assert call_count[0] == 1
+        assert result == 'just one'
+
+    def test_probe_failure_falls_back_to_single_pass(self, tmp_path, monkeypatch):
+        """If ffprobe returns 0.0, transcribe in one pass (matches prior behavior)."""
+        import canvigator_llm
+        audio = tmp_path / "x.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_probe_audio_duration_secs', lambda p: 0.0)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry',
+                            lambda client, **kw: {'message': {'content': 'fallback'}})
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
+        assert result == 'fallback'

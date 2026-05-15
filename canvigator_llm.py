@@ -2,8 +2,11 @@
 import html
 import json
 import logging
+import math
 import os
 import re
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -1097,16 +1100,42 @@ def _build_assessment_prompt(
     return "\n\n".join(parts)
 
 
-def transcribe_audio(audio_path, client, model, save_transcript=False):
-    """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b).
+# Gemma 4's audio encoder has a ~30-second window — audio longer than this
+# is silently truncated by the model, which causes the transcript to loop on
+# whatever was said in the first 30s (observed: 79s WAV → transcript was 5x
+# repetition of the student's opening sentence; the actual answer in 30-79s
+# was never seen). We chunk longer audio with ffmpeg so every second is
+# given to the model in its own call.
+_AUDIO_CHUNK_SECS = 30
 
-    When ``save_transcript`` is True, also writes the transcript to a sibling
-    ``.txt`` file next to ``audio_path`` (e.g. ``foo.wav`` → ``foo.txt``).
-    Used as a debug aid so the instructor can read alongside the audio when
-    diagnosing noisy or mistranscribed recordings. An empty transcript still
-    produces a zero-byte ``.txt`` — the presence of the file means
-    transcription was attempted; size 0 means the model returned nothing.
-    Write failures are logged and never block the return.
+
+def _probe_audio_duration_secs(audio_path):
+    """Return audio duration in seconds via ffprobe, or 0.0 on failure.
+
+    A 0.0 result causes ``transcribe_audio`` to fall through to single-pass
+    behavior — chunking is best-effort and never blocks transcription.
+    """
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', str(audio_path)],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return float(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError, FileNotFoundError,
+            subprocess.TimeoutExpired) as e:
+        logger.warning(f"ffprobe duration failed for {audio_path}: {e}")
+        return 0.0
+
+
+def _transcribe_one_pass(audio_path, client, model):
+    """Single-pass transcription of an audio file. Returns text or empty string on error.
+
+    ``repeat_penalty`` discourages the runaway repetition loops Gemma 4 falls
+    into when the speaker stutters at the start of a clip (without it, the
+    first chunk of a 79s WAV generated 640KB of looped output over 40 minutes).
+    ``num_predict`` caps any residual loop at ~5 minutes of speech worth of
+    tokens — a hard safety net.
     """
     try:
         resp = _chat_with_retry(
@@ -1114,16 +1143,62 @@ def transcribe_audio(audio_path, client, model, save_transcript=False):
             model=model,
             messages=[
                 {"role": "system", "content": _TRANSCRIBE_SYSTEM_PROMPT},
-                {"role": "user", "content": "Transcribe this audio recording.", "images": [audio_path]},
+                {"role": "user", "content": "Transcribe this audio recording.", "images": [str(audio_path)]},
             ],
-            options={"temperature": 0.1},
+            options={"temperature": 0.1, "repeat_penalty": 1.3, "num_predict": 512},
         )
-        transcript = resp["message"]["content"].strip()
+        return resp["message"]["content"].strip()
     except Exception as e:
         logger.warning(f"Audio transcription failed for {audio_path}: {e}")
         return ""
+
+
+def transcribe_audio(audio_path, client, model, save_transcript=False):
+    """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b).
+
+    Audio longer than ``_AUDIO_CHUNK_SECS`` is split into segments with ffmpeg
+    and each segment is transcribed in its own call, because Gemma 4's audio
+    encoder window is ~30s and silently drops the remainder otherwise. The
+    per-segment transcripts are joined with spaces. When ffprobe is unavailable
+    or the probe fails, behavior falls through to a single pass (matches the
+    prior implementation).
+
+    When ``save_transcript`` is True, also writes the (possibly concatenated)
+    transcript to a sibling ``.txt`` file next to ``audio_path`` (e.g.
+    ``foo.wav`` → ``foo.txt``) as a debug aid. An empty transcript still
+    produces a zero-byte ``.txt`` — file present means transcription was
+    attempted; size 0 means the model returned nothing. Write failures are
+    logged and never block the return.
+    """
+    audio_path = Path(audio_path)
+    duration = _probe_audio_duration_secs(audio_path)
+    if duration > _AUDIO_CHUNK_SECS:
+        n_chunks = math.ceil(duration / _AUDIO_CHUNK_SECS)
+        segments = []
+        with tempfile.TemporaryDirectory(prefix='canv_chunks_') as tmpdir:
+            tmpdir = Path(tmpdir)
+            for i in range(n_chunks):
+                chunk_path = tmpdir / f"chunk_{i:03d}.wav"
+                try:
+                    subprocess.run(
+                        ['ffmpeg', '-y', '-loglevel', 'error',
+                         '-ss', str(i * _AUDIO_CHUNK_SECS),
+                         '-i', str(audio_path),
+                         '-t', str(_AUDIO_CHUNK_SECS),
+                         '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
+                         str(chunk_path)],
+                        check=True, capture_output=True, timeout=60,
+                    )
+                except (subprocess.CalledProcessError, FileNotFoundError,
+                        subprocess.TimeoutExpired) as e:
+                    logger.warning(f"ffmpeg chunk {i} failed for {audio_path}: {e}")
+                    continue
+                segments.append(_transcribe_one_pass(chunk_path, client, model))
+        transcript = ' '.join(s for s in segments if s)
+    else:
+        transcript = _transcribe_one_pass(audio_path, client, model)
     if save_transcript:
-        txt_path = Path(audio_path).with_suffix('.txt')
+        txt_path = audio_path.with_suffix('.txt')
         try:
             txt_path.write_text(transcript)
         except OSError as e:
