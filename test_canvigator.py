@@ -3902,3 +3902,131 @@ class TestSendAllFlagConflict:
         rc, stdout, _ = self._run_cli('-d', '-s', 'send-follow-up-assessments')
         assert rc != 0
         assert 'mutually exclusive' in stdout
+
+
+class TestFirstNameForFilename:
+    """`_firstNameForFilename` produces a filename-safe first-name token."""
+
+    def test_takes_first_token_of_multi_word_name(self):
+        """A full name is split on whitespace; only the first token is returned."""
+        from canvigator_quiz import _firstNameForFilename
+        assert _firstNameForFilename("Jane Doe Smith") == "Jane"
+
+    def test_single_word_name_passes_through(self):
+        """A single-token name is returned as-is (no trailing chars)."""
+        from canvigator_quiz import _firstNameForFilename
+        assert _firstNameForFilename("Madonna") == "Madonna"
+
+    def test_empty_or_whitespace_falls_back_to_student(self):
+        """Missing/empty/whitespace-only names fall back to 'student' so filenames stay valid."""
+        from canvigator_quiz import _firstNameForFilename
+        for raw in ("", "   ", None, float('nan')):
+            assert _firstNameForFilename(raw) == "student"
+
+    def test_path_separators_are_sanitized(self):
+        """Any forward/back slashes are replaced so the token never escapes the replies dir."""
+        from canvigator_quiz import _firstNameForFilename
+        assert _firstNameForFilename("Jane/Doe Smith") == "Jane_Doe"
+        assert _firstNameForFilename(r"Jane\Doe Smith") == "Jane_Doe"
+
+
+class TestResizeImageInPlace:
+    """`_resizeImageInPlace` caps the long edge so draw-mode passes don't feed multi-MB images to gemma."""
+
+    @staticmethod
+    def _make_image(path, size, fmt='PNG', color='red'):
+        """Write a solid-color image of ``size`` at ``path`` in ``fmt``."""
+        from PIL import Image
+        Image.new('RGB', size, color=color).save(str(path), format=fmt)
+
+    def test_shrinks_image_larger_than_max_edge(self, tmp_path):
+        """A 3000×2000 image is shrunk so the long edge is at most 1024 px; aspect ratio is preserved."""
+        from PIL import Image
+        from canvigator_quiz import _resizeImageInPlace
+        img_path = tmp_path / "big.jpg"
+        self._make_image(img_path, (3000, 2000), fmt='JPEG')
+        assert _resizeImageInPlace(img_path, max_edge=1024) is True
+        with Image.open(str(img_path)) as out:
+            assert max(out.size) == 1024
+            # 3000/2000 = 1.5 → expect ~1024×683
+            assert abs(out.size[0] / out.size[1] - 1.5) < 0.01
+
+    def test_leaves_small_image_untouched(self, tmp_path):
+        """An image already under max_edge is not re-saved (byte-for-byte identical)."""
+        from canvigator_quiz import _resizeImageInPlace
+        img_path = tmp_path / "small.png"
+        self._make_image(img_path, (200, 150), fmt='PNG')
+        original_bytes = img_path.read_bytes()
+        assert _resizeImageInPlace(img_path, max_edge=1024) is True
+        assert img_path.read_bytes() == original_bytes
+
+    def test_preserves_format(self, tmp_path):
+        """The on-disk format after resize matches the original (PNG stays PNG, JPEG stays JPEG)."""
+        from PIL import Image
+        from canvigator_quiz import _resizeImageInPlace
+        for fmt, ext in (('PNG', '.png'), ('JPEG', '.jpg')):
+            img_path = tmp_path / f"big{ext}"
+            self._make_image(img_path, (2000, 2000), fmt=fmt)
+            assert _resizeImageInPlace(img_path, max_edge=512) is True
+            with Image.open(str(img_path)) as out:
+                assert out.format == fmt
+
+    def test_returns_false_when_file_is_not_an_image(self, tmp_path, caplog):
+        """A non-image file logs a warning and returns False without crashing."""
+        import logging as _logging
+        from canvigator_quiz import _resizeImageInPlace
+        bogus = tmp_path / "not_an_image.png"
+        bogus.write_bytes(b"not an image")
+        with caplog.at_level(_logging.WARNING, logger='canvigator_quiz'):
+            assert _resizeImageInPlace(bogus) is False
+        assert any('Failed to resize' in r.message for r in caplog.records)
+
+
+class TestRasterizePdfToPng:
+    """`_rasterizePdfToPng` converts student PDF submissions to PNG for draw-mode assessment."""
+
+    @staticmethod
+    def _make_pdf(path, n_pages=1):
+        """Write a minimal n-page PDF at ``path`` using pymupdf."""
+        import pymupdf
+        doc = pymupdf.open()
+        for _ in range(n_pages):
+            doc.new_page()
+        doc.save(str(path))
+        doc.close()
+
+    def test_rasterizes_single_page_pdf_to_png(self, tmp_path):
+        """A 1-page PDF is converted to a valid PNG at the requested path."""
+        from canvigator_quiz import _rasterizePdfToPng
+        pdf = tmp_path / "submission.pdf"
+        png = tmp_path / "submission.png"
+        self._make_pdf(pdf, n_pages=1)
+        assert _rasterizePdfToPng(pdf, png) is True
+        assert png.exists() and png.stat().st_size > 0
+        # PNG files start with the 8-byte signature \x89PNG\r\n\x1a\n.
+        assert png.read_bytes()[:8] == b'\x89PNG\r\n\x1a\n'
+
+    def test_multi_page_pdf_warns_and_rasterizes_first_page(self, tmp_path, caplog):
+        """Multi-page PDFs log a warning but still produce a page-1 PNG."""
+        import logging as _logging
+        from canvigator_quiz import _rasterizePdfToPng
+        pdf = tmp_path / "multi.pdf"
+        png = tmp_path / "multi.png"
+        self._make_pdf(pdf, n_pages=3)
+        with caplog.at_level(_logging.WARNING, logger='canvigator_quiz'):
+            result = _rasterizePdfToPng(pdf, png)
+        assert result is True
+        assert png.exists()
+        assert any('3 pages' in r.message for r in caplog.records)
+
+    def test_returns_false_when_file_is_not_pdf(self, tmp_path, caplog):
+        """A non-PDF file returns False and logs a warning instead of crashing."""
+        import logging as _logging
+        from canvigator_quiz import _rasterizePdfToPng
+        not_pdf = tmp_path / "not_a_pdf.pdf"
+        not_pdf.write_bytes(b"this is not a pdf")
+        png = tmp_path / "out.png"
+        with caplog.at_level(_logging.WARNING, logger='canvigator_quiz'):
+            result = _rasterizePdfToPng(not_pdf, png)
+        assert result is False
+        assert not png.exists()

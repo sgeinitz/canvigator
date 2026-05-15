@@ -6,3 +6,4 @@ requests==2.33.0
 scipy==1.13.1
 seaborn==0.13.2
 ollama==0.4.7
+pymupdf==1.27.2.3

@@ -1229,7 +1229,9 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
     total = len(replies)
     print(f"Assessing {total} student replies with model '{model}' (n={n_consistency} self-consistency)...")
     results = []
+    run_start = time.monotonic()
     for i, reply in enumerate(replies, start=1):
+        student_start = time.monotonic()
         student_name = reply.get('student_name', '?')
         mode = reply.get('question_mode', 'explain')
         print(f"  [{i}/{total}] {student_name} ({mode})...", end="", flush=True)
@@ -1293,7 +1295,8 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
 
         from datetime import datetime, timezone
         assessed_at = datetime.now(timezone.utc).isoformat()
-        print(f" {result} ({confidence})")
+        elapsed_min = (time.monotonic() - student_start) / 60
+        print(f" {result} ({confidence})... processed in {elapsed_min:.1f}min")
 
         results.append({
             'student_id': reply['student_id'],
@@ -1309,6 +1312,8 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
         })
 
     print("Assessment complete.")
+    total_min = (time.monotonic() - run_start) / 60
+    print(f"Total time: {total_min:.1f}min")
     return results
 
 
