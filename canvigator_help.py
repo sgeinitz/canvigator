@@ -68,6 +68,12 @@ FLAG_DESCRIPTIONS = {
         "Requires a matching --dry-run run on the same task within the last "
         "10 minutes (otherwise refuses). Mutually exclusive with --dry-run.",
     ),
+    '--choose-model': (
+        '-M', None,
+        "Interactively pick which local gemma4 model to use for grading; "
+        "defaults to OLLAMA_MODEL. Useful for trading some assessment quality "
+        "for throughput (e.g. swap gemma4:31b for gemma4:e4b).",
+    ),
 }
 
 
@@ -571,10 +577,11 @@ TASK_HELP = {
             "data/<course>/quiz<id>_followup_assessments.csv (persistent; "
             "instructor edits 'feedback' before send-follow-up-assessments).",
         ],
-        'flags': ['--reply-window-days'],
+        'flags': ['--reply-window-days', '--choose-model'],
         'examples': [
             "python canvigator.py --crn 12345 assess-replies",
             "python canvigator.py --crn 12345 -w 10 assess-replies",
+            "python canvigator.py --crn 12345 -M assess-replies",
         ],
         'run_before': ['send-follow-up-question'],
         'run_after': ['send-follow-up-assessments', 'prep-class-digest'],

@@ -87,7 +87,7 @@ def _run_course_task(task, course, canv_config, n_days, cloud_questions):
         cd.prepClassDigest(course, days=n_days, cloud_questions=cloud_questions)
 
 
-def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False):
+def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False, choose_model=False):
     """Dispatch a quiz-level task to the appropriate method."""
     if task == 'get-quiz-questions':
         quiz.getQuizQuestions(tag=tag)
@@ -96,7 +96,11 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False):
         quiz.getAllSubmissionsAndEvents()
         quiz.generateFirstAttemptHistograms()
     elif task == 'assess-replies':
-        quiz.assessFollowUpReplies(reply_window_days=reply_window_days)
+        chosen_model = None
+        if choose_model:
+            import canvigator_llm
+            chosen_model = canvigator_llm.pickLocalGemmaModel()
+        quiz.assessFollowUpReplies(reply_window_days=reply_window_days, chosen_model=chosen_model)
     elif task == 'send-quiz-reminder':
         quiz.sendQuizReminders(dry_run=dry_run, send_all=send_all)
     elif task == 'send-follow-up-question':
@@ -133,6 +137,7 @@ _SHORT_TO_LONG = {
     '-n': '--days',
     '-q': '--cloud-questions',
     '-s': '--send-all',
+    '-M': '--choose-model',
     '-h': '--help',
 }
 args = [_SHORT_TO_LONG.get(a, a) for a in sys.argv[1:]]
@@ -172,6 +177,10 @@ if auto_grade_flag:
 cloud_questions_flag = '--cloud-questions' in args
 if cloud_questions_flag:
     args.remove('--cloud-questions')
+
+choose_model_flag = '--choose-model' in args
+if choose_model_flag:
+    args.remove('--choose-model')
 
 crn = None
 if '--crn' in args:
@@ -392,6 +401,6 @@ else:
     print(f"\nSelected quiz: {quiz_choice.title}")
     skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
-    _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=send_all)
+    _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=send_all, choose_model=choose_model_flag)
 
 print("\n*** Done ***\n")

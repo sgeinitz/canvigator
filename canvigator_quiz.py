@@ -1497,7 +1497,7 @@ class CanvigatorQuiz:
 
         return attachment_path, audio_path
 
-    def assessFollowUpReplies(self, reply_window_days=5):
+    def assessFollowUpReplies(self, reply_window_days=5, chosen_model=None):
         """Fetch the latest student replies, then assess them with the local LLM.
 
         First refreshes replies from Canvas (writing the
@@ -1506,7 +1506,9 @@ class CanvigatorQuiz:
         to produce a pass/fail assessment with feedback. Merges results into a
         single persistent followup_assessments CSV (no date suffix); rows where
         ``sent_assessment=1`` are preserved verbatim so previously sent feedback
-        is never overwritten by re-runs.
+        is never overwritten by re-runs. ``chosen_model`` overrides the default
+        grading model (``OLLAMA_MODEL``) when set — used by ``--choose-model``
+        to let the instructor pick a smaller local gemma4 at runtime.
         """
         self.getFollowUpReplies(reply_window_days=reply_window_days)
         replies_df = self._loadFollowUpReplies()
@@ -1565,7 +1567,9 @@ class CanvigatorQuiz:
             print(f"  Using {len(locked_examples)} instructor-approved example(s) for calibration.")
 
         import canvigator_llm
-        results = canvigator_llm.assess_replies(to_assess, oe_row, locked_examples=locked_examples)
+        results = canvigator_llm.assess_replies(
+            to_assess, oe_row, model=chosen_model, locked_examples=locked_examples
+        )
 
         # Carry conversation_id from the reply (or fall back to manifest lookup).
         convo_lookup = self._buildConversationLookup()

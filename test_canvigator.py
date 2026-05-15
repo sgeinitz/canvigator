@@ -4030,3 +4030,86 @@ class TestRasterizePdfToPng:
             result = _rasterizePdfToPng(not_pdf, png)
         assert result is False
         assert not png.exists()
+
+
+class TestIsValidMediaFile:
+    """`_isValidMediaFile` is the preflight that skips Gemma when the student's media is missing."""
+
+    def test_empty_path_returns_false(self):
+        """An empty string path means the CSV column was unset for this reply."""
+        from canvigator_llm import _isValidMediaFile
+        assert _isValidMediaFile('') is False
+        assert _isValidMediaFile(None) is False
+
+    def test_nonexistent_path_returns_false(self, tmp_path):
+        """A path pointing at no file on disk fails preflight (no Gemma call)."""
+        from canvigator_llm import _isValidMediaFile
+        assert _isValidMediaFile(str(tmp_path / "does_not_exist.wav")) is False
+
+    def test_zero_byte_file_returns_false(self, tmp_path):
+        """An empty file (e.g. ffmpeg produced nothing) fails preflight."""
+        from canvigator_llm import _isValidMediaFile
+        empty = tmp_path / "empty.wav"
+        empty.touch()
+        assert _isValidMediaFile(str(empty)) is False
+
+    def test_file_below_threshold_returns_false(self, tmp_path):
+        """A 500-byte file (below the 1 KB default) is treated as a header-only stub."""
+        from canvigator_llm import _isValidMediaFile
+        tiny = tmp_path / "tiny.wav"
+        tiny.write_bytes(b'\x00' * 500)
+        assert _isValidMediaFile(str(tiny)) is False
+
+    def test_file_above_threshold_returns_true(self, tmp_path):
+        """A 2 KB file passes the default threshold — enough to carry meaningful audio/image."""
+        from canvigator_llm import _isValidMediaFile
+        ok = tmp_path / "ok.wav"
+        ok.write_bytes(b'\x00' * 2048)
+        assert _isValidMediaFile(str(ok)) is True
+
+
+class TestPickLocalGemmaModel:
+    """`pickLocalGemmaModel` filters local Ollama models to gemma4-only and prompts the instructor."""
+
+    @staticmethod
+    def _mock_list_response(model_names):
+        """Build a SimpleNamespace mirroring the real ollama ListResponse shape."""
+        return SimpleNamespace(models=[SimpleNamespace(model=n) for n in model_names])
+
+    def test_filters_to_gemma4_only(self, monkeypatch):
+        """When the local ollama has mixed families, only gemma4:* names reach the picker."""
+        import canvigator_llm
+        mock_client = MagicMock()
+        mock_client.list.return_value = self._mock_list_response([
+            'gemma4:31b', 'qwen3:4b', 'gemma4:e4b', 'llama3.2:1b',
+        ])
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
+        captured = {}
+
+        def fake_select(items, item_type="item"):
+            captured['items'] = list(items)
+            return items[0]
+
+        monkeypatch.setattr(canvigator_llm, 'selectFromList', fake_select)
+        result = canvigator_llm.pickLocalGemmaModel()
+        # Only gemma4 names should have been offered, sorted alphabetically.
+        assert captured['items'] == ['gemma4:31b', 'gemma4:e4b']
+        assert result == 'gemma4:31b'
+
+    def test_raises_when_no_gemma4_installed(self, monkeypatch):
+        """Empty gemma4 list raises a RuntimeError with a fix-it message."""
+        import canvigator_llm
+        mock_client = MagicMock()
+        mock_client.list.return_value = self._mock_list_response(['qwen3:4b', 'llama3.2:1b'])
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
+        with pytest.raises(RuntimeError, match='No local gemma4'):
+            canvigator_llm.pickLocalGemmaModel()
+
+    def test_returns_single_gemma_through_picker(self, monkeypatch):
+        """Even with a single gemma4 model the picker is still invoked (consistent UX)."""
+        import canvigator_llm
+        mock_client = MagicMock()
+        mock_client.list.return_value = self._mock_list_response(['gemma4:e4b'])
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
+        monkeypatch.setattr(canvigator_llm, 'selectFromList', lambda items, item_type="item": items[0])
+        assert canvigator_llm.pickLocalGemmaModel() == 'gemma4:e4b'

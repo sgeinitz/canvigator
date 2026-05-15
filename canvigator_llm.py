@@ -6,7 +6,27 @@ import os
 import re
 import time
 
+from canvigator_utils import selectFromList
+
 logger = logging.getLogger(__name__)
+
+
+def _isValidMediaFile(path, min_bytes=1024):
+    """Return True iff ``path`` exists on disk and is at least ``min_bytes`` bytes.
+
+    Preflight before ``transcribe_audio`` / ``assess_draw`` — a missing or
+    near-empty file means the student's Canvas submission didn't carry usable
+    media, and feeding it to Gemma wastes ~5 min per self-consistency vote.
+    The 1 KB default filters out empty WAV headers (~44 B) and zero-byte
+    image placeholders while permitting very short legitimate recordings.
+    """
+    if not path:
+        return False
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) >= min_bytes
+    except OSError:
+        return False
+
 
 # Retry policy for transient upstream errors (e.g. Ollama cloud 5xx).
 _CHAT_MAX_ATTEMPTS = 4
@@ -64,6 +84,28 @@ def _make_client(cloud=False):
             headers={"Authorization": "Bearer " + api_key},
         )
     return ollama.Client()
+
+
+def pickLocalGemmaModel():
+    """Prompt the instructor to choose from local ``gemma4:*`` models.
+
+    Returns the chosen model name (e.g. ``'gemma4:31b'``). Raises ``RuntimeError``
+    when no gemma4 models are installed locally — the assess-replies grading
+    path requires one. Uses the existing local Ollama client (no API key).
+    """
+    client = _make_client(cloud=False)
+    resp = client.list()
+    models = getattr(resp, 'models', None) or []
+    gemma_names = sorted(
+        m.model for m in models
+        if isinstance(getattr(m, 'model', None), str) and m.model.startswith('gemma4:')
+    )
+    if not gemma_names:
+        raise RuntimeError(
+            "No local gemma4 models found. Run 'ollama pull gemma4:31b' "
+            "(or another gemma4 model) and try again."
+        )
+    return selectFromList(gemma_names, item_type="local gemma4 model")
 
 
 _TAG_SYSTEM_PROMPT = (
@@ -1238,28 +1280,39 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
 
         transcript = ''
         evaluations = {}
+
+        def _skip_row(feedback_msg):
+            """Build a uniform skip-row matching the graded-row shape."""
+            return {
+                'student_id': reply['student_id'],
+                'student_name': student_name,
+                'question_id': reply['question_id'],
+                'question_mode': mode,
+                'result': 'fail',
+                'confidence': 'high',
+                'feedback': feedback_msg,
+                'transcript': '',
+                'criteria_evaluations': '',
+                'assessed_at': '',
+            }
+
         if mode == 'explain':
             audio_path = reply.get('audio_path', '')
-            if audio_path:
-                print(" transcribing...", end="", flush=True)
-                transcript = transcribe_audio(audio_path, client, audio_model)
+            # Strict preflight: a missing or near-empty audio file means the
+            # student's Canvas submission didn't carry a usable recording.
+            # Skip without calling Gemma — feeding nothing to the audio model
+            # was costing ~5 min/student before this check.
+            if not _isValidMediaFile(audio_path):
+                elapsed_min = (time.monotonic() - student_start) / 60
+                print(f" no valid audio — skipped... processed in {elapsed_min:.1f}min")
+                results.append(_skip_row('No valid audio submission to assess.'))
+                continue
+            print(" transcribing...", end="", flush=True)
+            transcript = transcribe_audio(audio_path, client, audio_model)
             if not transcript:
-                # Fall back to reply text if no audio or transcription failed
-                transcript = _strip_html(reply.get('reply_text', ''))
-            if not transcript:
-                print(" no response content — skipped")
-                results.append({
-                    'student_id': reply['student_id'],
-                    'student_name': student_name,
-                    'question_id': reply['question_id'],
-                    'question_mode': mode,
-                    'result': 'fail',
-                    'confidence': 'high',
-                    'feedback': 'No response content to assess (no audio and no text).',
-                    'transcript': '',
-                    'criteria_evaluations': '',
-                    'assessed_at': '',
-                })
+                elapsed_min = (time.monotonic() - student_start) / 60
+                print(f" transcription returned empty — skipped... processed in {elapsed_min:.1f}min")
+                results.append(_skip_row('Audio transcription returned empty.'))
                 continue
             print(f" assessing (x{n_consistency})...", end="", flush=True)
             result, confidence, feedback, evaluations = assess_explain(
@@ -1270,20 +1323,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
         else:
             # Draw mode
             image_path = reply.get('attachment_path', '')
-            if not image_path:
-                print(" no image attached — skipped")
-                results.append({
-                    'student_id': reply['student_id'],
-                    'student_name': student_name,
-                    'question_id': reply['question_id'],
-                    'question_mode': mode,
-                    'result': 'fail',
-                    'confidence': 'high',
-                    'feedback': 'No image attachment to assess.',
-                    'transcript': '',
-                    'criteria_evaluations': '',
-                    'assessed_at': '',
-                })
+            if not _isValidMediaFile(image_path):
+                elapsed_min = (time.monotonic() - student_start) / 60
+                print(f" no valid image — skipped... processed in {elapsed_min:.1f}min")
+                results.append(_skip_row('No valid image submission to assess.'))
                 continue
             print(f" assessing image (x{n_consistency})...", end="", flush=True)
             # locked_examples carry transcripts, which don't apply to drawings — drop them.
