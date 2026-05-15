@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 
 from canvigator_utils import selectFromList
 
@@ -1096,8 +1097,17 @@ def _build_assessment_prompt(
     return "\n\n".join(parts)
 
 
-def transcribe_audio(audio_path, client, model):
-    """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b)."""
+def transcribe_audio(audio_path, client, model, save_transcript=False):
+    """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b).
+
+    When ``save_transcript`` is True, also writes the transcript to a sibling
+    ``.txt`` file next to ``audio_path`` (e.g. ``foo.wav`` → ``foo.txt``).
+    Used as a debug aid so the instructor can read alongside the audio when
+    diagnosing noisy or mistranscribed recordings. An empty transcript still
+    produces a zero-byte ``.txt`` — the presence of the file means
+    transcription was attempted; size 0 means the model returned nothing.
+    Write failures are logged and never block the return.
+    """
     try:
         resp = _chat_with_retry(
             client,
@@ -1108,10 +1118,17 @@ def transcribe_audio(audio_path, client, model):
             ],
             options={"temperature": 0.1},
         )
-        return resp["message"]["content"].strip()
+        transcript = resp["message"]["content"].strip()
     except Exception as e:
         logger.warning(f"Audio transcription failed for {audio_path}: {e}")
         return ""
+    if save_transcript:
+        txt_path = Path(audio_path).with_suffix('.txt')
+        try:
+            txt_path.write_text(transcript)
+        except OSError as e:
+            logger.warning(f"Failed to write transcript to {txt_path}: {e}")
+    return transcript
 
 
 def _assess_explain_once(prompt, client, model):
@@ -1228,7 +1245,8 @@ def _parse_rubric_from_row(question_info_row):
 
 
 def assess_replies(replies, question_info_row, model=None, audio_model=None,
-                   locked_examples=None, n_consistency=_SELF_CONSISTENCY_N):
+                   locked_examples=None, n_consistency=_SELF_CONSISTENCY_N,
+                   save_transcript=False):
     """Assess a list of student reply dicts, returning a list of assessment result dicts.
 
     Each reply dict should have keys: student_id, student_name, question_id,
@@ -1308,7 +1326,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
                 results.append(_skip_row('No valid audio submission to assess.'))
                 continue
             print(" transcribing...", end="", flush=True)
-            transcript = transcribe_audio(audio_path, client, audio_model)
+            transcript = transcribe_audio(audio_path, client, audio_model, save_transcript=save_transcript)
             if not transcript:
                 elapsed_min = (time.monotonic() - student_start) / 60
                 print(f" transcription returned empty — skipped... processed in {elapsed_min:.1f}min")

@@ -4113,3 +4113,55 @@ class TestPickLocalGemmaModel:
         monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
         monkeypatch.setattr(canvigator_llm, 'selectFromList', lambda items, item_type="item": items[0])
         assert canvigator_llm.pickLocalGemmaModel() == 'gemma4:e4b'
+
+
+class TestTranscribeAudio:
+    """`transcribe_audio` produces a transcript and optionally writes a sibling .txt for debugging."""
+
+    @staticmethod
+    def _mock_chat(transcript):
+        """Return a callable mimicking _chat_with_retry returning ``transcript``."""
+        return lambda client, **kwargs: {'message': {'content': transcript}}
+
+    def test_writes_sibling_txt_when_flag_set(self, tmp_path, monkeypatch):
+        """save_transcript=True writes a sibling .txt with the transcript content next to the audio."""
+        import canvigator_llm
+        audio = tmp_path / "reply.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat('hello world'))
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake', save_transcript=True)
+        assert result == 'hello world'
+        txt = tmp_path / "reply.txt"
+        assert txt.exists()
+        assert txt.read_text() == 'hello world'
+
+    def test_does_not_write_txt_when_flag_unset(self, tmp_path, monkeypatch):
+        """save_transcript=False leaves the replies dir untouched — no .txt produced."""
+        import canvigator_llm
+        audio = tmp_path / "reply.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat('hello'))
+        canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake', save_transcript=False)
+        assert not (tmp_path / "reply.txt").exists()
+
+    def test_writes_empty_txt_for_empty_transcript(self, tmp_path, monkeypatch):
+        """An empty transcript still produces a zero-byte .txt — informative debug signal."""
+        import canvigator_llm
+        audio = tmp_path / "reply.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat(''))
+        canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake', save_transcript=True)
+        txt = tmp_path / "reply.txt"
+        assert txt.exists()
+        assert txt.stat().st_size == 0
+
+    def test_write_failure_logs_warning_and_still_returns_transcript(self, caplog, monkeypatch):
+        """If the .txt write fails (parent dir missing), the transcript is still returned."""
+        import logging as _logging
+        import canvigator_llm
+        bad_path = "/nonexistent/path/reply.wav"
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat('still returns'))
+        with caplog.at_level(_logging.WARNING, logger='canvigator_llm'):
+            result = canvigator_llm.transcribe_audio(bad_path, MagicMock(), 'fake', save_transcript=True)
+        assert result == 'still returns'
+        assert any('Failed to write transcript' in r.message for r in caplog.records)
