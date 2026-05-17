@@ -15,7 +15,11 @@ More recently, Canvigator has added LLM-assisted workflows (via
 [Ollama](https://ollama.com)) for topic-tagging quiz questions, generating
 open-ended follow-up questions for students who missed a concept, and
 assessing the free-form replies (audio "explain" or photo "draw") that
-students send back through Canvas conversations.
+students send back through Canvas conversations. The assessment step runs
+Gemma 4 locally, so student submissions never leave the instructor's
+machine — no cloud-provider data-use policies to vet, no FERPA exposure,
+and peace of mind on both sides of the gradebook. The instructor verifies
+and edits each assessment before any feedback reaches the student.
 
 Currently, this terminal-based tool works with the Canvas Learning Management System (LMS) using the 
 [CanvasAPI](https://github.com/ucfopen/canvasapi). In addition to increased functionality, development 
