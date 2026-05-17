@@ -2,11 +2,35 @@
 import html
 import json
 import logging
+import math
 import os
 import re
+import subprocess
+import tempfile
 import time
+from pathlib import Path
+
+from canvigator_utils import selectFromList
 
 logger = logging.getLogger(__name__)
+
+
+def _isValidMediaFile(path, min_bytes=1024):
+    """Return True iff ``path`` exists on disk and is at least ``min_bytes`` bytes.
+
+    Preflight before ``transcribe_audio`` / ``assess_draw`` — a missing or
+    near-empty file means the student's Canvas submission didn't carry usable
+    media, and feeding it to Gemma wastes ~5 min per self-consistency vote.
+    The 1 KB default filters out empty WAV headers (~44 B) and zero-byte
+    image placeholders while permitting very short legitimate recordings.
+    """
+    if not path:
+        return False
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) >= min_bytes
+    except OSError:
+        return False
+
 
 # Retry policy for transient upstream errors (e.g. Ollama cloud 5xx).
 _CHAT_MAX_ATTEMPTS = 4
@@ -64,6 +88,28 @@ def _make_client(cloud=False):
             headers={"Authorization": "Bearer " + api_key},
         )
     return ollama.Client()
+
+
+def pickLocalGemmaModel():
+    """Prompt the instructor to choose from local ``gemma4:*`` models.
+
+    Returns the chosen model name (e.g. ``'gemma4:31b'``). Raises ``RuntimeError``
+    when no gemma4 models are installed locally — the assess-replies grading
+    path requires one. Uses the existing local Ollama client (no API key).
+    """
+    client = _make_client(cloud=False)
+    resp = client.list()
+    models = getattr(resp, 'models', None) or []
+    gemma_names = sorted(
+        m.model for m in models
+        if isinstance(getattr(m, 'model', None), str) and m.model.startswith('gemma4:')
+    )
+    if not gemma_names:
+        raise RuntimeError(
+            "No local gemma4 models found. Run 'ollama pull gemma4:31b' "
+            "(or another gemma4 model) and try again."
+        )
+    return selectFromList(gemma_names, item_type="local gemma4 model")
 
 
 _TAG_SYSTEM_PROMPT = (
@@ -1054,22 +1100,110 @@ def _build_assessment_prompt(
     return "\n\n".join(parts)
 
 
-def transcribe_audio(audio_path, client, model):
-    """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b)."""
+# Gemma 4's audio encoder has a ~30-second window — audio longer than this
+# is silently truncated by the model, which causes the transcript to loop on
+# whatever was said in the first 30s (observed: 79s WAV → transcript was 5x
+# repetition of the student's opening sentence; the actual answer in 30-79s
+# was never seen). We chunk longer audio with ffmpeg so every second is
+# given to the model in its own call.
+_AUDIO_CHUNK_SECS = 30
+
+
+def _probe_audio_duration_secs(audio_path):
+    """Return audio duration in seconds via ffprobe, or 0.0 on failure.
+
+    A 0.0 result causes ``transcribe_audio`` to fall through to single-pass
+    behavior — chunking is best-effort and never blocks transcription.
+    """
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', str(audio_path)],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        return float(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError, FileNotFoundError,
+            subprocess.TimeoutExpired) as e:
+        logger.warning(f"ffprobe duration failed for {audio_path}: {e}")
+        return 0.0
+
+
+def _transcribe_one_pass(audio_path, client, model):
+    """Single-pass transcription of an audio file. Returns text or empty string on error.
+
+    ``repeat_penalty`` discourages the runaway repetition loops Gemma 4 falls
+    into when the speaker stutters at the start of a clip (without it, the
+    first chunk of a 79s WAV generated 640KB of looped output over 40 minutes).
+    ``num_predict`` caps any residual loop at ~5 minutes of speech worth of
+    tokens — a hard safety net.
+    """
     try:
         resp = _chat_with_retry(
             client,
             model=model,
             messages=[
                 {"role": "system", "content": _TRANSCRIBE_SYSTEM_PROMPT},
-                {"role": "user", "content": "Transcribe this audio recording.", "images": [audio_path]},
+                {"role": "user", "content": "Transcribe this audio recording.", "images": [str(audio_path)]},
             ],
-            options={"temperature": 0.1},
+            options={"temperature": 0.1, "repeat_penalty": 1.3, "num_predict": 512},
         )
         return resp["message"]["content"].strip()
     except Exception as e:
         logger.warning(f"Audio transcription failed for {audio_path}: {e}")
         return ""
+
+
+def transcribe_audio(audio_path, client, model, save_transcript=False):
+    """Transcribe an audio file using a multimodal model (e.g. gemma4:e4b).
+
+    Audio longer than ``_AUDIO_CHUNK_SECS`` is split into segments with ffmpeg
+    and each segment is transcribed in its own call, because Gemma 4's audio
+    encoder window is ~30s and silently drops the remainder otherwise. The
+    per-segment transcripts are joined with spaces. When ffprobe is unavailable
+    or the probe fails, behavior falls through to a single pass (matches the
+    prior implementation).
+
+    When ``save_transcript`` is True, also writes the (possibly concatenated)
+    transcript to a sibling ``.txt`` file next to ``audio_path`` (e.g.
+    ``foo.wav`` → ``foo.txt``) as a debug aid. An empty transcript still
+    produces a zero-byte ``.txt`` — file present means transcription was
+    attempted; size 0 means the model returned nothing. Write failures are
+    logged and never block the return.
+    """
+    audio_path = Path(audio_path)
+    duration = _probe_audio_duration_secs(audio_path)
+    if duration > _AUDIO_CHUNK_SECS:
+        n_chunks = math.ceil(duration / _AUDIO_CHUNK_SECS)
+        segments = []
+        with tempfile.TemporaryDirectory(prefix='canv_chunks_') as tmpdir:
+            tmpdir = Path(tmpdir)
+            for i in range(n_chunks):
+                chunk_path = tmpdir / f"chunk_{i:03d}.wav"
+                try:
+                    subprocess.run(
+                        ['ffmpeg', '-y', '-loglevel', 'error',
+                         '-ss', str(i * _AUDIO_CHUNK_SECS),
+                         '-i', str(audio_path),
+                         '-t', str(_AUDIO_CHUNK_SECS),
+                         '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
+                         str(chunk_path)],
+                        check=True, capture_output=True, timeout=60,
+                    )
+                except (subprocess.CalledProcessError, FileNotFoundError,
+                        subprocess.TimeoutExpired) as e:
+                    logger.warning(f"ffmpeg chunk {i} failed for {audio_path}: {e}")
+                    continue
+                segments.append(_transcribe_one_pass(chunk_path, client, model))
+        transcript = ' '.join(s for s in segments if s)
+    else:
+        transcript = _transcribe_one_pass(audio_path, client, model)
+    if save_transcript:
+        txt_path = audio_path.with_suffix('.txt')
+        try:
+            txt_path.write_text(transcript)
+        except OSError as e:
+            logger.warning(f"Failed to write transcript to {txt_path}: {e}")
+    return transcript
 
 
 def _assess_explain_once(prompt, client, model):
@@ -1186,7 +1320,8 @@ def _parse_rubric_from_row(question_info_row):
 
 
 def assess_replies(replies, question_info_row, model=None, audio_model=None,
-                   locked_examples=None, n_consistency=_SELF_CONSISTENCY_N):
+                   locked_examples=None, n_consistency=_SELF_CONSISTENCY_N,
+                   save_transcript=False):
     """Assess a list of student reply dicts, returning a list of assessment result dicts.
 
     Each reply dict should have keys: student_id, student_name, question_id,
@@ -1229,35 +1364,48 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
     total = len(replies)
     print(f"Assessing {total} student replies with model '{model}' (n={n_consistency} self-consistency)...")
     results = []
+    run_start = time.monotonic()
     for i, reply in enumerate(replies, start=1):
+        student_start = time.monotonic()
         student_name = reply.get('student_name', '?')
         mode = reply.get('question_mode', 'explain')
         print(f"  [{i}/{total}] {student_name} ({mode})...", end="", flush=True)
 
         transcript = ''
         evaluations = {}
+
+        def _skip_row(feedback_msg):
+            """Build a uniform skip-row matching the graded-row shape."""
+            return {
+                'student_id': reply['student_id'],
+                'student_name': student_name,
+                'question_id': reply['question_id'],
+                'question_mode': mode,
+                'result': 'fail',
+                'confidence': 'high',
+                'feedback': feedback_msg,
+                'transcript': '',
+                'criteria_evaluations': '',
+                'assessed_at': '',
+            }
+
         if mode == 'explain':
             audio_path = reply.get('audio_path', '')
-            if audio_path:
-                print(" transcribing...", end="", flush=True)
-                transcript = transcribe_audio(audio_path, client, audio_model)
+            # Strict preflight: a missing or near-empty audio file means the
+            # student's Canvas submission didn't carry a usable recording.
+            # Skip without calling Gemma — feeding nothing to the audio model
+            # was costing ~5 min/student before this check.
+            if not _isValidMediaFile(audio_path):
+                elapsed_min = (time.monotonic() - student_start) / 60
+                print(f" no valid audio — skipped... processed in {elapsed_min:.1f}min")
+                results.append(_skip_row('No valid audio submission to assess.'))
+                continue
+            print(" transcribing...", end="", flush=True)
+            transcript = transcribe_audio(audio_path, client, audio_model, save_transcript=save_transcript)
             if not transcript:
-                # Fall back to reply text if no audio or transcription failed
-                transcript = _strip_html(reply.get('reply_text', ''))
-            if not transcript:
-                print(" no response content — skipped")
-                results.append({
-                    'student_id': reply['student_id'],
-                    'student_name': student_name,
-                    'question_id': reply['question_id'],
-                    'question_mode': mode,
-                    'result': 'fail',
-                    'confidence': 'high',
-                    'feedback': 'No response content to assess (no audio and no text).',
-                    'transcript': '',
-                    'criteria_evaluations': '',
-                    'assessed_at': '',
-                })
+                elapsed_min = (time.monotonic() - student_start) / 60
+                print(f" transcription returned empty — skipped... processed in {elapsed_min:.1f}min")
+                results.append(_skip_row('Audio transcription returned empty.'))
                 continue
             print(f" assessing (x{n_consistency})...", end="", flush=True)
             result, confidence, feedback, evaluations = assess_explain(
@@ -1268,20 +1416,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
         else:
             # Draw mode
             image_path = reply.get('attachment_path', '')
-            if not image_path:
-                print(" no image attached — skipped")
-                results.append({
-                    'student_id': reply['student_id'],
-                    'student_name': student_name,
-                    'question_id': reply['question_id'],
-                    'question_mode': mode,
-                    'result': 'fail',
-                    'confidence': 'high',
-                    'feedback': 'No image attachment to assess.',
-                    'transcript': '',
-                    'criteria_evaluations': '',
-                    'assessed_at': '',
-                })
+            if not _isValidMediaFile(image_path):
+                elapsed_min = (time.monotonic() - student_start) / 60
+                print(f" no valid image — skipped... processed in {elapsed_min:.1f}min")
+                results.append(_skip_row('No valid image submission to assess.'))
                 continue
             print(f" assessing image (x{n_consistency})...", end="", flush=True)
             # locked_examples carry transcripts, which don't apply to drawings — drop them.
@@ -1293,7 +1431,8 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
 
         from datetime import datetime, timezone
         assessed_at = datetime.now(timezone.utc).isoformat()
-        print(f" {result} ({confidence})")
+        elapsed_min = (time.monotonic() - student_start) / 60
+        print(f" {result} ({confidence})... processed in {elapsed_min:.1f}min")
 
         results.append({
             'student_id': reply['student_id'],
@@ -1309,6 +1448,8 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
         })
 
     print("Assessment complete.")
+    total_min = (time.monotonic() - run_start) / 60
+    print(f"Total time: {total_min:.1f}min")
     return results
 
 

@@ -3902,3 +3902,318 @@ class TestSendAllFlagConflict:
         rc, stdout, _ = self._run_cli('-d', '-s', 'send-follow-up-assessments')
         assert rc != 0
         assert 'mutually exclusive' in stdout
+
+
+class TestFirstNameForFilename:
+    """`_firstNameForFilename` produces a filename-safe first-name token."""
+
+    def test_takes_first_token_of_multi_word_name(self):
+        """A full name is split on whitespace; only the first token is returned."""
+        from canvigator_quiz import _firstNameForFilename
+        assert _firstNameForFilename("Jane Doe Smith") == "Jane"
+
+    def test_single_word_name_passes_through(self):
+        """A single-token name is returned as-is (no trailing chars)."""
+        from canvigator_quiz import _firstNameForFilename
+        assert _firstNameForFilename("Madonna") == "Madonna"
+
+    def test_empty_or_whitespace_falls_back_to_student(self):
+        """Missing/empty/whitespace-only names fall back to 'student' so filenames stay valid."""
+        from canvigator_quiz import _firstNameForFilename
+        for raw in ("", "   ", None, float('nan')):
+            assert _firstNameForFilename(raw) == "student"
+
+    def test_path_separators_are_sanitized(self):
+        """Any forward/back slashes are replaced so the token never escapes the replies dir."""
+        from canvigator_quiz import _firstNameForFilename
+        assert _firstNameForFilename("Jane/Doe Smith") == "Jane_Doe"
+        assert _firstNameForFilename(r"Jane\Doe Smith") == "Jane_Doe"
+
+
+class TestResizeImageInPlace:
+    """`_resizeImageInPlace` caps the long edge so draw-mode passes don't feed multi-MB images to gemma."""
+
+    @staticmethod
+    def _make_image(path, size, fmt='PNG', color='red'):
+        """Write a solid-color image of ``size`` at ``path`` in ``fmt``."""
+        from PIL import Image
+        Image.new('RGB', size, color=color).save(str(path), format=fmt)
+
+    def test_shrinks_image_larger_than_max_edge(self, tmp_path):
+        """A 3000×2000 image is shrunk so the long edge is at most 1024 px; aspect ratio is preserved."""
+        from PIL import Image
+        from canvigator_quiz import _resizeImageInPlace
+        img_path = tmp_path / "big.jpg"
+        self._make_image(img_path, (3000, 2000), fmt='JPEG')
+        assert _resizeImageInPlace(img_path, max_edge=1024) is True
+        with Image.open(str(img_path)) as out:
+            assert max(out.size) == 1024
+            # 3000/2000 = 1.5 → expect ~1024×683
+            assert abs(out.size[0] / out.size[1] - 1.5) < 0.01
+
+    def test_leaves_small_image_untouched(self, tmp_path):
+        """An image already under max_edge is not re-saved (byte-for-byte identical)."""
+        from canvigator_quiz import _resizeImageInPlace
+        img_path = tmp_path / "small.png"
+        self._make_image(img_path, (200, 150), fmt='PNG')
+        original_bytes = img_path.read_bytes()
+        assert _resizeImageInPlace(img_path, max_edge=1024) is True
+        assert img_path.read_bytes() == original_bytes
+
+    def test_preserves_format(self, tmp_path):
+        """The on-disk format after resize matches the original (PNG stays PNG, JPEG stays JPEG)."""
+        from PIL import Image
+        from canvigator_quiz import _resizeImageInPlace
+        for fmt, ext in (('PNG', '.png'), ('JPEG', '.jpg')):
+            img_path = tmp_path / f"big{ext}"
+            self._make_image(img_path, (2000, 2000), fmt=fmt)
+            assert _resizeImageInPlace(img_path, max_edge=512) is True
+            with Image.open(str(img_path)) as out:
+                assert out.format == fmt
+
+    def test_returns_false_when_file_is_not_an_image(self, tmp_path, caplog):
+        """A non-image file logs a warning and returns False without crashing."""
+        import logging as _logging
+        from canvigator_quiz import _resizeImageInPlace
+        bogus = tmp_path / "not_an_image.png"
+        bogus.write_bytes(b"not an image")
+        with caplog.at_level(_logging.WARNING, logger='canvigator_quiz'):
+            assert _resizeImageInPlace(bogus) is False
+        assert any('Failed to resize' in r.message for r in caplog.records)
+
+
+class TestRasterizePdfToPng:
+    """`_rasterizePdfToPng` converts student PDF submissions to PNG for draw-mode assessment."""
+
+    @staticmethod
+    def _make_pdf(path, n_pages=1):
+        """Write a minimal n-page PDF at ``path`` using pymupdf."""
+        import pymupdf
+        doc = pymupdf.open()
+        for _ in range(n_pages):
+            doc.new_page()
+        doc.save(str(path))
+        doc.close()
+
+    def test_rasterizes_single_page_pdf_to_png(self, tmp_path):
+        """A 1-page PDF is converted to a valid PNG at the requested path."""
+        from canvigator_quiz import _rasterizePdfToPng
+        pdf = tmp_path / "submission.pdf"
+        png = tmp_path / "submission.png"
+        self._make_pdf(pdf, n_pages=1)
+        assert _rasterizePdfToPng(pdf, png) is True
+        assert png.exists() and png.stat().st_size > 0
+        # PNG files start with the 8-byte signature \x89PNG\r\n\x1a\n.
+        assert png.read_bytes()[:8] == b'\x89PNG\r\n\x1a\n'
+
+    def test_multi_page_pdf_warns_and_rasterizes_first_page(self, tmp_path, caplog):
+        """Multi-page PDFs log a warning but still produce a page-1 PNG."""
+        import logging as _logging
+        from canvigator_quiz import _rasterizePdfToPng
+        pdf = tmp_path / "multi.pdf"
+        png = tmp_path / "multi.png"
+        self._make_pdf(pdf, n_pages=3)
+        with caplog.at_level(_logging.WARNING, logger='canvigator_quiz'):
+            result = _rasterizePdfToPng(pdf, png)
+        assert result is True
+        assert png.exists()
+        assert any('3 pages' in r.message for r in caplog.records)
+
+    def test_returns_false_when_file_is_not_pdf(self, tmp_path, caplog):
+        """A non-PDF file returns False and logs a warning instead of crashing."""
+        import logging as _logging
+        from canvigator_quiz import _rasterizePdfToPng
+        not_pdf = tmp_path / "not_a_pdf.pdf"
+        not_pdf.write_bytes(b"this is not a pdf")
+        png = tmp_path / "out.png"
+        with caplog.at_level(_logging.WARNING, logger='canvigator_quiz'):
+            result = _rasterizePdfToPng(not_pdf, png)
+        assert result is False
+        assert not png.exists()
+
+
+class TestIsValidMediaFile:
+    """`_isValidMediaFile` is the preflight that skips Gemma when the student's media is missing."""
+
+    def test_empty_path_returns_false(self):
+        """An empty string path means the CSV column was unset for this reply."""
+        from canvigator_llm import _isValidMediaFile
+        assert _isValidMediaFile('') is False
+        assert _isValidMediaFile(None) is False
+
+    def test_nonexistent_path_returns_false(self, tmp_path):
+        """A path pointing at no file on disk fails preflight (no Gemma call)."""
+        from canvigator_llm import _isValidMediaFile
+        assert _isValidMediaFile(str(tmp_path / "does_not_exist.wav")) is False
+
+    def test_zero_byte_file_returns_false(self, tmp_path):
+        """An empty file (e.g. ffmpeg produced nothing) fails preflight."""
+        from canvigator_llm import _isValidMediaFile
+        empty = tmp_path / "empty.wav"
+        empty.touch()
+        assert _isValidMediaFile(str(empty)) is False
+
+    def test_file_below_threshold_returns_false(self, tmp_path):
+        """A 500-byte file (below the 1 KB default) is treated as a header-only stub."""
+        from canvigator_llm import _isValidMediaFile
+        tiny = tmp_path / "tiny.wav"
+        tiny.write_bytes(b'\x00' * 500)
+        assert _isValidMediaFile(str(tiny)) is False
+
+    def test_file_above_threshold_returns_true(self, tmp_path):
+        """A 2 KB file passes the default threshold — enough to carry meaningful audio/image."""
+        from canvigator_llm import _isValidMediaFile
+        ok = tmp_path / "ok.wav"
+        ok.write_bytes(b'\x00' * 2048)
+        assert _isValidMediaFile(str(ok)) is True
+
+
+class TestPickLocalGemmaModel:
+    """`pickLocalGemmaModel` filters local Ollama models to gemma4-only and prompts the instructor."""
+
+    @staticmethod
+    def _mock_list_response(model_names):
+        """Build a SimpleNamespace mirroring the real ollama ListResponse shape."""
+        return SimpleNamespace(models=[SimpleNamespace(model=n) for n in model_names])
+
+    def test_filters_to_gemma4_only(self, monkeypatch):
+        """When the local ollama has mixed families, only gemma4:* names reach the picker."""
+        import canvigator_llm
+        mock_client = MagicMock()
+        mock_client.list.return_value = self._mock_list_response([
+            'gemma4:31b', 'qwen3:4b', 'gemma4:e4b', 'llama3.2:1b',
+        ])
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
+        captured = {}
+
+        def fake_select(items, item_type="item"):
+            captured['items'] = list(items)
+            return items[0]
+
+        monkeypatch.setattr(canvigator_llm, 'selectFromList', fake_select)
+        result = canvigator_llm.pickLocalGemmaModel()
+        # Only gemma4 names should have been offered, sorted alphabetically.
+        assert captured['items'] == ['gemma4:31b', 'gemma4:e4b']
+        assert result == 'gemma4:31b'
+
+    def test_raises_when_no_gemma4_installed(self, monkeypatch):
+        """Empty gemma4 list raises a RuntimeError with a fix-it message."""
+        import canvigator_llm
+        mock_client = MagicMock()
+        mock_client.list.return_value = self._mock_list_response(['qwen3:4b', 'llama3.2:1b'])
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
+        with pytest.raises(RuntimeError, match='No local gemma4'):
+            canvigator_llm.pickLocalGemmaModel()
+
+    def test_returns_single_gemma_through_picker(self, monkeypatch):
+        """Even with a single gemma4 model the picker is still invoked (consistent UX)."""
+        import canvigator_llm
+        mock_client = MagicMock()
+        mock_client.list.return_value = self._mock_list_response(['gemma4:e4b'])
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
+        monkeypatch.setattr(canvigator_llm, 'selectFromList', lambda items, item_type="item": items[0])
+        assert canvigator_llm.pickLocalGemmaModel() == 'gemma4:e4b'
+
+
+class TestTranscribeAudio:
+    """`transcribe_audio` produces a transcript and optionally writes a sibling .txt for debugging."""
+
+    @staticmethod
+    def _mock_chat(transcript):
+        """Return a callable mimicking _chat_with_retry returning ``transcript``."""
+        return lambda client, **kwargs: {'message': {'content': transcript}}
+
+    def test_writes_sibling_txt_when_flag_set(self, tmp_path, monkeypatch):
+        """save_transcript=True writes a sibling .txt with the transcript content next to the audio."""
+        import canvigator_llm
+        audio = tmp_path / "reply.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat('hello world'))
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake', save_transcript=True)
+        assert result == 'hello world'
+        txt = tmp_path / "reply.txt"
+        assert txt.exists()
+        assert txt.read_text() == 'hello world'
+
+    def test_does_not_write_txt_when_flag_unset(self, tmp_path, monkeypatch):
+        """save_transcript=False leaves the replies dir untouched — no .txt produced."""
+        import canvigator_llm
+        audio = tmp_path / "reply.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat('hello'))
+        canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake', save_transcript=False)
+        assert not (tmp_path / "reply.txt").exists()
+
+    def test_writes_empty_txt_for_empty_transcript(self, tmp_path, monkeypatch):
+        """An empty transcript still produces a zero-byte .txt — informative debug signal."""
+        import canvigator_llm
+        audio = tmp_path / "reply.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat(''))
+        canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake', save_transcript=True)
+        txt = tmp_path / "reply.txt"
+        assert txt.exists()
+        assert txt.stat().st_size == 0
+
+    def test_write_failure_logs_warning_and_still_returns_transcript(self, caplog, monkeypatch):
+        """If the .txt write fails (parent dir missing), the transcript is still returned."""
+        import logging as _logging
+        import canvigator_llm
+        bad_path = "/nonexistent/path/reply.wav"
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', self._mock_chat('still returns'))
+        with caplog.at_level(_logging.WARNING, logger='canvigator_llm'):
+            result = canvigator_llm.transcribe_audio(bad_path, MagicMock(), 'fake', save_transcript=True)
+        assert result == 'still returns'
+        assert any('Failed to write transcript' in r.message for r in caplog.records)
+
+    def test_long_audio_is_chunked(self, tmp_path, monkeypatch):
+        """Audio longer than the encoder window is chunked; each chunk transcribed and joined."""
+        import canvigator_llm
+        audio = tmp_path / "long.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_probe_audio_duration_secs', lambda p: 75.0)
+
+        def fake_ffmpeg(cmd, **kw):
+            Path(cmd[-1]).write_bytes(b"chunk")
+            return MagicMock(returncode=0, stdout=b'', stderr=b'')
+        monkeypatch.setattr(canvigator_llm.subprocess, 'run', fake_ffmpeg)
+
+        call_count = [0]
+
+        def fake_chat(client, **kwargs):
+            call_count[0] += 1
+            return {'message': {'content': f'seg{call_count[0]}'}}
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', fake_chat)
+
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
+        # ceil(75 / 30) = 3 chunks
+        assert call_count[0] == 3
+        assert result == 'seg1 seg2 seg3'
+
+    def test_short_audio_single_pass(self, tmp_path, monkeypatch):
+        """Audio at or under the encoder window is transcribed in one call."""
+        import canvigator_llm
+        audio = tmp_path / "short.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_probe_audio_duration_secs', lambda p: 20.0)
+        call_count = [0]
+
+        def fake_chat(client, **kwargs):
+            call_count[0] += 1
+            return {'message': {'content': 'just one'}}
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', fake_chat)
+
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
+        assert call_count[0] == 1
+        assert result == 'just one'
+
+    def test_probe_failure_falls_back_to_single_pass(self, tmp_path, monkeypatch):
+        """If ffprobe returns 0.0, transcribe in one pass (matches prior behavior)."""
+        import canvigator_llm
+        audio = tmp_path / "x.wav"
+        audio.write_bytes(b"x" * 100)
+        monkeypatch.setattr(canvigator_llm, '_probe_audio_duration_secs', lambda p: 0.0)
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry',
+                            lambda client, **kw: {'message': {'content': 'fallback'}})
+        result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
+        assert result == 'fallback'

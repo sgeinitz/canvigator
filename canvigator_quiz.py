@@ -16,6 +16,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from canvigator_utils import today_str, selectCSVFromList, find_latest_csv, spin, spin_done, format_due_date
+from canvigator_assignment import _fetchAudio
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,108 @@ def _parse_points_possible_from_student_analysis(csv_path):
         except (TypeError, ValueError):
             continue
     return points_possible
+
+
+def _firstNameForFilename(student_name):
+    """Return the student's first name as a filename-safe token.
+
+    Used to inject readable identifiers into reply filenames so the
+    instructor can match a recording or drawing to a student at a glance
+    without consulting the CSV. Falls back to ``'student'`` when the name
+    is missing or whitespace-only; path separators are replaced with
+    underscores defensively (Canvas names won't normally contain them).
+    """
+    if not isinstance(student_name, str):
+        student_name = '' if student_name is None else str(student_name)
+    tokens = student_name.split()
+    if not tokens or tokens[0].lower() == 'nan':
+        return 'student'
+    return tokens[0].replace('/', '_').replace('\\', '_')
+
+
+_RESIZABLE_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff'}
+_MAX_IMAGE_EDGE = 1024  # px; long-edge cap for draw-mode attachments
+
+
+def _resizeImageInPlace(image_path, max_edge=_MAX_IMAGE_EDGE, jpeg_quality=85):
+    """Cap an image's long edge to ``max_edge`` pixels, overwriting in place.
+
+    Phone-camera photos can be 3000+ px on the long edge and several MB on
+    disk. Every draw-mode self-consistency pass re-encodes the full image
+    and feeds those pixels through gemma4:31b's vision encoder, whose
+    latency scales roughly linearly with input size. Down-sampling to
+    1024 px keeps hand-drawn diagrams legible while substantially cutting
+    per-call inference time. Aspect ratio and format are preserved; a
+    no-op when the image is already small enough. Returns True on success
+    (including the no-op path); False when Pillow is missing or the file
+    can't be opened (caller logs + continues).
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning(f"Pillow not installed; skipping resize of {image_path.name}.")
+        return False
+    try:
+        with Image.open(str(image_path)) as img:
+            img.load()
+            fmt = img.format
+            if max(img.size) <= max_edge:
+                return True
+            img.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+            save_kwargs = {}
+            if fmt == 'JPEG':
+                save_kwargs = {'quality': jpeg_quality, 'optimize': True}
+            elif fmt == 'PNG':
+                save_kwargs = {'optimize': True}
+            img.save(str(image_path), format=fmt, **save_kwargs)
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to resize {image_path.name}: {e}")
+        return False
+
+
+def _rasterizePdfToPng(pdf_path, png_path, dpi=100):
+    """Rasterize page 1 of a PDF to a PNG via PyMuPDF.
+
+    Returns True on success, False on failure (caller logs + skips). Some
+    students submit phone-scanner output (Adobe Scan, CamScanner) as PDFs;
+    Ollama's Gemma multimodal only accepts PNG/JPEG/WebP/GIF, so the raw
+    PDF triggers ``image: unknown format``. Logs a warning if the PDF has
+    multiple pages — a single follow-up answer should fit on one page;
+    extra pages are dropped. The default DPI is 100 (≈850×1100 px for a
+    US Letter page), enough fidelity for hand-drawn diagrams without
+    creating a multi-MB intermediate that ``_resizeImageInPlace`` would
+    immediately shrink.
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        logger.warning(
+            f"pymupdf not installed; cannot convert {pdf_path.name} to image. "
+            "Install with 'pip install pymupdf'."
+        )
+        return False
+    try:
+        doc = pymupdf.open(str(pdf_path))
+    except Exception as e:
+        logger.warning(f"Failed to open {pdf_path.name} as PDF: {e}")
+        return False
+    try:
+        if doc.page_count == 0:
+            logger.warning(f"{pdf_path.name}: PDF has no pages")
+            return False
+        if doc.page_count > 1:
+            logger.warning(
+                f"{pdf_path.name}: PDF has {doc.page_count} pages; rasterizing page 1 only"
+            )
+        pix = doc.load_page(0).get_pixmap(dpi=dpi)
+        pix.save(str(png_path))
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to rasterize {pdf_path.name}: {e}")
+        return False
+    finally:
+        doc.close()
 
 
 def _hasRecentDryRunManifest(data_path, pattern, max_age_minutes=10):
@@ -1241,7 +1344,7 @@ class CanvigatorQuiz:
             for i, msg in enumerate(student_replies):
                 is_latest = (i == 0)  # messages are newest-first from Canvas
                 attachment_path, audio_path = self._downloadReplyMedia(
-                    msg, student_id, question_id, file_prefix, replies_dir
+                    msg, student_id, student_name, question_id, file_prefix, replies_dir
                 )
                 replied_at = msg.get('created_at', '')
 
@@ -1333,23 +1436,28 @@ class CanvigatorQuiz:
             replies.append(msg)
         return replies
 
-    def _downloadReplyMedia(self, msg, student_id, question_id, file_prefix, replies_dir):
+    def _downloadReplyMedia(self, msg, student_id, student_name, question_id, file_prefix, replies_dir):
         """Download any attachment or audio from a reply message.
 
         Returns (attachment_path, audio_path) — each is a string path relative
-        to the data directory, or None if no media of that type.
+        to the data directory, or None if no media of that type. The student's
+        first name is embedded in the filename (``..._<firstname>_<qid>.<ext>``)
+        so the instructor can recognize files at a glance.
         """
         attachment_path = None
         audio_path = None
+        first_name = _firstNameForFilename(student_name)
 
-        # Download image/file attachments
+        # Download image/file attachments. PDFs (phone-scanner output) get
+        # rasterized to PNG so draw-mode assessment can hand a real image to
+        # Ollama; the original .pdf is left on disk for instructor reference.
         attachments = msg.get('attachments', [])
         if attachments:
             att = attachments[0]  # Take the first attachment
             att_url = att.get('url', '')
             filename = att.get('filename', '') or att.get('display_name', 'attachment')
             ext = os.path.splitext(filename)[1] or '.bin'
-            local_name = f"{file_prefix}{student_id}_{question_id}{ext}"
+            local_name = f"{file_prefix}{student_id}_{first_name}_{question_id}{ext}"
             local_path = replies_dir / local_name
             try:
                 resp = requests.get(att_url, timeout=30)
@@ -1358,30 +1466,38 @@ class CanvigatorQuiz:
                     f.write(resp.content)
                 attachment_path = str(local_path.relative_to(self.config.data_path.parent))
                 logger.info(f"Downloaded attachment for student {student_id}: {local_name}")
+                if ext.lower() == '.pdf':
+                    png_path = local_path.with_suffix('.png')
+                    if _rasterizePdfToPng(local_path, png_path):
+                        _resizeImageInPlace(png_path)
+                        attachment_path = str(png_path.relative_to(self.config.data_path.parent))
+                        logger.info(f"Rasterized PDF for student {student_id}: {png_path.name}")
+                elif ext.lower() in _RESIZABLE_IMAGE_EXTS:
+                    _resizeImageInPlace(local_path)
             except Exception as e:
                 logger.warning(f"Failed to download attachment for student {student_id}: {e}")
 
-        # Download audio/video media comment
+        # Download audio/video media comment. Canvas serves media-recording
+        # playback as a DASH manifest, not a raw audio file, so a plain GET
+        # writes the manifest XML to disk (unplayable). ffmpeg follows the
+        # manifest, pulls the fragments, and re-encodes to 16 kHz mono PCM
+        # WAV — the only format Ollama's media detection routes to the
+        # audio path on Gemma multimodal (AAC-in-m4a is misclassified as
+        # `image: unknown format`).
         media_comment = msg.get('media_comment')
         if media_comment:
             media_url = media_comment.get('url', '')
-            media_type = media_comment.get('media_type', 'audio')
-            ext = '.m4a' if media_type == 'audio' else '.mp4'
-            local_name = f"{file_prefix}{student_id}_{question_id}{ext}"
+            local_name = f"{file_prefix}{student_id}_{first_name}_{question_id}.wav"
             local_path = replies_dir / local_name
-            try:
-                resp = requests.get(media_url, timeout=60)
-                resp.raise_for_status()
-                with open(local_path, 'wb') as f:
-                    f.write(resp.content)
+            if _fetchAudio(media_url, local_path):
                 audio_path = str(local_path.relative_to(self.config.data_path.parent))
                 logger.info(f"Downloaded media for student {student_id}: {local_name}")
-            except Exception as e:
-                logger.warning(f"Failed to download media for student {student_id}: {e}")
+            else:
+                logger.warning(f"Failed to download media for student {student_id}: {local_name}")
 
         return attachment_path, audio_path
 
-    def assessFollowUpReplies(self, reply_window_days=5):
+    def assessFollowUpReplies(self, reply_window_days=5, chosen_model=None, save_transcript=False):
         """Fetch the latest student replies, then assess them with the local LLM.
 
         First refreshes replies from Canvas (writing the
@@ -1390,7 +1506,11 @@ class CanvigatorQuiz:
         to produce a pass/fail assessment with feedback. Merges results into a
         single persistent followup_assessments CSV (no date suffix); rows where
         ``sent_assessment=1`` are preserved verbatim so previously sent feedback
-        is never overwritten by re-runs.
+        is never overwritten by re-runs. ``chosen_model`` overrides the default
+        grading model (``OLLAMA_MODEL``) when set — used by ``--choose-model``
+        to let the instructor pick a smaller local gemma4 at runtime.
+        ``save_transcript`` writes each audio transcription to a sibling .txt
+        for debugging (``--save-transcript``).
         """
         self.getFollowUpReplies(reply_window_days=reply_window_days)
         replies_df = self._loadFollowUpReplies()
@@ -1449,7 +1569,10 @@ class CanvigatorQuiz:
             print(f"  Using {len(locked_examples)} instructor-approved example(s) for calibration.")
 
         import canvigator_llm
-        results = canvigator_llm.assess_replies(to_assess, oe_row, locked_examples=locked_examples)
+        results = canvigator_llm.assess_replies(
+            to_assess, oe_row, model=chosen_model,
+            locked_examples=locked_examples, save_transcript=save_transcript,
+        )
 
         # Carry conversation_id from the reply (or fall back to manifest lookup).
         convo_lookup = self._buildConversationLookup()

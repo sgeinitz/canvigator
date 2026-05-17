@@ -355,7 +355,7 @@ class CanvigatorAssignment:
         df.to_csv(csv_path, index=False)
         return csv_path, df
 
-    def getMediaRecordings(self, auto_grade=False, dry_run=False):
+    def getMediaRecordings(self, auto_grade=False, dry_run=False, save_transcript=False):
         """Fetch every submission, transcribe locally, optionally review and grade interactively.
 
         For each submitter, ffmpeg pulls the media URL directly (handling DASH
@@ -410,7 +410,7 @@ class CanvigatorAssignment:
                     rows.append(self._buildRecordingRow(sub, student_name, audio_rel, ""))
                     continue
                 print(" transcribing...", end="", flush=True)
-                transcript = transcribe_audio(str(local_path), client, audio_model)
+                transcript = transcribe_audio(str(local_path), client, audio_model, save_transcript=save_transcript)
                 chars = len(transcript)
                 print(f" done ({chars} chars)")
 

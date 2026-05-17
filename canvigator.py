@@ -47,7 +47,7 @@ def print_help():
     ch.print_global_help(task_groups)
 
 
-def _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag):
+def _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag, save_transcript=False):
     """Dispatch the media-recording-assignment tasks."""
     import canvigator_assignment as ca
     if task == 'create-media-recording-assignment':
@@ -59,7 +59,7 @@ def _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_
     if task == 'analyze-media-recordings':
         cassign.analyzeRecordings()
     else:
-        cassign.getMediaRecordings(auto_grade=auto_grade_flag, dry_run=dry_run)
+        cassign.getMediaRecordings(auto_grade=auto_grade_flag, dry_run=dry_run, save_transcript=save_transcript)
 
 
 # Course-level tasks that need only `course` + a few primitives. Kept in a
@@ -87,7 +87,7 @@ def _run_course_task(task, course, canv_config, n_days, cloud_questions):
         cd.prepClassDigest(course, days=n_days, cloud_questions=cloud_questions)
 
 
-def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False):
+def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False, choose_model=False, save_transcript=False):
     """Dispatch a quiz-level task to the appropriate method."""
     if task == 'get-quiz-questions':
         quiz.getQuizQuestions(tag=tag)
@@ -96,7 +96,14 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False):
         quiz.getAllSubmissionsAndEvents()
         quiz.generateFirstAttemptHistograms()
     elif task == 'assess-replies':
-        quiz.assessFollowUpReplies(reply_window_days=reply_window_days)
+        chosen_model = None
+        if choose_model:
+            import canvigator_llm
+            chosen_model = canvigator_llm.pickLocalGemmaModel()
+        quiz.assessFollowUpReplies(
+            reply_window_days=reply_window_days, chosen_model=chosen_model,
+            save_transcript=save_transcript,
+        )
     elif task == 'send-quiz-reminder':
         quiz.sendQuizReminders(dry_run=dry_run, send_all=send_all)
     elif task == 'send-follow-up-question':
@@ -133,6 +140,8 @@ _SHORT_TO_LONG = {
     '-n': '--days',
     '-q': '--cloud-questions',
     '-s': '--send-all',
+    '-M': '--choose-model',
+    '-S': '--save-transcript',
     '-h': '--help',
 }
 args = [_SHORT_TO_LONG.get(a, a) for a in sys.argv[1:]]
@@ -172,6 +181,14 @@ if auto_grade_flag:
 cloud_questions_flag = '--cloud-questions' in args
 if cloud_questions_flag:
     args.remove('--cloud-questions')
+
+choose_model_flag = '--choose-model' in args
+if choose_model_flag:
+    args.remove('--choose-model')
+
+save_transcript_flag = '--save-transcript' in args
+if save_transcript_flag:
+    args.remove('--save-transcript')
 
 crn = None
 if '--crn' in args:
@@ -358,7 +375,7 @@ elif task == 'send-quiz-reminder' and all_quizzes_flag:
     course.sendAllQuizReminders(dry_run=dry_run, send_all=send_all)
 
 elif task in ('create-media-recording-assignment', 'get-media-recordings', 'analyze-media-recordings'):
-    _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag)
+    _run_assignment_task(task, course, canvas, canv_config, dry_run, auto_grade_flag, save_transcript=save_transcript_flag)
 
 elif task == 'generate-follow-up-questions':
     # Driven by a pre-selected tagged-questions CSV, not a Canvas quiz
@@ -392,6 +409,9 @@ else:
     print(f"\nSelected quiz: {quiz_choice.title}")
     skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
-    _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=send_all)
+    _run_quiz_task(
+        task, quiz, dry_run, tag, reply_window_days,
+        send_all=send_all, choose_model=choose_model_flag, save_transcript=save_transcript_flag,
+    )
 
 print("\n*** Done ***\n")

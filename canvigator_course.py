@@ -1154,6 +1154,12 @@ def exportAnonymizedData(data_path):
     n_total = len(csv_files)
     print(f"Exported {n_total} file{'s' if n_total != 1 else ''} ({n_anonymized} anonymized) to {anon_dir.name}/")
     logger.info(f"Exported {n_total} anonymized files to {zip_path}.zip")
+    print(
+        "\nNOTE: This export is NOT automatically privacy-safe. Before sharing, "
+        "manually verify the CSVs contain no student IDs or names, and no "
+        "open-ended text (transcripts, replies, feedback, conversation subjects), "
+        "audio, or images."
+    )
 
 
 def _renderQuestionPreview(question_dict):
