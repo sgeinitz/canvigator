@@ -1278,6 +1278,16 @@ class CanvigatorQuiz:
         print(f"  Manifest saved: {csv_name.name}")
         logger.info(f"Reminder manifest saved: {csv_name}")
 
+    # Canonical column order for the followup_replies CSV. Passed explicitly to
+    # pd.DataFrame so the file always carries a header row — even when no student
+    # has replied yet — so the downstream re-read in _loadFollowUpReplies can't
+    # hit pandas' EmptyDataError on a column-less file.
+    REPLIES_COLUMNS = [
+        'student_id', 'student_name', 'question_id', 'question_mode',
+        'conversation_id', 'message_id', 'reply_text', 'has_attachment',
+        'attachment_path', 'has_audio', 'audio_path', 'replied_at', 'latest',
+    ]
+
     def getFollowUpReplies(self, reply_window_days=5):
         """Retrieve student replies to follow-up questions from Canvas conversations.
 
@@ -1364,8 +1374,10 @@ class CanvigatorQuiz:
                     'latest': is_latest,
                 })
 
-        # Save the replies CSV
-        replies_df = pd.DataFrame(all_replies)
+        # Save the replies CSV (explicit columns so an empty all_replies still
+        # writes a header row rather than a column-less file that would crash
+        # the re-read in _loadFollowUpReplies with EmptyDataError).
+        replies_df = pd.DataFrame(all_replies, columns=self.REPLIES_COLUMNS)
         csv_name = self.config.data_path / f"{file_prefix}followup_replies_{today_str()}.csv"
         replies_df.to_csv(csv_name, index=False)
 
