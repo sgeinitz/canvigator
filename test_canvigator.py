@@ -166,6 +166,41 @@ class TestIsQuizOpenForReminder:
 
 
 # ---------------------------------------------------------------------------
+# canvigator_course path-derivation tests
+# ---------------------------------------------------------------------------
+
+class TestCourseCodeToPath:
+    """Tests for canvigator_course._courseCodeToPath."""
+
+    def test_canonical_four_part_code(self):
+        """The canonical 'SUBJ-NUM-SEC-CRN' code maps to '/subjnum_crn'."""
+        from canvigator_course import _courseCodeToPath
+        assert _courseCodeToPath('CSI-3300-001-12345') == '/csi3300_12345'
+
+    def test_no_hyphen_code_does_not_crash(self):
+        """A code with no hyphens falls back to the sanitized whole code (regression)."""
+        from canvigator_course import _courseCodeToPath
+        assert _courseCodeToPath('MATH101') == '/math101'
+
+    def test_space_separated_code_does_not_crash(self):
+        """A space-separated code with no hyphens is sanitized (spaces removed)."""
+        from canvigator_course import _courseCodeToPath
+        assert _courseCodeToPath('CS 3120 Spring 2026') == '/cs3120spring2026'
+
+    def test_two_part_code_preserves_legacy_mapping(self):
+        """A two-part code keeps the existing subject+number + last-5 mapping."""
+        from canvigator_course import _courseCodeToPath
+        # last-5 of 'CS-3120' is '-3120'; preserved for backward compatibility.
+        assert _courseCodeToPath('CS-3120') == '/cs3120_-3120'
+
+    def test_none_and_empty_are_safe(self):
+        """A None or empty course_code yields '/' without raising."""
+        from canvigator_course import _courseCodeToPath
+        assert _courseCodeToPath(None) == '/'
+        assert _courseCodeToPath('') == '/'
+
+
+# ---------------------------------------------------------------------------
 # canvigator_course anonymization tests
 # ---------------------------------------------------------------------------
 
@@ -1210,6 +1245,46 @@ class TestExtractStudentReplies:
         result = self._call(messages, instructor_id=999, sent_at=sent, cutoff=cutoff)
         assert result[0]['id'] == 2
         assert result[1]['id'] == 1
+
+
+class TestFollowUpRepliesEmptyRoundTrip:
+    """Regression: a no-reply followup_replies CSV must round-trip without crashing.
+
+    When no student has replied yet, getFollowUpReplies writes a header-only CSV
+    (built from REPLIES_COLUMNS); _loadFollowUpReplies must read it back as an
+    empty frame so assessFollowUpReplies can print 'No student replies to assess.'
+    instead of raising pandas' EmptyDataError on a column-less file.
+    """
+
+    def _make_quiz(self, tmp_path):
+        """Build a CanvigatorQuiz bypassing __init__, pointed at tmp_path for I/O."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        class _Config:
+            def __init__(self, data_path):
+                self.data_path = data_path
+                self.quiz_prefix = 'quiz'
+
+        class _CanvasQuiz:
+            id = 999
+
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        quiz.canvas_quiz = _CanvasQuiz()
+        quiz.config = _Config(tmp_path)
+        return quiz
+
+    def test_empty_replies_csv_loads_without_error(self, tmp_path):
+        """A header-only replies CSV (no data rows) loads as an empty frame with a 'latest' column."""
+        from canvigator_quiz import CanvigatorQuiz
+        quiz = self._make_quiz(tmp_path)
+        # Mirror the fixed writer: empty list + explicit columns -> header-only CSV.
+        csv_path = tmp_path / "quiz999_followup_replies_20260602.csv"
+        pd.DataFrame([], columns=CanvigatorQuiz.REPLIES_COLUMNS).to_csv(csv_path, index=False)
+
+        df = quiz._loadFollowUpReplies()  # must NOT raise EmptyDataError
+        assert 'latest' in df.columns
+        latest_replies = df[df['latest'] == True].to_dict('records')  # noqa: E712
+        assert latest_replies == []
 
 
 class TestAssessmentsMerge:

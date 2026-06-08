@@ -34,12 +34,8 @@ class CanvigatorCourse:
         if verbose:
             print(self.students)
 
-        # use course_code prefix, course number, and CRN to create course_path
-        tmp_course_code = str(self.canvas_course.course_code)
-        course_path = tmp_course_code.split('-')[0] + tmp_course_code.split('-')[1] + "_" + tmp_course_code[-5:]
-        course_path = "/" + course_path.lower()
-        course_path = course_path.replace(" ", "")
-        self.config.addCourseToPath(course_path)
+        # Derive the data/figures subdirectory from the Canvas course_code.
+        self.config.addCourseToPath(_courseCodeToPath(self.canvas_course.course_code))
         logger.info(f"Initialized course: {self.canvas_course.name}")
 
     def getAllQuizzesAndSubmissions(self):
@@ -870,6 +866,29 @@ def deleteOldConversations(canvas, dry_run=False, max_age_months=6):
     if failed:
         summary += f"; {failed} failed (see log)"
     spin_done(summary + ".")
+
+
+def _courseCodeToPath(course_code):
+    """Derive the data/figures subdirectory ('/<dir>') from a Canvas course_code.
+
+    The canonical MSU Denver code looks like ``CSI-3300-001-12345`` and maps to
+    ``/csi3300_12345`` — subject+number, an underscore, then the last 5 chars as
+    a CRN. Codes with at least two hyphen-separated parts keep that exact mapping
+    (so existing course directories are unchanged).
+
+    Codes with fewer than two hyphen-separated parts (e.g. ``MATH101`` or
+    ``CS 3120 Spring 2026``) previously raised ``IndexError`` here, which blocked
+    every task for such a course; they now fall back to a sanitized form of the
+    whole code so course selection never crashes on an unusual code. Spaces are
+    stripped from the result in all cases.
+    """
+    code = str(course_code or '').strip()
+    parts = code.split('-')
+    if len(parts) >= 2:
+        stem = parts[0] + parts[1] + "_" + code[-5:]
+    else:
+        stem = code
+    return ("/" + stem.lower()).replace(" ", "")
 
 
 def _resolveCourseStart(canvas_course):
