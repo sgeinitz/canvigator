@@ -165,6 +165,42 @@ class TestIsQuizOpenForReminder:
         assert is_quiz_open_for_reminder(quiz, now=self._now()) is False
 
 
+class TestSelectCourse:
+    """Tests for selectCourse handling of the course list returned by Canvas."""
+
+    def _canvas(self):
+        """Return a mock Canvas whose course list includes an access-restricted stub."""
+        restricted = SimpleNamespace(id=107625, access_restricted_by_date=True)
+        current = SimpleNamespace(id=1, name="Current Course", end_at=None)
+        past = SimpleNamespace(id=2, name="Past Course", end_at="2020-01-01T00:00:00Z")
+        canvas = MagicMock()
+        canvas.get_courses.return_value = [restricted, current, past]
+        canvas.get_course.side_effect = lambda cid: SimpleNamespace(id=cid, name=f"Course {cid}")
+        return canvas
+
+    def test_skips_access_restricted_course(self):
+        """A stub course with no end_at/name is skipped instead of exiting."""
+        from canvigator_utils import selectCourse
+        canvas = self._canvas()
+
+        with patch('canvigator_utils.prompt_for_index', side_effect=[0, 0]):
+            result = selectCourse(canvas)
+
+        canvas.get_course.assert_called_once_with(1)
+        assert result.id == 1
+
+    def test_past_courses_exclude_restricted_stub(self):
+        """The restricted stub is not counted as a past course either."""
+        from canvigator_utils import selectCourse
+        canvas = self._canvas()
+
+        with patch('canvigator_utils.prompt_for_index', side_effect=[1, 0]):
+            result = selectCourse(canvas)
+
+        canvas.get_course.assert_called_once_with(2)
+        assert result.id == 2
+
+
 # ---------------------------------------------------------------------------
 # canvigator_course path-derivation tests
 # ---------------------------------------------------------------------------
