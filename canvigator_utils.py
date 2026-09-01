@@ -231,6 +231,12 @@ def selectCourse(canvas):
     current_date = datetime.now(timezone.utc)
 
     for course in canvas.get_courses():
+        # Canvas returns a stub ({'id', 'access_restricted_by_date'}) for courses the user can no
+        # longer access; those have neither end_at nor name, so skip them rather than failing.
+        if not hasattr(course, 'end_at') or not hasattr(course, 'name'):
+            logger.info(f"Skipping inaccessible course (id {getattr(course, 'id', '?')})")
+            continue
+
         try:
             # Canvas times are UTC; parse with fromisoformat (Python 3.11+ accepts trailing Z directly).
             end_date = datetime.fromisoformat(course.end_at.replace('Z', '+00:00')) if course.end_at else None
