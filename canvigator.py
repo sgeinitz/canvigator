@@ -203,6 +203,16 @@ if '--crn' in args:
     args.pop(crn_idx)  # remove '--crn'
     args.pop(crn_idx)  # remove the CRN value
 
+consent_csv = None
+if '--consent' in args:
+    c_idx = args.index('--consent')
+    if c_idx + 1 >= len(args):
+        print("Error: --consent requires the path to a CSV of consenting students")
+        sys.exit(1)
+    consent_csv = args[c_idx + 1]
+    args.pop(c_idx)  # remove '--consent'
+    args.pop(c_idx)  # remove the path
+
 n_months = 6
 if '--months' in args:
     m_idx = args.index('--months')
@@ -272,6 +282,10 @@ if help_requested:
     ch.print_task_help(task)
     sys.exit(0)
 
+if consent_csv is not None and task != 'export-anon-data':
+    print("Error: --consent applies only to export-anon-data.")
+    sys.exit(1)
+
 # export-anon-data works with local files only — no Canvas API needed
 if task == 'export-anon-data':
     import logging
@@ -281,6 +295,10 @@ if task == 'export-anon-data':
 
     cu.setup_logging()
     logger = logging.getLogger(__name__)
+
+    if consent_csv is not None and not Path(consent_csv).is_file():
+        print(f"Error: consent file not found: {consent_csv}")
+        sys.exit(1)
 
     data_base = Path.cwd() / "data"
     if not data_base.exists():
@@ -306,7 +324,7 @@ if task == 'export-anon-data':
         course_data_path = course_dirs[idx]
 
     print(f"\nSelected: {course_data_path.name}")
-    cc.exportAnonymizedData(course_data_path)
+    cc.exportAnonymizedData(course_data_path, consent_csv=consent_csv)
     print("\n*** Done ***\n")
     sys.exit(0)
 

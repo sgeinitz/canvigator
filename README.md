@@ -49,12 +49,17 @@ python canvigator.py --months N delete-old-conversations  # cutoff age in months
 python canvigator.py --auto-grade get-media-recordings  # skip per-student review and auto-grade every submission at full credit
 python canvigator.py --days N prep-class-digest          # synthesize a 1-page brief on cohort gaps from the last N days (default 7)
 python canvigator.py --cloud-questions prep-class-digest # opt the discussion-question step into cloud Gemini 3 with a redacted prompt (default: local Gemma 4)
+python canvigator.py --send-all <task>        # skip the per-student [y/N] prompt (reminder / follow-up / assessment sends); requires a --dry-run of the same task in the last 10 minutes
+python canvigator.py --choose-model assess-replies     # pick which local gemma4 model grades the replies (default: OLLAMA_MODEL)
+python canvigator.py --save-transcript assess-replies  # also save each audio transcription as a .txt next to the audio (also get-media-recordings)
+python canvigator.py --consent consent.csv export-anon-data  # export only consenting students (CSV with an id or sis_id column)
 ```
 
-Every flag has a single-dash short alias: `-d` (`--dry-run`), `-t` (`--tag`),
+Every flag except `--consent` has a single-dash short alias: `-d` (`--dry-run`), `-t` (`--tag`),
 `-a` (`--all`), `-c` (`--crn`), `-m` (`--months`), `-w`
 (`--reply-window-days`), `-g` (`--auto-grade`), `-n` (`--days`), `-q`
-(`--cloud-questions`), `-h` (`--help`). Short and long forms are
+(`--cloud-questions`), `-s` (`--send-all`), `-M` (`--choose-model`), `-S`
+(`--save-transcript`), `-h` (`--help`). Short and long forms are
 interchangeable.
 
 The `--crn` option selects a course by its CRN (the last 5 digits of the Canvas

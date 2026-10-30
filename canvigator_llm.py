@@ -1,5 +1,6 @@
 """Local LLM integration via Ollama for tagging and (later) generating quiz content."""
 import html
+import ipaddress
 import json
 import logging
 import math
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from canvigator_utils import selectFromList
 
@@ -73,8 +75,56 @@ DEFAULT_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "gemini-3-flash-preview
 OLLAMA_CLOUD_HOST = "https://ollama.com"
 
 
+def _is_cloud_model(name):
+    """Return True for an Ollama cloud model tag (e.g. ``gpt-oss:120b-cloud``, ``glm-4.6:cloud``).
+
+    The local Ollama daemon forwards such models to ollama.com, so they must
+    never be used on student work.
+    """
+    return str(name or '').rsplit(':', 1)[-1].lower().endswith('cloud')
+
+
+def _is_loopback_host(hostname):
+    """Return True when ``hostname`` refers to this machine."""
+    hostname = (hostname or '').lower()
+    if hostname in ('localhost', '0.0.0.0'):
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _assert_local_only():
+    """Refuse a "local" configuration that would send student work off this machine.
+
+    Every student-data path (reply assessment, media-recording transcription,
+    the local digest) builds its client with ``_make_client(cloud=False)``, so
+    this check sits there. Raises RuntimeError when ``OLLAMA_HOST`` is not a
+    loopback address or when ``OLLAMA_MODEL`` / ``OLLAMA_AUDIO_MODEL`` names an
+    Ollama cloud model.
+    """
+    host = os.environ.get('OLLAMA_HOST', '').strip()
+    if host:
+        hostname = urlsplit(host if '://' in host else f'http://{host}').hostname
+        if not _is_loopback_host(hostname):
+            raise RuntimeError(
+                f"OLLAMA_HOST={host!r} is not this machine. Student work is processed only by a "
+                "local Ollama server; unset OLLAMA_HOST or point it at localhost."
+            )
+    for var, name in (('OLLAMA_MODEL', DEFAULT_MODEL), ('OLLAMA_AUDIO_MODEL', DEFAULT_AUDIO_MODEL)):
+        if _is_cloud_model(name):
+            raise RuntimeError(
+                f"{var}={name!r} is an Ollama cloud model, which would send student work to ollama.com. "
+                "Use a locally pulled model (e.g. gemma4:31b) instead."
+            )
+
+
 def _make_client(cloud=False):
-    """Build an ollama.Client — cloud=True points at ollama.com with OLLAMA_API_KEY."""
+    """Build an ollama.Client — cloud=True points at ollama.com with OLLAMA_API_KEY.
+
+    cloud=False is the student-data path and is checked by ``_assert_local_only``.
+    """
     import ollama
     if cloud:
         api_key = os.environ.get("OLLAMA_API_KEY")
@@ -87,6 +137,7 @@ def _make_client(cloud=False):
             host=OLLAMA_CLOUD_HOST,
             headers={"Authorization": "Bearer " + api_key},
         )
+    _assert_local_only()
     return ollama.Client()
 
 
@@ -102,7 +153,8 @@ def pickLocalGemmaModel():
     models = getattr(resp, 'models', None) or []
     gemma_names = sorted(
         m.model for m in models
-        if isinstance(getattr(m, 'model', None), str) and m.model.startswith('gemma4:')
+        if isinstance(getattr(m, 'model', None), str) and m.model.startswith('gemma4:') and
+        not _is_cloud_model(m.model)
     )
     if not gemma_names:
         raise RuntimeError(
@@ -1206,8 +1258,23 @@ def transcribe_audio(audio_path, client, model, save_transcript=False):
     return transcript
 
 
-def _assess_explain_once(prompt, client, model):
-    """Single-pass explain assessment. Returns (result, feedback, evaluations_dict)."""
+def _is_ungraded_run(evals, n_expected_criteria):
+    """Return True when the rubric has pass criteria but the run evaluated none.
+
+    That happens when the model's reply is unparseable or omits the
+    per-criterion list. ``_aggregate_pass_fail`` treats an empty list as a
+    vacuous pass, so such a run must be counted as an error instead.
+    """
+    return n_expected_criteria > 0 and not evals.get('pass_criteria_evaluations')
+
+
+def _assess_explain_once(prompt, client, model, n_expected_criteria=0):
+    """Single-pass explain assessment. Returns (result, feedback, evaluations_dict).
+
+    ``result`` is ``'error'`` (with empty feedback) when the call raised or the
+    reply carried no per-criterion evaluations; ``_vote_assessments`` ignores
+    such runs.
+    """
     try:
         resp = _chat_with_retry(
             client,
@@ -1221,12 +1288,20 @@ def _assess_explain_once(prompt, client, model):
         evals = _parse_per_criterion_response(resp["message"]["content"], 'explain')
     except Exception as e:
         logger.warning(f"Explain assessment failed: {e}")
-        return 'fail', f'Assessment error: {e}', _parse_per_criterion_response('', 'explain')
+        return 'error', '', _parse_per_criterion_response('', 'explain')
+    if _is_ungraded_run(evals, n_expected_criteria):
+        logger.warning("Explain assessment returned no per-criterion evaluations; counting the run as an error.")
+        return 'error', '', evals
     return _aggregate_pass_fail(evals, 'explain'), evals.get('feedback', ''), evals
 
 
-def _assess_draw_once(prompt, image_path, client, model):
-    """Single-pass draw assessment. Returns (result, feedback, evaluations_dict)."""
+def _assess_draw_once(prompt, image_path, client, model, n_expected_criteria=0):
+    """Single-pass draw assessment. Returns (result, feedback, evaluations_dict).
+
+    ``result`` is ``'error'`` (with empty feedback) when the call raised or the
+    reply carried no per-criterion evaluations; ``_vote_assessments`` ignores
+    such runs.
+    """
     try:
         resp = _chat_with_retry(
             client,
@@ -1241,7 +1316,10 @@ def _assess_draw_once(prompt, image_path, client, model):
         evals = _parse_per_criterion_response(resp["message"]["content"], 'draw')
     except Exception as e:
         logger.warning(f"Draw assessment failed for {image_path}: {e}")
-        return 'fail', f'Assessment error: {e}', _parse_per_criterion_response('', 'draw')
+        return 'error', '', _parse_per_criterion_response('', 'draw')
+    if _is_ungraded_run(evals, n_expected_criteria):
+        logger.warning(f"Draw assessment for {image_path} returned no per-criterion evaluations; counting the run as an error.")
+        return 'error', '', evals
     return _aggregate_pass_fail(evals, 'draw'), evals.get('feedback', ''), evals
 
 
@@ -1254,10 +1332,13 @@ def _vote_assessments(runs):
     Returns (result, confidence, feedback, evals) where confidence is "high"
     when all runs agree and "borderline" otherwise. The feedback and evals are
     drawn from the first run that matches the majority verdict so the per-criterion
-    audit trail aligns with the reported result.
+    audit trail aligns with the reported result. Runs whose result is ``'error'``
+    are ignored; when no valid run remains the result is ``'error'`` with empty
+    confidence and feedback, so the row is never sent to a student.
     """
+    runs = [run for run in runs if run[0] != 'error']
     if not runs:
-        return 'fail', 'borderline', 'No assessment runs completed.', {}
+        return 'error', '', '', {}
     n_pass = sum(1 for r, _, _ in runs if r == 'pass')
     n_fail = len(runs) - n_pass
     majority = 'pass' if n_pass >= n_fail else 'fail'
@@ -1267,6 +1348,11 @@ def _vote_assessments(runs):
             return majority, confidence, fb, ev
     r, fb, ev = runs[0]
     return r, confidence, fb, ev
+
+
+def _count_pass_criteria(rubric):
+    """Return how many pass criteria a structured rubric lists (0 for a missing rubric)."""
+    return len((rubric or {}).get('pass_criteria') or [])
 
 
 def assess_explain(transcript, keywords, open_ended_question, original_question_text, client, model,
@@ -1282,7 +1368,8 @@ def assess_explain(transcript, keywords, open_ended_question, original_question_
         rubric=rubric, exemplars=exemplars, locked_examples=locked_examples,
         mode='explain',
     )
-    runs = [_assess_explain_once(prompt, client, model) for _ in range(n_consistency)]
+    n_expected = _count_pass_criteria(rubric)
+    runs = [_assess_explain_once(prompt, client, model, n_expected) for _ in range(n_consistency)]
     return _vote_assessments(runs)
 
 
@@ -1298,7 +1385,8 @@ def assess_draw(image_path, keywords, open_ended_question, original_question_tex
         assessment_guide=assessment_guide, rubric=rubric, exemplars=exemplars,
         locked_examples=locked_examples, mode='draw',
     )
-    runs = [_assess_draw_once(prompt, image_path, client, model) for _ in range(n_consistency)]
+    n_expected = _count_pass_criteria(rubric)
+    runs = [_assess_draw_once(prompt, image_path, client, model, n_expected) for _ in range(n_consistency)]
     return _vote_assessments(runs)
 
 
@@ -1374,15 +1462,20 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
         transcript = ''
         evaluations = {}
 
-        def _skip_row(feedback_msg):
-            """Build a uniform skip-row matching the graded-row shape."""
+        def _skip_row(result, feedback_msg):
+            """Build a uniform skip-row matching the graded-row shape.
+
+            ``result`` is ``'no_media'`` (the reply carried no usable file) or
+            ``'error'`` (the model produced nothing); error rows get empty
+            feedback so they can never be sent to the student.
+            """
             return {
                 'student_id': reply['student_id'],
                 'student_name': student_name,
                 'question_id': reply['question_id'],
                 'question_mode': mode,
-                'result': 'fail',
-                'confidence': 'high',
+                'result': result,
+                'confidence': '',
                 'feedback': feedback_msg,
                 'transcript': '',
                 'criteria_evaluations': '',
@@ -1398,14 +1491,14 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
             if not _isValidMediaFile(audio_path):
                 elapsed_min = (time.monotonic() - student_start) / 60
                 print(f" no valid audio — skipped... processed in {elapsed_min:.1f}min")
-                results.append(_skip_row('No valid audio submission to assess.'))
+                results.append(_skip_row('no_media', 'No valid audio submission to assess.'))
                 continue
             print(" transcribing...", end="", flush=True)
             transcript = transcribe_audio(audio_path, client, audio_model, save_transcript=save_transcript)
             if not transcript:
                 elapsed_min = (time.monotonic() - student_start) / 60
                 print(f" transcription returned empty — skipped... processed in {elapsed_min:.1f}min")
-                results.append(_skip_row('Audio transcription returned empty.'))
+                results.append(_skip_row('error', ''))
                 continue
             print(f" assessing (x{n_consistency})...", end="", flush=True)
             result, confidence, feedback, evaluations = assess_explain(
@@ -1419,7 +1512,7 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
             if not _isValidMediaFile(image_path):
                 elapsed_min = (time.monotonic() - student_start) / 60
                 print(f" no valid image — skipped... processed in {elapsed_min:.1f}min")
-                results.append(_skip_row('No valid image submission to assess.'))
+                results.append(_skip_row('no_media', 'No valid image submission to assess.'))
                 continue
             print(f" assessing image (x{n_consistency})...", end="", flush=True)
             # locked_examples carry transcripts, which don't apply to drawings — drop them.
@@ -1432,7 +1525,8 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
         from datetime import datetime, timezone
         assessed_at = datetime.now(timezone.utc).isoformat()
         elapsed_min = (time.monotonic() - student_start) / 60
-        print(f" {result} ({confidence})... processed in {elapsed_min:.1f}min")
+        verdict = "error — every grading run failed" if result == 'error' else f"{result} ({confidence})"
+        print(f" {verdict}... processed in {elapsed_min:.1f}min")
 
         results.append({
             'student_id': reply['student_id'],
