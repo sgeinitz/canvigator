@@ -80,4 +80,4 @@ Canvigator uses two kinds of models:
    ```
    Only pull the models for tasks you actually plan to run. `gemma4:31b` is a large download (~20 GB) and is only required for `assess-replies`.
 
-All model names are overridable via env vars (`OLLAMA_TEXT_MODEL`, `OLLAMA_MODEL`, `OLLAMA_AUDIO_MODEL`), and the local host can be overridden via the standard `OLLAMA_HOST` env var.
+All model names are overridable via env vars (`OLLAMA_TEXT_MODEL`, `OLLAMA_MODEL`, `OLLAMA_AUDIO_MODEL`), and the local host can be overridden via the standard `OLLAMA_HOST` env var. To keep student submissions on your machine, the tasks that process them refuse to run if `OLLAMA_HOST` points anywhere but this machine (localhost / loopback), or if `OLLAMA_MODEL` / `OLLAMA_AUDIO_MODEL` names an Ollama cloud model (a `…-cloud` tag).

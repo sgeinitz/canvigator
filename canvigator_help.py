@@ -80,6 +80,12 @@ FLAG_DESCRIPTIONS = {
         "audio (debug aid for noisy or mistranscribed recordings — listen + "
         "read side by side).",
     ),
+    '--consent': (
+        None, '<CSV>',
+        "Export only consenting students. The CSV needs an 'id' (Canvas user "
+        "id) or 'sis_id' column; sis_ids are matched through the latest "
+        "roster_*.csv (run get-roster first).",
+    ),
 }
 
 
@@ -317,29 +323,36 @@ TASK_HELP = {
 
     'export-anon-data': {
         'description': (
-            "Anonymize all CSVs in data/<course>/ by replacing student IDs with "
-            "hashed anon_ids and removing name / sis_id columns. No Canvas API "
-            "needed. Output is a zip archive plus a mapping CSV. WARNING: "
-            "anonymization alone does not make this data shareable — IRB / "
-            "FERPA still apply."
+            "Anonymize all CSVs in data/<course>/ by replacing student IDs "
+            "(id, student_id, student_ids) with hashed anon_ids and removing "
+            "names, sis_ids, and reply/recording file paths. Free text "
+            "(transcripts, replies, feedback) is kept and listed at the end for "
+            "manual review. With --consent, only consenting students' rows are "
+            "exported. Set CANVIGATOR_ANON_KEY to key the hash (HMAC) so "
+            "anon_ids can't be reversed from Canvas ids. No Canvas API needed. "
+            "WARNING: anonymization alone does not make this data shareable — "
+            "IRB / FERPA still apply."
         ),
         'prerequisites': [
             "data/<course>/ must already contain the CSVs you want to "
             "anonymize.",
+            "For --consent with sis_id values: a roster_*.csv from get-roster.",
         ],
         'inputs': [
             "data/<course>/*.csv (all existing files in the course directory).",
+            "With --consent: a CSV listing consenting students by id or sis_id.",
         ],
         'outputs': [
-            "data/<course>/anonymized_YYYYMMDD/ (anonymized copies of every CSV)",
+            "data/<course>/anonymized/ (re-created each run; anonymized copies "
+            "of every CSV)",
             "data/<course>/anonymized_YYYYMMDD.zip",
             "data/<course>/anon_mapping_YYYYMMDD.csv (real_id <-> anon_id "
             "mapping; keep this private).",
         ],
-        'flags': [],
+        'flags': ['--consent'],
         'examples': [
             "python canvigator.py --crn 12345 export-anon-data",
-            "python canvigator.py export-anon-data",
+            "python canvigator.py --crn 12345 --consent consent.csv export-anon-data",
         ],
         'run_before': [],
         'run_after': [],
@@ -519,27 +532,35 @@ TASK_HELP = {
             "('here is a follow-up to reinforce your understanding'). "
             "Mode-aware instructions: 'explain' asks for a voice recording, "
             "'draw' asks for an attached photo. Uses force_new=True so the "
-            "thread is dedicated. Reuses the quiz's submission CSVs if they "
-            "were written within the last 10 minutes (e.g. just after a "
-            "send-quiz-reminder run) instead of refetching from Canvas."
+            "thread is dedicated. Students who already received this follow-up "
+            "in an earlier real send are skipped, so re-running later in the "
+            "week reaches only new attempters. When more than one question is "
+            "selected in the CSV, you are asked which one to send. Reuses the "
+            "quiz's submission CSVs if they were written within the last 10 "
+            "minutes (e.g. just after a send-quiz-reminder run) instead of "
+            "refetching from Canvas."
         ),
         'prerequisites': [
             "get-quiz-questions --tag must have produced "
             "*_questions_w_tags_*.csv.",
             "generate-follow-up-questions must have produced *_open_ended_*"
-            ".csv with exactly one row per question marked "
+            ".csv with at most one row per question marked "
             "selected_question=1.",
         ],
         'inputs': [
             "Canvas quiz (selected interactively or via --crn).",
             "data/<course>/quiz<id>_questions_w_tags_*.csv",
             "data/<course>/quiz<id>_open_ended_*.csv",
+            "data/<course>/quiz<id>_followup_sent_*.csv (earlier sends, to "
+            "skip students already reached).",
         ],
         'outputs': [
-            "Canvas messages sent to students who missed the question.",
+            "Canvas messages sent to every attempter not already sent this "
+            "follow-up.",
             "data/<course>/quiz<id>_followup_sent[_dryrun]_YYYYMMDD.csv "
-            "(manifest with conversation_id, question_id, sent_at, "
-            "question_mode columns).",
+            "(manifest with conversation_id, question_id, question_mode, "
+            "status = missed/correct at send time, open_ended_question, "
+            "sent_at; real sends append to the day's file).",
         ],
         'flags': ['--dry-run', '--send-all'],
         'examples': [
@@ -558,9 +579,17 @@ TASK_HELP = {
             "'explain' mode the audio model transcribes and the main model "
             "grades the transcript; for 'draw' mode the main model grades the "
             "image directly. Each reply is run N=3 times and majority-voted "
-            "(confidence='high' on agreement, 'borderline' on split). Merges "
-            "into a persistent (non-dated) *_followup_assessments.csv — rows "
-            "with sent_assessment=1 are preserved verbatim across re-runs."
+            "(confidence='high' on agreement, 'borderline' on split); runs that "
+            "error or return no per-criterion grades are discarded, and if none "
+            "succeed the result is 'error' with empty feedback. A reply with no "
+            "usable recording/image gets result 'no_media'. The assessed reply "
+            "is the student's newest one carrying the right media. Merges into "
+            "a persistent (non-dated) *_followup_assessments.csv: a reply "
+            "already assessed (same message_id) is not re-graded, so your "
+            "unsent edits survive re-runs; sent rows are preserved verbatim, "
+            "and a newer reply after sent feedback is assessed as a new row. "
+            "llm_result / llm_confidence / llm_feedback keep the model's "
+            "original verdict."
         ),
         'prerequisites': [
             "send-follow-up-question must have produced "
@@ -571,8 +600,8 @@ TASK_HELP = {
         'inputs': [
             "Canvas quiz (selected interactively or via --crn) — used for "
             "context lookup.",
-            "data/<course>/quiz<id>_followup_sent_*.csv (iterated row by row "
-            "to fetch each conversation).",
+            "data/<course>/quiz<id>_followup_sent_*.csv (every real-send "
+            "manifest, iterated row by row to fetch each conversation).",
             "data/<course>/quiz<id>_open_ended_*.csv (provides the rubric, "
             "assessment guide, and exemplars).",
         ],
@@ -597,14 +626,16 @@ TASK_HELP = {
     'send-follow-up-assessments': {
         'description': (
             "For every row in the persistent *_followup_assessments.csv with "
-            "sent_assessment=0 and a non-empty 'feedback' value, preview the "
-            "feedback and prompt the instructor [y/N] before posting it as a "
+            "sent_assessment=0 and a non-empty 'feedback' value, show the full "
+            "message and prompt the instructor [y/N] before posting it as a "
             "reply on the existing follow-up conversation (using the row's "
             "conversation_id). Default is SKIP — only an exact 'y' sends. "
             "On a confirmed send, sets sent_assessment=1 and stamps sent_at. "
             "Skipped rows stay at sent_assessment=0 so they can be revisited. "
             "The instructor edits the 'feedback' column between assess-replies "
-            "and this task — feedback already sent is never overwritten."
+            "and this task — feedback already sent is never overwritten. Rows "
+            "with result 'error' have empty feedback and are not sent until "
+            "you write feedback for them."
         ),
         'prerequisites': [
             "assess-replies must have produced "
@@ -800,7 +831,7 @@ _FLAG_LABEL_WIDTH = 28
 def _flag_label(flag):
     """Return the rendered '-x, --flag <VAL>' label for one flag."""
     short, value_label, _ = FLAG_DESCRIPTIONS[flag]
-    label = f"{short}, {flag}"
+    label = f"{short}, {flag}" if short else f"    {flag}"
     if value_label:
         label = f"{label} {value_label}"
     return label

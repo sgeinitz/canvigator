@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 # media-recording playback is delivered as DASH, so without this the demuxer
 # fails with "Protocol 'https' not on whitelist" when loading fragments.
 _FFMPEG_PROTOCOL_WHITELIST = 'file,crypto,data,https,tls,tcp,http,httpproxy'
+# A stalled media stream would otherwise hang the whole run; a few-minute
+# recording downloads in seconds, so this only trips on a dead connection.
+_FFMPEG_FETCH_TIMEOUT_SECS = 300
 
 
 def _fetchAudio(url, audio_path):
@@ -54,8 +57,13 @@ def _fetchAudio(url, audio_path):
         str(audio_path),
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=_FFMPEG_FETCH_TIMEOUT_SECS)
         return True
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            f"ffmpeg timed out after {_FFMPEG_FETCH_TIMEOUT_SECS}s fetching audio for {audio_path.name}; skipping."
+        )
+        return False
     except FileNotFoundError:
         logger.warning(
             "ffmpeg not found in PATH; cannot fetch audio for "
