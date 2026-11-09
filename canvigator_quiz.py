@@ -12,6 +12,7 @@ import matplotlib as mpl
 import seaborn as sbn
 import os
 import re
+import html
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -391,14 +392,104 @@ def _render_blur_bullets(blurred_question_ids, question_info):
     return header + "\n".join(lines)
 
 
-def _extract_question_id(event):
-    """Extract quiz_question_id from a Canvas question_answered event, or None."""
+def _extract_question_ids(event):
+    """Every quiz_question_id in a Canvas question_answered event, as ints, in event_data order, de-duplicated.
+
+    One autosave can carry several questions (the first save of an attempt lists every question), so keeping only
+    the first id loses the rest. Entries without a numeric id are skipped; [] when nothing is usable.
+    """
     edata = getattr(event, 'event_data', None)
-    if isinstance(edata, list) and edata:
-        first_entry = edata[0]
-        if isinstance(first_entry, dict):
-            return first_entry.get('quiz_question_id')
-    return None
+    ids = []
+    for entry in edata if isinstance(edata, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            qid = int(entry.get('quiz_question_id'))
+        except (TypeError, ValueError):
+            continue
+        if qid not in ids:
+            ids.append(qid)
+    return ids
+
+
+def _is_blank(value):
+    """None, '', [], {} or a dict/list holding only blank values."""
+    if value is None or value == '' or value == [] or value == {}:
+        return True
+    if isinstance(value, dict):
+        return all(_is_blank(v) for v in value.values())
+    if isinstance(value, list):
+        return all(_is_blank(v) for v in value)
+    return False
+
+
+def _is_blank_answer(answer, question_type):
+    """Type-aware blank test, following Canvas's answer serializers.
+
+    matching: an unanswered question is [{answer_id, match_id: None}, ...], so blank iff every match_id is empty.
+    essay: rich text, so '<p></p>' is blank, i.e. blank iff nothing remains after removing tags and &nbsp;.
+    Anything else: the generic test. The answer value itself is never returned or stored.
+    """
+    qtype = (question_type or '').removesuffix('_question')
+    if qtype == 'matching' and isinstance(answer, list) and answer \
+            and all(isinstance(x, dict) and 'match_id' in x for x in answer):
+        return all(_is_blank(x.get('match_id')) for x in answer)
+    if qtype == 'essay' and isinstance(answer, str):
+        return not html.unescape(re.sub(r'<[^>]*>', '', answer)).replace('\xa0', ' ').strip()
+    return _is_blank(answer)
+
+
+def _extract_blank_question_ids(event, question_types):
+    """The ids (subset of _extract_question_ids, same order) whose answer in this event is blank.
+
+    question_types maps question id -> Canvas question_type (e.g. 'matching_question'). Note: Canvas logs multiple
+    dropdowns, matching and multiple answers with empty keys, so for those types "blank" describes the log, not
+    whether the student answered (canvigator-dev-notes doc 21).
+    """
+    edata = getattr(event, 'event_data', None)
+    blanks = []
+    for entry in edata if isinstance(edata, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            qid = int(entry.get('quiz_question_id'))
+        except (TypeError, ValueError):
+            continue
+        if qid not in blanks and _is_blank_answer(entry.get('answer'), question_types.get(qid)):
+            blanks.append(qid)
+    return blanks
+
+
+def _extract_question_id(event):
+    """The first quiz_question_id of a question_answered event (int), or None. Kept for the blur/timing report."""
+    ids = _extract_question_ids(event)
+    return ids[0] if ids else None
+
+
+EVENT_COLUMNS = ['id', 'attempt', 'event', 'timestamp', 'question_id', 'question_ids', 'blank_question_ids']
+
+
+def _events_frame(rows):
+    """DataFrame of _event_row rows; question_id stays an integer column with gaps (no '11526075.0' in the CSV)."""
+    df = pd.DataFrame(rows, columns=EVENT_COLUMNS)
+    df['question_id'] = df['question_id'].astype('Int64')
+    return df
+
+
+def _event_row(user_id, attempt, event, question_types):
+    """One row of the *_all_subs_and_events_* CSV. Question ids are ';'-joined; answer values are never included."""
+    answered = event.event_type == 'question_answered'
+    ids = _extract_question_ids(event) if answered else []
+    blanks = _extract_blank_question_ids(event, question_types) if answered else []
+    return {
+        'id': user_id,
+        'attempt': attempt,
+        'event': event.event_type,
+        'timestamp': event.created_at,
+        'question_id': ids[0] if ids else None,
+        'question_ids': ';'.join(map(str, ids)),
+        'blank_question_ids': ';'.join(map(str, blanks)),
+    }
 
 
 def _collect_timing_and_blurs(student_events, timing_by_q, blurs_by_q):
@@ -2563,6 +2654,7 @@ class CanvigatorQuiz:
         subs_and_events_data = []
 
         n_total = self.n_students or 0
+        question_types = {int(q.id): q.question_type for q in self.quiz_questions}
         subs = self.canvas_quiz.get_submissions(include=['submission_history'])
         for i, sub in enumerate(subs):
             self._spin(i, f"Fetching submissions... student {i + 1}/{n_total}")
@@ -2609,13 +2701,7 @@ class CanvigatorQuiz:
 
                 try:
                     for event in this_submission_events:
-                        subs_and_events_data.append({
-                            'id': sub.user_id,
-                            'attempt': attempt_num,
-                            'event': event.event_type,
-                            'timestamp': event.created_at,
-                            'question_id': _extract_question_id(event) if event.event_type == 'question_answered' else None,
-                        })
+                        subs_and_events_data.append(_event_row(sub.user_id, attempt_num, event, question_types))
                 except Exception as e:
                     logger.warning(f"could not get events for student id {sub.user_id} for attempt {attempt_num}: {e}")
                     continue
@@ -2623,7 +2709,7 @@ class CanvigatorQuiz:
         # Create DataFrames from the collected lists
         all_submissions = pd.DataFrame(submissions_data)
         all_subs_by_question = pd.DataFrame(subs_by_question_data)
-        all_subs_and_events = pd.DataFrame(subs_and_events_data, columns=['id', 'attempt', 'event', 'timestamp', 'question_id'])
+        all_subs_and_events = _events_frame(subs_and_events_data)
 
         # do a full outer join of quiz_takers on 'id' to get names for the submission data
         if not all_submissions.empty:
