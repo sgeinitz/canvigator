@@ -1,10 +1,10 @@
-import requests
 import hashlib
 import logging
 import shutil
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import requests
 import canvigator_quiz as cq
 import canvigator_utils as cu
 from canvigator_utils import today_str, spin, spin_done, format_due_date
