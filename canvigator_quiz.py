@@ -471,7 +471,7 @@ EVENT_COLUMNS = ['id', 'attempt', 'event', 'timestamp', 'question_id', 'question
 
 
 def _events_frame(rows):
-    """DataFrame of _event_row rows; question_id stays an integer column with gaps (no '11526075.0' in the CSV)."""
+    """Build the events DataFrame from _event_row rows; question_id stays an integer column with gaps (no '11526075.0' in the CSV)."""
     df = pd.DataFrame(rows, columns=EVENT_COLUMNS)
     df['question_id'] = df['question_id'].astype('Int64')
     return df

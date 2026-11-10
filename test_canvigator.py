@@ -4337,15 +4337,18 @@ class TestExtractQuestionIds:
         return SimpleNamespace(event_data=data)
 
     def test_single(self):
+        """One id in the event gives a one-element list."""
         from canvigator_quiz import _extract_question_ids
         assert _extract_question_ids(self._evt([{'quiz_question_id': '101', 'answer': 'x'}])) == [101]
 
     def test_multiple_keeps_order_and_dedupes(self):
+        """Several ids keep event order and drop repeats."""
         from canvigator_quiz import _extract_question_ids
         d = [{'quiz_question_id': '102'}, {'quiz_question_id': 101}, {'quiz_question_id': '102'}]
         assert _extract_question_ids(self._evt(d)) == [102, 101]
 
     def test_missing_or_bad(self):
+        """Missing, empty or non-numeric event data gives an empty list."""
         from canvigator_quiz import _extract_question_ids
         assert _extract_question_ids(self._evt(None)) == []
         assert _extract_question_ids(self._evt([])) == []
@@ -4353,6 +4356,7 @@ class TestExtractQuestionIds:
         assert _extract_question_ids(SimpleNamespace()) == []
 
     def test_blank_ids(self):
+        """Blank answers are found type by type (matching, essay, generic)."""
         from canvigator_quiz import _extract_blank_question_ids
         d = [{'quiz_question_id': '1', 'answer': None}, {'quiz_question_id': '2', 'answer': 'x'},
              {'quiz_question_id': '3', 'answer': {'a': '', 'b': None}}, {'quiz_question_id': '4', 'answer': ''},
@@ -4363,6 +4367,7 @@ class TestExtractQuestionIds:
         assert _extract_blank_question_ids(self._evt(d), types) == [1, 3, 4, 5, 7]
 
     def test_first_id_wrapper_unchanged(self):
+        """The single-id wrapper still returns the first id, or None."""
         from canvigator_quiz import _extract_question_id
         assert _extract_question_id(self._evt([{'quiz_question_id': '7'}, {'quiz_question_id': '8'}])) == 7
         assert _extract_question_id(self._evt([])) is None
@@ -4372,6 +4377,7 @@ class TestEventRow:
     """One row of the *_all_subs_and_events_* CSV: every question id and the blank ones, never answer values."""
 
     def test_question_answered_row(self):
+        """A question_answered row carries every id and the blank ones."""
         from canvigator_quiz import _event_row
         evt = SimpleNamespace(event_type='question_answered', created_at='2026-11-08T13:00:00Z',
                               event_data=[{'quiz_question_id': '11', 'answer': None},
@@ -4381,19 +4387,21 @@ class TestEventRow:
                        'question_id': 11, 'question_ids': '11;12', 'blank_question_ids': '11'}
 
     def test_other_event_row_has_empty_id_columns(self):
+        """Non-answer events have empty id columns."""
         from canvigator_quiz import _event_row
         evt = SimpleNamespace(event_type='page_blurred', created_at='t', event_data=None)
         row = _event_row(42, 1, evt, {})
         assert (row['question_id'], row['question_ids'], row['blank_question_ids']) == (None, '', '')
 
     def test_no_answer_values_in_row(self):
+        """Answer values never appear in an exported row."""
         from canvigator_quiz import _event_row
         evt = SimpleNamespace(event_type='question_answered', created_at='t',
                               event_data=[{'quiz_question_id': '12', 'answer': 'SECRET-ANSWER'}])
         assert 'SECRET-ANSWER' not in repr(_event_row(1, 1, evt, {12: 'essay_question'}))
 
     def test_events_csv_writes_integer_ids(self, tmp_path):
-        """ints mixed with None must not become floats ('11526075.0') in the CSV."""
+        """Integer ids mixed with None must not become floats ('11526075.0') in the CSV."""
         from canvigator_quiz import _events_frame
         rows = [{'id': 1, 'attempt': 1, 'event': 'session_started', 'timestamp': 't', 'question_id': None,
                  'question_ids': '', 'blank_question_ids': ''},
