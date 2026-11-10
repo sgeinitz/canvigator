@@ -4328,3 +4328,82 @@ class TestTranscribeAudio:
                             lambda client, **kw: {'message': {'content': 'fallback'}})
         result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
         assert result == 'fallback'
+
+
+class TestWaitForQuizReport:
+    """The student_analysis report wait: poll gently, give up after a deadline, stop on a failed job, retry stalls."""
+
+    @staticmethod
+    def _progress(state, completion=0, message=None):
+        return SimpleNamespace(workflow_state=state, completion=completion, message=message)
+
+    @staticmethod
+    def _clock(step):
+        t = {'now': 0.0}
+
+        def clock():
+            t['now'] += step
+            return t['now']
+        return clock
+
+    def test_polls_every_two_seconds_until_completed(self):
+        from canvigator_quiz import _wait_for_progress, REPORT_POLL_SECONDS
+        states = iter([self._progress('queued'), self._progress('running', 50), self._progress('completed', 100)])
+        sleeps = []
+        done = _wait_for_progress(lambda pid: next(states), '7', sleep=sleeps.append, clock=self._clock(0.1))
+        assert done.workflow_state == 'completed'
+        assert REPORT_POLL_SECONDS >= 1 and sleeps == [REPORT_POLL_SECONDS, REPORT_POLL_SECONDS]
+
+    def test_failed_job_raises_instead_of_looping(self):
+        from canvigator_quiz import _wait_for_progress
+        with pytest.raises(RuntimeError, match='could not generate'):
+            _wait_for_progress(lambda pid: self._progress('failed', message='boom'), '7',
+                               sleep=lambda s: None, clock=self._clock(0.1))
+
+    def test_gives_up_after_the_deadline(self):
+        from canvigator_quiz import _wait_for_progress
+        calls = []
+        with pytest.raises(TimeoutError, match='not ready'):
+            _wait_for_progress(lambda pid: calls.append(pid) or self._progress('queued'), '7',
+                               deadline_s=10, sleep=lambda s: None, clock=self._clock(2.0))
+        assert 3 <= len(calls) <= 6
+
+    def test_a_stalled_request_is_retried(self):
+        import requests
+        from canvigator_quiz import _wait_for_progress
+        replies = iter([requests.exceptions.ReadTimeout('stalled'), self._progress('completed', 100)])
+
+        def get_progress(pid):
+            r = next(replies)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        assert _wait_for_progress(get_progress, '7', sleep=lambda s: None,
+                                  clock=self._clock(0.1)).workflow_state == 'completed'
+
+
+class TestRequestTimeout:
+    """canvasapi sets no timeout on its requests; the report wait gets one, and the session is restored afterwards."""
+
+    def test_timeout_adapter_fills_in_missing_timeout(self):
+        from canvigator_quiz import _TimeoutHTTPAdapter
+        adapter = _TimeoutHTTPAdapter(30)
+        with patch('requests.adapters.HTTPAdapter.send', return_value='ok') as send:
+            assert adapter.send(MagicMock()) == 'ok'
+        assert send.call_args.kwargs['timeout'] == 30
+
+    def test_context_mounts_and_restores(self):
+        import requests
+        from canvigator_quiz import _request_timeout, _TimeoutHTTPAdapter
+        session = requests.Session()
+        canvas = SimpleNamespace(_Canvas__requester=SimpleNamespace(_session=session))
+        before = session.get_adapter('https://canvas.example')
+        with _request_timeout(canvas, 30):
+            inside = session.get_adapter('https://canvas.example')
+            assert isinstance(inside, _TimeoutHTTPAdapter) and inside.timeout == 30
+        assert session.get_adapter('https://canvas.example') is before
+
+    def test_context_is_a_no_op_without_a_session(self):
+        from canvigator_quiz import _request_timeout
+        with _request_timeout(SimpleNamespace(), 30):
+            pass
