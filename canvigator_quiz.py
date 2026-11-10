@@ -442,9 +442,10 @@ def _is_blank_answer(answer, question_type):
 def _extract_blank_question_ids(event, question_types):
     """The ids (subset of _extract_question_ids, same order) whose answer in this event is blank.
 
-    question_types maps question id -> Canvas question_type (e.g. 'matching_question'). Note: Canvas logs multiple
-    dropdowns, matching and multiple answers with empty keys, so for those types "blank" describes the log, not
-    whether the student answered (canvigator-dev-notes doc 21).
+    question_types maps question id -> Canvas question_type (e.g. 'matching_question'). Note: in sandbox tests
+    (Student View, Nov 2026) Canvas logged multiple dropdowns, matching and multiple answers with empty keys
+    ({"": null}, answer_id "", []), although the answers were saved and graded. For those types "blank" therefore
+    describes the log, not necessarily whether the student answered; check grades before reading it as "skipped".
     """
     edata = getattr(event, 'event_data', None)
     blanks = []
