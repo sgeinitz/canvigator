@@ -1,3 +1,4 @@
+import requests
 import hashlib
 import logging
 import shutil
@@ -39,13 +40,12 @@ class CanvigatorCourse:
         logger.info(f"Initialized course: {self.canvas_course.name}")
 
     def _loadQuizOrSkip(self, q):
-        """Load one quiz for an all-quizzes task, or return None if its report timed out or failed (with a warning).
-
-        Only report problems are skipped; any other error still stops the run.
+        """Load one quiz for an all-quizzes task, or return None if its report timed out, failed, or hit a network
+        error (with a warning). Any other error still stops the run.
         """
         try:
             return cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
-        except (TimeoutError, cq.QuizReportError) as e:
+        except (TimeoutError, cq.QuizReportError, requests.exceptions.RequestException) as e:
             msg = f"Skipping '{q.title}' — its quiz report could not be loaded: {e}"
             print(f"\n  WARNING: {msg}")
             logger.warning(msg)

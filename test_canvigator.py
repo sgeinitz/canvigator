@@ -4469,3 +4469,68 @@ class TestRequestTimeoutCleanup:
             with _request_timeout(canvas, 30):
                 pass
         assert close.called
+
+
+class TestReportWaitGaps:
+    """Gaps found by offline fault injection (fake Canvas server, 2026-11-10)."""
+
+    def test_report_request_and_fetch_are_time_limited(self, tmp_path):
+        """create_report and get_quiz_report run inside the request-timeout block, not only the progress wait."""
+        from contextlib import contextmanager
+        import canvigator_quiz as cq
+        active, seen = {'on': False}, {}
+
+        @contextmanager
+        def fake_timeout(canvas, seconds):
+            active['on'] = True
+            yield
+            active['on'] = False
+
+        class Stop(Exception):
+            pass
+
+        def create_report(kind):
+            seen['create'] = active['on']
+            return SimpleNamespace(progress_url='https://x/api/v1/progress/7')
+
+        def get_quiz_report(req):
+            seen['fetch'] = active['on']
+            raise Stop()
+
+        quiz = cq.CanvigatorQuiz.__new__(cq.CanvigatorQuiz)
+        quiz.canvas = SimpleNamespace(get_progress=lambda pid: SimpleNamespace(workflow_state='completed', completion=100))
+        quiz.canvas_quiz = SimpleNamespace(create_report=create_report, get_quiz_report=get_quiz_report, id=5)
+        quiz.verbose, quiz.quiz_name = False, 'q'
+        quiz._spin = lambda *a, **k: None
+        with patch('canvigator_quiz._request_timeout', fake_timeout):
+            with pytest.raises(Stop):
+                quiz.getQuizData()
+        assert seen == {'create': True, 'fetch': True}
+
+    def test_deadline_is_read_when_the_wait_runs(self):
+        """Changing REPORT_DEADLINE_SECONDS takes effect (the default used to be frozen at definition time)."""
+        import canvigator_quiz as cq
+        t = {'now': 0.0}
+
+        def clock():
+            t['now'] += 0.6
+            return t['now']
+        calls = []
+        with patch.object(cq, 'REPORT_DEADLINE_SECONDS', 1):
+            with pytest.raises(TimeoutError):
+                cq._wait_for_progress(lambda pid: calls.append(pid) or SimpleNamespace(workflow_state='queued', completion=0),
+                                      '7', sleep=lambda s: None, clock=clock)
+        assert len(calls) <= 3
+
+    def test_all_quizzes_skips_a_network_error(self):
+        """With --all, a connection error on one quiz's report skips that quiz instead of ending the run."""
+        import requests
+        import canvigator_course as cc
+        course = cc.CanvigatorCourse.__new__(cc.CanvigatorCourse)
+        course.canvas, course.config, course.verbose = MagicMock(), MagicMock(), False
+        course.canvas_course = MagicMock()
+        course.canvas_course.get_quizzes.return_value = [SimpleNamespace(title='Down'), SimpleNamespace(title='Fine')]
+        good = MagicMock(published=True, n_students=5)
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[requests.exceptions.ConnectionError('reset'), good]):
+            course.getAllQuizzesAndSubmissions()
+        assert good.getAllSubmissionsAndEvents.called
