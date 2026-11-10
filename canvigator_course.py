@@ -38,6 +38,19 @@ class CanvigatorCourse:
         self.config.addCourseToPath(_courseCodeToPath(self.canvas_course.course_code))
         logger.info(f"Initialized course: {self.canvas_course.name}")
 
+    def _loadQuizOrSkip(self, q):
+        """Load one quiz for an all-quizzes task, or return None if its report timed out or failed (with a warning).
+
+        Only report problems are skipped; any other error still stops the run.
+        """
+        try:
+            return cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
+        except (TimeoutError, cq.QuizReportError) as e:
+            msg = f"Skipping '{q.title}' — its quiz report could not be loaded: {e}"
+            print(f"\n  WARNING: {msg}")
+            logger.warning(msg)
+            return None
+
     def getAllQuizzesAndSubmissions(self):
         """Get all quizzes and their submissions for the course."""
         all_quizzes = list(self.canvas_course.get_quizzes())
@@ -46,7 +59,9 @@ class CanvigatorCourse:
         for i, q in enumerate(all_quizzes, start=1):
             print(f"\n[{i}/{len(all_quizzes)}] Processing: {q.title}")
             # if q is a legit quiz, with at least one submission, then get submissions
-            quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
+            quiz = self._loadQuizOrSkip(q)
+            if quiz is None:
+                continue
             # check that the dataframe, quiz.quiz_df has at least 2 rows (header + at least one submission)
             if quiz.published and quiz.n_students is not None and quiz.n_students > 1:
                 quiz.generateQuestionHistograms()
@@ -93,7 +108,9 @@ class CanvigatorCourse:
 
         for i, q in enumerate(eligible, start=1):
             print(f"\n[{i}/{len(eligible)}] Processing: {q.title}")
-            quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
+            quiz = self._loadQuizOrSkip(q)
+            if quiz is None:
+                continue
 
             try:
                 question_info = quiz._loadQuestionInfo()

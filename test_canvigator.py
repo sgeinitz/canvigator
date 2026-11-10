@@ -4347,6 +4347,7 @@ class TestWaitForQuizReport:
         return clock
 
     def test_polls_every_two_seconds_until_completed(self):
+        """Polls at REPORT_POLL_SECONDS until the job completes."""
         from canvigator_quiz import _wait_for_progress, REPORT_POLL_SECONDS
         states = iter([self._progress('queued'), self._progress('running', 50), self._progress('completed', 100)])
         sleeps = []
@@ -4355,12 +4356,14 @@ class TestWaitForQuizReport:
         assert REPORT_POLL_SECONDS >= 1 and sleeps == [REPORT_POLL_SECONDS, REPORT_POLL_SECONDS]
 
     def test_failed_job_raises_instead_of_looping(self):
+        """A failed report job raises instead of looping forever."""
         from canvigator_quiz import _wait_for_progress
         with pytest.raises(RuntimeError, match='could not generate'):
             _wait_for_progress(lambda pid: self._progress('failed', message='boom'), '7',
                                sleep=lambda s: None, clock=self._clock(0.1))
 
     def test_gives_up_after_the_deadline(self):
+        """The wait raises TimeoutError once the deadline passes."""
         from canvigator_quiz import _wait_for_progress
         calls = []
         with pytest.raises(TimeoutError, match='not ready'):
@@ -4369,6 +4372,7 @@ class TestWaitForQuizReport:
         assert 3 <= len(calls) <= 6
 
     def test_a_stalled_request_is_retried(self):
+        """A progress request that timed out is retried."""
         import requests
         from canvigator_quiz import _wait_for_progress
         replies = iter([requests.exceptions.ReadTimeout('stalled'), self._progress('completed', 100)])
@@ -4386,6 +4390,7 @@ class TestRequestTimeout:
     """canvasapi sets no timeout on its requests; the report wait gets one, and the session is restored afterwards."""
 
     def test_timeout_adapter_fills_in_missing_timeout(self):
+        """The adapter adds its timeout when the caller gave none."""
         from canvigator_quiz import _TimeoutHTTPAdapter
         adapter = _TimeoutHTTPAdapter(30)
         with patch('requests.adapters.HTTPAdapter.send', return_value='ok') as send:
@@ -4393,6 +4398,7 @@ class TestRequestTimeout:
         assert send.call_args.kwargs['timeout'] == 30
 
     def test_context_mounts_and_restores(self):
+        """The timeout adapter is mounted inside the block and removed after it."""
         import requests
         from canvigator_quiz import _request_timeout, _TimeoutHTTPAdapter
         session = requests.Session()
@@ -4404,6 +4410,62 @@ class TestRequestTimeout:
         assert session.get_adapter('https://canvas.example') is before
 
     def test_context_is_a_no_op_without_a_session(self):
+        """Without a canvasapi session the context does nothing."""
         from canvigator_quiz import _request_timeout
         with _request_timeout(SimpleNamespace(), 30):
             pass
+
+
+class TestAllQuizzesSkipStuckReport:
+    """With --all, one quiz whose report times out or fails is skipped instead of ending the whole run."""
+
+    def _course(self, quizzes):
+        import canvigator_course as cc
+        course = cc.CanvigatorCourse.__new__(cc.CanvigatorCourse)
+        course.canvas = MagicMock()
+        course.canvas_course = MagicMock()
+        course.canvas_course.get_quizzes.return_value = quizzes
+        course.config = MagicMock()
+        course.verbose = False
+        return course
+
+    def test_timeout_on_one_quiz_skips_it(self, capsys):
+        """A TimeoutError from one quiz's report wait skips that quiz; the next quiz is still processed."""
+        stuck, ok = SimpleNamespace(title='Stuck'), SimpleNamespace(title='Fine')
+        good = MagicMock(published=True, n_students=5)
+        course = self._course([stuck, ok])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[TimeoutError('not ready'), good]):
+            course.getAllQuizzesAndSubmissions()
+        assert good.getAllSubmissionsAndEvents.called
+        assert "Skipping 'Stuck'" in capsys.readouterr().out
+
+    def test_failed_report_on_one_quiz_skips_it(self):
+        """A failed report (QuizReportError) skips that quiz too."""
+        from canvigator_quiz import QuizReportError
+        good = MagicMock(published=True, n_students=5)
+        course = self._course([SimpleNamespace(title='Bad'), SimpleNamespace(title='Fine')])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[QuizReportError('failed'), good]):
+            course.getAllQuizzesAndSubmissions()
+        assert good.getAllSubmissionsAndEvents.called
+
+    def test_other_errors_still_surface(self):
+        """Unrelated errors are not swallowed."""
+        course = self._course([SimpleNamespace(title='X')])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=ValueError('bug')):
+            with pytest.raises(ValueError):
+                course.getAllQuizzesAndSubmissions()
+
+
+class TestRequestTimeoutCleanup:
+    """The temporary timeout adapter is closed when the wait ends."""
+
+    def test_adapter_closed_after_block(self):
+        """Its connection pool is released instead of waiting for garbage collection."""
+        import requests
+        from canvigator_quiz import _request_timeout
+        session = requests.Session()
+        canvas = SimpleNamespace(_Canvas__requester=SimpleNamespace(_session=session))
+        with patch('canvigator_quiz._TimeoutHTTPAdapter.close') as close:
+            with _request_timeout(canvas, 30):
+                pass
+        assert close.called

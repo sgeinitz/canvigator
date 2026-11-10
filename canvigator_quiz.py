@@ -580,6 +580,10 @@ REPORT_DEADLINE_SECONDS = 300         # give up waiting for the report after thi
 REPORT_REQUEST_TIMEOUT_SECONDS = 30   # one progress request may take at most this long
 
 
+class QuizReportError(RuntimeError):
+    """Canvas could not generate a quiz report (its job ended in 'failed')."""
+
+
 class _TimeoutHTTPAdapter(HTTPAdapter):
     """HTTPAdapter that applies a default timeout when the caller didn't set one (canvasapi never does)."""
 
@@ -615,6 +619,7 @@ def _request_timeout(canvas, seconds):
         session.adapters.clear()
         for prefix, previous in saved:
             session.adapters[prefix] = previous
+        adapter.close()
 
 
 def _wait_for_progress(get_progress, progress_id, poll_s=REPORT_POLL_SECONDS, deadline_s=REPORT_DEADLINE_SECONDS,
@@ -622,7 +627,7 @@ def _wait_for_progress(get_progress, progress_id, poll_s=REPORT_POLL_SECONDS, de
     """Poll a Canvas Progress until it completes and return it.
 
     - asks every `poll_s` seconds (it used to ask 10 times a second);
-    - raises RuntimeError if Canvas reports the job as failed (that used to loop forever);
+    - raises QuizReportError if Canvas reports the job as failed (that used to loop forever);
     - raises TimeoutError after `deadline_s` seconds;
     - retries a progress request that timed out or lost its connection.
     """
@@ -637,7 +642,7 @@ def _wait_for_progress(get_progress, progress_id, poll_s=REPORT_POLL_SECONDS, de
             if progress.workflow_state == 'completed':
                 return progress
             if progress.workflow_state == 'failed':
-                raise RuntimeError(f"Canvas could not generate the quiz report: {getattr(progress, 'message', None) or 'no reason given'}")
+                raise QuizReportError(f"Canvas could not generate the quiz report: {getattr(progress, 'message', None) or 'no reason given'}")
             if on_tick:
                 on_tick(progress)
         if clock() - start > deadline_s:
