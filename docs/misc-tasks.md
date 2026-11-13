@@ -77,19 +77,46 @@ pure-placeholder run still works without `OLLAMA_API_KEY` set.
 *Anonymize the local CSVs for a course (no Canvas API needed); produces a zip archive plus an ID mapping file.*
 
 Anonymizes all CSV files in a course data directory by replacing student IDs
-with hashed anonymous IDs (SHA-256 mod 10^10) and removing identifying columns
-(`name`, `sis_id`). This task works entirely with local files and does not
-require Canvas API credentials. Course selection is done from existing `data/`
-subdirectories (by `--crn` or interactively).
+with hashed anonymous IDs (mod 10^10) and removing identifying columns. The
+per-row student id — `id` (alongside `name`) or `student_id` (the reminder and
+follow-up manifests, replies, assessments, and media-recording CSVs) — becomes
+`anon_id`; the comma-joined `student_ids` in `conversations_*.csv` become
+`anon_ids`; pairing files' `id1`… become `anon_id1`…. Names (`name`,
+`student_name`, `student_names`, `sortable_name`), `sis_id`, and the reply /
+recording file paths (`attachment_path`, `audio_path`, whose filenames embed the
+Canvas id and first name) are dropped. Free text — transcripts, reply text,
+feedback, conversation messages, and quiz answer text — is **kept**; the task
+ends by listing every file and column that still contains it, for manual review
+before sharing. Audio and images are never exported. This task works entirely
+with local files and does not require Canvas API credentials. Course selection
+is done from existing `data/` subdirectories (by `--crn` or interactively).
+
+**Consent filter.** `--consent <CSV>` exports only consenting students. The CSV
+needs an `id` (Canvas user id) or `sis_id` column; SIS ids are matched to Canvas
+ids through the latest `roster_*.csv`, so run `get-roster` first. Rows for other
+students are removed, non-consenting partners in pairing files are blanked, and
+the mapping file lists only consenting students. The consent file itself is
+never exported, even if it is saved in the course directory.
+
+**Keyed anonymous ids.** Canvas user ids come from a small, guessable range, so
+a plain SHA-256 of them can be reversed by hashing every candidate id. Set
+`CANVIGATOR_ANON_KEY` (e.g. `export CANVIGATOR_ANON_KEY="<long random string>"`
+in `set_env.sh`) to use HMAC-SHA256 instead. Keep the key private and unchanged,
+so the same student gets the same `anon_id` across exports. Without it the task
+uses plain SHA-256 (matching earlier exports) and prints a reminder.
+
+```bash
+python canvigator.py --crn 12345 --consent consent.csv export-anon-data
+```
 
 > **Note:** Anonymization alone does not make data shareable. Do not publish/share
 > data without participant consent, IRB approval, and FERPA compliance.
 
 | | Files |
 |---|---|
-| **Input** | All CSV files in `data/<course>/` |
-| **Output** | `data/<course>/anon_mapping_YYYYMMDD.csv` — mapping of original IDs to anonymous IDs |
-| | `data/<course>/anonymized/` — directory containing anonymized copies of all CSVs |
+| **Input** | All CSV files in `data/<course>/` (plus the `--consent` CSV, if given) |
+| **Output** | `data/<course>/anon_mapping_YYYYMMDD.csv` — mapping of original IDs to anonymous IDs (keep private) |
+| | `data/<course>/anonymized/` — directory containing anonymized copies of all CSVs (re-created on every run) |
 | | `data/<course>/anonymized_YYYYMMDD.zip` — zip archive of the anonymized directory |
 
 ---
