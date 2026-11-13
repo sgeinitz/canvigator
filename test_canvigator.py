@@ -2703,6 +2703,44 @@ class TestSendAllQuizRemindersFiltering:
         header = preview.call_args.args[2]
         assert 'covering 1 quiz(zes)' in header and 'WARNING' not in header
 
+    def _dry_run_two_quizzes(self, monkeypatch, tmp_path, first_quiz):
+        """Dry-run two eligible quizzes into ``tmp_path``; the first loads as ``first_quiz``, the second has a reminder."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A', 'Quiz B'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        course.config = SimpleNamespace(data_path=tmp_path)
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = ('not attempted', ['Q1'])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[first_quiz, loaded]), \
+             patch('canvigator_course.cq._sendOrPreviewMessages'), \
+             patch('canvigator_course._composeMultiQuizReminder', return_value='msg'):
+            course.sendAllQuizReminders(dry_run=True)
+        return course
+
+    def test_dry_run_with_unavailable_report_does_not_authorize_send_all(self, capsys, monkeypatch, tmp_path):
+        """A dry run that skipped a quiz for an unavailable report writes no manifest, so --send-all refuses."""
+        course = self._dry_run_two_quizzes(monkeypatch, tmp_path, TimeoutError('not ready'))
+        assert list(tmp_path.glob('course_reminder_sent_dryrun_*.csv')) == []
+        captured = capsys.readouterr().out
+        assert "No dry-run manifest written" in captured and "'Quiz A'" in captured
+        with pytest.raises(RuntimeError, match='--send-all requires a fresh --dry-run'):
+            course.sendAllQuizReminders(send_all=True)
+
+    def test_dry_run_with_untagged_quiz_still_writes_manifest(self, monkeypatch, tmp_path):
+        """A quiz skipped for a missing tagged-questions CSV does not withhold the dry-run manifest."""
+        untagged = MagicMock()
+        untagged._loadQuestionInfo.side_effect = FileNotFoundError('No *_questions_w_tags_*.csv found for quiz')
+        self._dry_run_two_quizzes(monkeypatch, tmp_path, untagged)
+        assert len(list(tmp_path.glob('course_reminder_sent_dryrun_*.csv'))) == 1
+
+    def test_clean_dry_run_writes_manifest(self, monkeypatch, tmp_path):
+        """With every quiz checked, the dry run writes the manifest that authorizes --send-all."""
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = None
+        self._dry_run_two_quizzes(monkeypatch, tmp_path, loaded)
+        assert len(list(tmp_path.glob('course_reminder_sent_dryrun_*.csv'))) == 1
+
 
 # ---------------------------------------------------------------------------
 # canvigator_assignment tests

@@ -58,8 +58,8 @@ class CanvigatorCourse:
     def _loadQuizForReminder(self, q):
         """Load one quiz and its tagged question info for the reminder run, as ``(quiz, question_info)``.
 
-        Returns ``(None, None)``, after a warning, when the quiz cannot be checked: its report could not be loaded,
-        or it has no tagged-questions CSV.
+        After a warning, returns ``(None, None)`` when the quiz report could not be loaded, and ``(quiz, None)`` when
+        the quiz has no tagged-questions CSV. Either way the quiz cannot be checked.
         """
         quiz = self._loadQuizOrSkip(q)
         if quiz is None:
@@ -70,7 +70,7 @@ class CanvigatorCourse:
             msg = f"Skipping '{q.title}' — {e}"
             print(f"  WARNING: {msg}")
             logger.warning(msg)
-            return None, None
+            return quiz, None
 
     def getAllQuizzesAndSubmissions(self):
         """Get all quizzes and their submissions for the course."""
@@ -105,6 +105,10 @@ class CanvigatorCourse:
         student per quiz (no attempt / imperfect / page-blur on perfect), and
         composes a single message per student listing all eligible quizzes.
         Skips quizzes lacking a ``*_questions_w_tags_*.csv`` with a warning.
+
+        A quiz whose report could not be loaded is skipped too, but that failure can clear on its own, and the quiz
+        would then add reminders nobody previewed. So a dry run with such a skip writes no manifest and does not
+        authorize ``--send-all``.
         """
         if send_all and not cq._hasRecentDryRunManifest(self.config.data_path, "course_reminder_sent"):
             raise RuntimeError(
@@ -126,14 +130,15 @@ class CanvigatorCourse:
 
         # student_id -> list[dict(quiz_id, quiz_name, due_at, reason, bullets)]
         student_state = {}
-        # Titles of eligible quizzes that could not be checked, so the reminders say nothing about them.
+        # (title, report_unavailable) for each eligible quiz that could not be checked, so the reminders say nothing
+        # about it. report_unavailable is True when the quiz report could not be loaded.
         skipped = []
 
         for i, q in enumerate(eligible, start=1):
             print(f"\n[{i}/{len(eligible)}] Processing: {q.title}")
             quiz, question_info = self._loadQuizForReminder(q)
-            if quiz is None:
-                skipped.append(q.title)
+            if question_info is None:
+                skipped.append((q.title, quiz is None))
                 continue
 
             if not quiz._tryLoadRecentSubmissions():
@@ -162,7 +167,7 @@ class CanvigatorCourse:
                 })
 
         n_checked = len(eligible) - len(skipped)
-        not_checked = ", ".join(f"'{title}'" for title in skipped)
+        not_checked = ", ".join(f"'{title}'" for title, _ in skipped)
 
         if not student_state:
             if skipped:
@@ -201,7 +206,7 @@ class CanvigatorCourse:
 
         if dry_run:
             cq._sendOrPreviewMessages(messages, subject_str, header_label)
-            _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, self.config.data_path)
+            _saveDryRunCourseReminderManifest(messages, student_state, subject_str, self.config.data_path, skipped)
         else:
             sent_messages = cq._interactiveSend(self.canvas, messages, subject_str, header_label, send_all=send_all)
             if sent_messages:
@@ -759,6 +764,23 @@ def _composeMultiQuizReminder(first_name, state_list):
         "struggle, that's where the learning happens. Good luck!"
     )
     return intro + "\n\n".join(sections) + closing + note_str
+
+
+def _saveDryRunCourseReminderManifest(messages, student_state, subject_str, data_path, skipped):
+    """Save the dry-run manifest that authorizes ``--send-all``, unless a quiz report could not be loaded.
+
+    ``skipped`` holds ``(title, report_unavailable)`` pairs. A report failure can clear before the real send, and
+    the quiz would then add reminders that were never previewed, so such a dry run writes no manifest.
+    """
+    report_unavailable = [title for title, unavailable in skipped if unavailable]
+    if not report_unavailable:
+        _saveCourseReminderManifest(messages, student_state, subject_str, True, data_path)
+        return
+    msg = (f"No dry-run manifest written: the report for {len(report_unavailable)} quiz(zes) could not be loaded "
+           f"({', '.join(repr(t) for t in report_unavailable)}), so this preview is incomplete. "
+           "Re-run --dry-run before using --send-all.")
+    print(f"\n  WARNING: {msg}")
+    logger.warning(f"sendAllQuizReminders: {msg}")
 
 
 def _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, data_path):

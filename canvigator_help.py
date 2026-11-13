@@ -509,7 +509,9 @@ TASK_HELP = {
             "data/<course>/quiz<id>_reminder_sent[_dryrun]_YYYYMMDD.csv "
             "(per-quiz manifest).",
             "With --all: data/<course>/course_reminder_sent[_dryrun]_YYYYMMDD"
-            ".csv (one row per student listing every quiz reminded about).",
+            ".csv (one row per student listing every quiz reminded about). "
+            "A --dry-run that had to skip a quiz because its report could not "
+            "be loaded writes no manifest, so it does not authorize --send-all.",
         ],
         'flags': ['--dry-run', '--all', '--send-all'],
         'examples': [
