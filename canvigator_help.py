@@ -59,7 +59,7 @@ FLAG_DESCRIPTIONS = {
     ),
     '--cloud-questions': (
         '-q', None,
-        "Route the discussion-question step to cloud Gemini 3 with a redacted "
+        "Route the discussion-question step to the cloud text model with a redacted "
         "prompt (tag names + integer counts only — no transcripts or themes).",
     ),
     '--send-all': (
@@ -776,8 +776,8 @@ TASK_HELP = {
             "follow-up reply themes, media-recording themes) and turns the top "
             "priorities into 2-3 in-class discussion questions. Default uses "
             "local Gemma 4 with the full-fidelity prompt; with "
-            "--cloud-questions, the discussion-question step routes to cloud "
-            "Gemini 3 with a redacted prompt (tag names + integer counts only "
+            "--cloud-questions, the discussion-question step routes to the cloud "
+            "text model with a redacted prompt (tag names + integer counts only "
             "— no transcripts or themes leave the machine)."
         ),
         'prerequisites': [

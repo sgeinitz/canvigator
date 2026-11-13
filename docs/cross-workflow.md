@@ -37,7 +37,7 @@ The brief ends with **2–3 suggested in-class discussion questions** targeted
 at the highest-priority gaps. By default these are drafted by the local
 Gemma 4 model with a full-fidelity prompt that includes the derived theme
 bullets and evidence snippets. With `--cloud-questions` (`-q`) the step
-routes to cloud Gemini 3 instead, but only with a *redacted* prompt that
+routes to the cloud text model instead, but only with a *redacted* prompt that
 contains tag names + integer miss counts + integer theme-cluster counts —
 no transcripts, no `criteria_evaluations`, no theme text. Student-derived
 content stays local in either configuration.
@@ -66,7 +66,7 @@ for transcripts.
 ```bash
 python canvigator.py prep-class-digest                  # default 7-day window, Gemma-only
 python canvigator.py --days 14 prep-class-digest        # widen the window
-python canvigator.py --cloud-questions prep-class-digest  # opt the question step into Gemini
+python canvigator.py --cloud-questions prep-class-digest  # opt the question step into the cloud text model
 ```
 
 Open the generated `class_digest_*.md`, scan the priority gaps, and use the

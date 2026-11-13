@@ -64,7 +64,7 @@ Several tasks use a Large Language Model (LLM) via [Ollama](https://ollama.com) 
 
 Canvigator uses two kinds of models:
 
-1. **A cloud-hosted text model** (default `gemini-3-flash-preview`, set via `OLLAMA_TEXT_MODEL`) for instructor-side text generation — drafting quiz questions in `create-quiz`, tagging quiz questions, and generating open-ended follow-up questions. These tasks never see student data, so a larger cloud model is a good fit.
+1. **A cloud-hosted text model** (default `glm-5.3-flash:cloud`, set via `OLLAMA_TEXT_MODEL`) for instructor-side text generation — drafting quiz questions in `create-quiz`, tagging quiz questions, and generating open-ended follow-up questions. These tasks never see student data, so a larger cloud model is a good fit.
 2. **Local models** for tasks that process student input — `gemma4:31b` (default `OLLAMA_MODEL`) for assessing text/image replies, and `gemma4:e4b` (default `OLLAMA_AUDIO_MODEL`) for transcribing student audio. Keeping these local is deliberate: student submissions should not leave your machine.
 
 **To use the cloud text model:**

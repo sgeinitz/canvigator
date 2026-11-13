@@ -42,7 +42,7 @@ QN — [p]laceholder, [g]enerate w/ LLM, [e]nd quiz:
 - **`g`** (generate w/ LLM) — asks the user for a natural-language seed prompt
   (e.g. *"a question about combinatorics asking how many ways 11 soccer players
   can be selected from a team of 23"*) and routes it through the cloud text
-  model (default `gemini-3-flash-preview`, requires `OLLAMA_API_KEY` — see
+  model (default `glm-5.3-flash:cloud`, requires `OLLAMA_API_KEY` — see
   [Ollama setup](installation.md#ollama-setup-optional)). The LLM returns a
   complete Canvas-shaped question of one of seven auto-gradable types:
   multiple-choice, multiple-answers, true/false, fill-in-multiple-blanks,

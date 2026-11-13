@@ -100,7 +100,7 @@ Pass `--tag` to add a `keywords` column (inserted before `question_text`) with
 [Ollama](https://ollama.com). The output is written to a separate file
 (`*_questions_w_tags_*.csv`) so untagged and tagged exports never overwrite
 each other. By default this uses the cloud-hosted text model
-`gemini-3-flash-preview` at `https://ollama.com`, which requires `OLLAMA_API_KEY`
+`glm-5.3-flash:cloud` at `https://ollama.com`, which requires `OLLAMA_API_KEY`
 to be set — see [Ollama setup](installation.md#ollama-setup-optional). The
 model can be overridden via `OLLAMA_TEXT_MODEL`.
 
@@ -115,7 +115,7 @@ selected course — one CSV per quiz, using each quiz's own filename prefix.
 *Per original question, draft 3 candidate open-ended follow-ups + rubric + exemplars; instructor curates.*
 
 Reads the tagged questions CSV for a selected quiz and uses a cloud-hosted LLM
-(via Ollama's hosted endpoint, default `gemini-3-flash-preview`) to produce
+(via Ollama's hosted endpoint, default `glm-5.3-flash:cloud`) to produce
 open-ended follow-up candidates. For each original quiz question the task runs
 five steps:
 
