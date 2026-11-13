@@ -48,7 +48,7 @@ python canvigator.py --reply-window-days N <task>  # set the days-after-send win
 python canvigator.py --months N delete-old-conversations  # cutoff age in months for delete-old-conversations (default: 6)
 python canvigator.py --auto-grade get-media-recordings  # skip per-student review and auto-grade every submission at full credit
 python canvigator.py --days N prep-class-digest          # synthesize a 1-page brief on cohort gaps from the last N days (default 7)
-python canvigator.py --cloud-questions prep-class-digest # opt the discussion-question step into cloud Gemini 3 with a redacted prompt (default: local Gemma 4)
+python canvigator.py --cloud-questions prep-class-digest # opt the discussion-question step into the cloud text model with a redacted prompt (default: local Gemma 4)
 python canvigator.py --send-all <task>        # skip the per-student [y/N] prompt (reminder / follow-up / assessment sends); requires a --dry-run of the same task in the last 10 minutes
 python canvigator.py --choose-model assess-replies     # pick which local gemma4 model grades the replies (default: OLLAMA_MODEL)
 python canvigator.py --save-transcript assess-replies  # also save each audio transcription as a .txt next to the audio (also get-media-recordings)

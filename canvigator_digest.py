@@ -12,7 +12,7 @@ Synthesizes a 1-page Markdown brief on cohort gaps over a configurable window
 The brief ends with 2-3 suggested in-class discussion questions targeted at the
 top-ranked gaps. Local Gemma 4 handles all student-derived content; an
 instructor opt-in (``--cloud-questions``) routes only the final
-question-drafting step to cloud Gemini 3 with a redacted prompt that contains
+question-drafting step to the cloud text model with a redacted prompt that contains
 no transcripts or derived themes — just tag names and miss counts.
 """
 import json
@@ -553,7 +553,7 @@ def _suggestDiscussionQuestions(priorities, *, cloud_questions):
     """Call the appropriate model to draft the discussion-question bullets.
 
     Default (``cloud_questions=False``): local Gemma 4 + full-fidelity prompt.
-    Opt-in (``cloud_questions=True``): cloud Gemini 3 + redacted prompt. Logs
+    Opt-in (``cloud_questions=True``): cloud text model + redacted prompt. Logs
     the chosen model + host + prompt variant so the operator can verify which
     path ran.
     """

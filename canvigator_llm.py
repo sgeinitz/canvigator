@@ -68,10 +68,10 @@ DEFAULT_AUDIO_MODEL = os.environ.get("OLLAMA_AUDIO_MODEL", "gemma4:e4b")
 # Used for instructor-side text tasks that never see student data (tagging quiz
 # questions, generating open-ended follow-up questions). A larger cloud model
 # is the better fit here since privacy constraints don't apply.
-DEFAULT_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "gemini-3-flash-preview")
+DEFAULT_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "glm-5.3-flash:cloud")
 
 # Cloud host for Ollama's hosted models. Used when OLLAMA_API_KEY is set, since
-# models like gemini-3-flash-preview are not available on a local Ollama server.
+# models like glm-5.3-flash:cloud are not available on a local Ollama server.
 OLLAMA_CLOUD_HOST = "https://ollama.com"
 
 
@@ -1068,7 +1068,7 @@ def _render_rubric_block(rubric, mode):
 
 
 def _render_exemplars_block(exemplars):
-    """Render Gemini-authored pass/fail exemplars as a prompt-ready section."""
+    """Render cloud-model-authored pass/fail exemplars as a prompt-ready section."""
     if not exemplars:
         return ''
     p_resp = exemplars.get('exemplar_pass') or ''
