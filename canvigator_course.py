@@ -1,8 +1,12 @@
 import hashlib
+import hmac
 import logging
+import os
+import re
 import shutil
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import pandas as pd
 import canvigator_quiz as cq
 import canvigator_utils as cu
@@ -719,7 +723,8 @@ def _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, d
     """Save the combined course-level manifest for a `--all` send-quiz-reminder run.
 
     One row per student-message; ``quiz_ids`` / ``quiz_names`` / ``reasons`` are
-    pipe-delimited in due-date order matching the rendered message.
+    pipe-delimited in due-date order matching the rendered message. Real sends
+    append to today's file.
     """
     sent_at = datetime.now(timezone.utc).isoformat()
     rows = []
@@ -745,7 +750,7 @@ def _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, d
     manifest_df = pd.DataFrame(rows)
     suffix = "_dryrun" if dry_run else ""
     csv_name = data_path / f"course_reminder_sent{suffix}_{today_str()}.csv"
-    manifest_df.to_csv(csv_name, index=False)
+    cq._writeManifestCsv(manifest_df, csv_name, dry_run)
     print(f"  Manifest saved: {csv_name.name}")
     logger.info(f"Course-level reminder manifest saved: {csv_name}")
 
@@ -1044,18 +1049,66 @@ def _parse_os(user_agent):
 
 
 def _make_anon_id(student_id):
-    """Hash a student ID to a numeric identifier with at most 10 digits."""
-    hash_hex = hashlib.sha256(str(student_id).encode()).hexdigest()
+    """Hash a student ID to a numeric identifier with at most 10 digits.
+
+    Uses HMAC-SHA256 keyed by ``CANVIGATOR_ANON_KEY`` when that variable is
+    set, so the ids can't be reversed by hashing the small, guessable space of
+    Canvas user ids. Without it, a plain SHA-256 — matching earlier exports.
+    """
+    key = os.environ.get('CANVIGATOR_ANON_KEY')
+    if key:
+        hash_hex = hmac.new(key.encode(), str(student_id).encode(), hashlib.sha256).hexdigest()
+    else:
+        hash_hex = hashlib.sha256(str(student_id).encode()).hexdigest()
     return int(hash_hex, 16) % 10_000_000_000
+
+
+# Dropped from every anonymized CSV: direct identifiers, plus the reply/recording
+# media paths, whose filenames embed the Canvas id and first name.
+_IDENTIFIER_DROP_COLUMNS = (
+    'name', 'student_name', 'sortable_name', 'student_names', 'sis_id',
+    'attachment_path', 'audio_path',
+)
+# Kept in the anonymized copy, but student-written or student-derived text
+# that may still mention names — listed in the closing review note.
+_FREE_TEXT_COLUMNS = (
+    'reply_text', 'transcript', 'feedback', 'llm_feedback', 'feedback_preview',
+    'criteria_evaluations', 'last_message',
+)
+
+
+def _toStudentId(x):
+    """Return ``x`` as an int Canvas id, or None for missing/invalid values and the -1 placeholder."""
+    try:
+        x_int = int(float(x))
+    except (TypeError, ValueError):
+        return None
+    return None if x_int == -1 else x_int
 
 
 def _addStudentId(id_to_info, sid, name):
     """Add a student ID and name to the id_to_info dict if not already present."""
-    if pd.notna(sid):
-        sid = int(float(sid))
-        if sid not in id_to_info:
-            id_to_info[sid] = {'name': name if pd.notna(name) else '', 'sis_id': ''}
+    sid = _toStudentId(sid)
+    if sid is not None and sid not in id_to_info:
+        id_to_info[sid] = {'name': name if pd.notna(name) else '', 'sis_id': ''}
     return sid
+
+
+def _collectInterventionStudentIds(df, id_to_info):
+    """Collect ids from ``student_id``/``student_name`` files and ``student_ids`` lists into id_to_info.
+
+    Covers the reminder/follow-up manifests, replies, assessments, and
+    media-recording CSVs, plus the comma-joined lists in conversations_*.csv.
+    """
+    cols = set(df.columns)
+    if 'student_id' in cols:
+        names = df['student_name'] if 'student_name' in cols else [''] * len(df)
+        for sid, name in zip(df['student_id'], names):
+            _addStudentId(id_to_info, sid, name)
+    if 'student_ids' in cols:
+        for ids in df['student_ids'].dropna():
+            for sid in str(ids).split(','):
+                _addStudentId(id_to_info, sid, '')
 
 
 def _collectStudentIds(csv_files):
@@ -1072,6 +1125,8 @@ def _collectStudentIds(csv_files):
                 if 'sis_id' in cols and pd.notna(row.get('sis_id')) and sid in id_to_info:
                     id_to_info[sid]['sis_id'] = row['sis_id']
 
+        _collectInterventionStudentIds(df, id_to_info)
+
         # Pairing-style files with person1/id1, person2/id2, person3/id3
         for suffix in ['1', '2', '3']:
             id_col, name_col = f'id{suffix}', f'person{suffix}'
@@ -1082,74 +1137,182 @@ def _collectStudentIds(csv_files):
     return id_to_info
 
 
-def _anonymizeCsvFile(csv_file, anon_dir, id_to_anon):
-    """Create an anonymized copy of a single CSV file. Returns True if the file was modified."""
-    def map_student_id(x):
-        """Map a student ID to its anon_id, returning empty string for missing/invalid."""
-        if pd.isna(x):
+def _anonymizeStudentColumn(df, map_student_id, drop_unmapped):
+    """Replace the per-row student-id column (``student_id``, or ``id`` beside ``name``) with ``anon_id``."""
+    if 'student_id' in df.columns:
+        id_col = 'student_id'
+    elif 'id' in df.columns and 'name' in df.columns:
+        id_col = 'id'
+    else:
+        return df
+    anon = df[id_col].apply(map_student_id)
+    df = df.drop(columns=[id_col])
+    df.insert(0, 'anon_id', anon)
+    if drop_unmapped:
+        df = df[df['anon_id'] != ''].copy()
+    return df
+
+
+def _anonymizeStudentIdLists(df, map_student_id, drop_unmapped):
+    """Replace a comma-joined ``student_ids`` column (conversations export) with ``anon_ids``."""
+    if 'student_ids' not in df.columns:
+        return df
+
+    def map_list(value):
+        """Map each id in a comma-joined list, dropping ids with no anon_id."""
+        if pd.isna(value):
             return ''
-        x_int = int(float(x))
-        if x_int == -1:
-            return ''
-        return id_to_anon.get(x_int, '')
+        anon = (str(map_student_id(s)) for s in str(value).split(','))
+        return ','.join(a for a in anon if a)
 
-    df = pd.read_csv(csv_file)
-    cols = set(df.columns)
-    modified = False
+    anon_ids = df['student_ids'].apply(map_list)
+    df = df.drop(columns=['student_ids'])
+    df['anon_ids'] = anon_ids
+    if drop_unmapped:
+        df = df[df['anon_ids'] != ''].copy()
+    return df
 
-    # Standard files: replace id with anon_id, drop name and sis_id
-    if 'name' in cols and 'id' in cols:
-        df['anon_id'] = df['id'].apply(map_student_id)
-        drop_cols = [c for c in ['name', 'id', 'sis_id', 'sortable_name'] if c in cols]
-        df = df.drop(columns=drop_cols)
-        remaining = [c for c in df.columns if c != 'anon_id']
-        df = df[['anon_id'] + remaining]
-        modified = True
 
-    # Pairing-style files: person1/id1 -> anon_id1, etc.
+def _anonymizePairColumns(df, map_student_id, drop_unmapped):
+    """Replace pairing-style ``person1/id1`` … ``person3/id3`` columns with ``anon_id1`` …."""
+    anon_cols = []
     for suffix in ['1', '2', '3']:
         id_col, name_col, anon_col = f'id{suffix}', f'person{suffix}', f'anon_id{suffix}'
-        if id_col in cols:
+        if id_col in df.columns:
             df[anon_col] = df[id_col].apply(map_student_id)
             df = df.drop(columns=[id_col])
-            cols = set(df.columns)
-            modified = True
-        if name_col in cols:
+            anon_cols.append(anon_col)
+        if name_col in df.columns:
             df = df.drop(columns=[name_col])
-            cols = set(df.columns)
-            modified = True
+    if drop_unmapped and anon_cols:
+        df = df[(df[anon_cols] != '').any(axis=1)].copy()
+    return df
+
+
+def _anonymizeCsvFile(csv_file, anon_dir, id_to_anon, drop_unmapped=False):
+    """Create an anonymized copy of a single CSV file. Returns True if the file was modified.
+
+    The per-row student id (``id`` beside ``name``, or ``student_id``) becomes
+    ``anon_id``, ``student_ids`` lists become ``anon_ids``, pairing columns
+    become ``anon_id1``…, and names, SIS ids, and media paths are dropped.
+    With ``drop_unmapped`` (the --consent filter), rows for students with no
+    anon_id — those who did not consent — are removed, and non-consenting
+    partners in pairing files are blanked.
+    """
+    def map_student_id(x):
+        """Map a student ID to its anon_id, returning empty string for missing/invalid/unmapped."""
+        sid = _toStudentId(x)
+        return '' if sid is None else id_to_anon.get(sid, '')
+
+    df = pd.read_csv(csv_file)
+    cols_before, n_rows_before = list(df.columns), len(df)
+
+    df = _anonymizeStudentColumn(df, map_student_id, drop_unmapped)
+    df = _anonymizeStudentIdLists(df, map_student_id, drop_unmapped)
+    df = _anonymizePairColumns(df, map_student_id, drop_unmapped)
+    df = df.drop(columns=[c for c in _IDENTIFIER_DROP_COLUMNS if c in df.columns])
 
     df.to_csv(anon_dir / csv_file.name, index=False)
-    return modified
+    return list(df.columns) != cols_before or len(df) != n_rows_before
 
 
-def exportAnonymizedData(data_path):
+def _loadConsentIds(consent_csv, data_path):
+    """Return the Canvas user ids of the consenting students listed in ``consent_csv``.
+
+    The CSV needs an ``id`` (Canvas user id) or ``sis_id`` column; SIS ids are
+    matched to Canvas ids through the latest ``roster_*.csv`` (from get-roster).
+    """
+    consent_csv = Path(consent_csv)
+    df = pd.read_csv(consent_csv, dtype=str)
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    if 'id' in cols:
+        return {sid for sid in (_toStudentId(v) for v in df[cols['id']]) if sid is not None}
+    if 'sis_id' not in cols:
+        raise ValueError(f"{consent_csv.name} needs an 'id' (Canvas user id) or 'sis_id' column.")
+
+    roster_csv = cu.find_latest_csv(data_path, 'roster_')
+    if roster_csv is None:
+        raise FileNotFoundError(
+            f"{consent_csv.name} lists sis_id values; run 'get-roster' for this course first "
+            "so they can be matched to Canvas ids."
+        )
+    roster = pd.read_csv(roster_csv, dtype=str)
+    sis_to_id = {
+        str(s).strip(): _toStudentId(i)
+        for s, i in zip(roster['sis_id'], roster['id']) if pd.notna(s) and _toStudentId(i) is not None
+    }
+    wanted = {str(v).strip() for v in df[cols['sis_id']].dropna() if str(v).strip()}
+    unmatched = wanted - set(sis_to_id)
+    if unmatched:
+        print(f"WARNING: {len(unmatched)} sis_id value(s) in {consent_csv.name} are not in "
+              f"{roster_csv.name}; those students are excluded.")
+    return {sis_to_id[s] for s in wanted if s in sis_to_id}
+
+
+def _freeTextReviewList(anon_dir):
+    """Return ``[(filename, [columns])]`` for anonymized CSVs that still contain free text.
+
+    Covers the known free-text columns and the per-question answer columns of
+    Canvas student_analysis reports (headed ``<question_id>: <question text>``).
+    """
+    out = []
+    for f in sorted(anon_dir.glob("*.csv")):
+        cols = list(pd.read_csv(f, nrows=0).columns)
+        text_cols = [c for c in cols if c in _FREE_TEXT_COLUMNS]
+        if any(re.match(r'^\d+:', str(c)) for c in cols):
+            text_cols.append('quiz answer columns')
+        if text_cols:
+            out.append((f.name, text_cols))
+    return out
+
+
+def exportAnonymizedData(data_path, consent_csv=None):
     """Export anonymized copies of all course data CSV files.
 
-    Creates an anonymized/ subdirectory with all CSVs stripped of identifying
-    columns (name, id, sis_id), replaced by a hashed anon_id. A mapping file
-    is saved in the original data directory. The anonymized directory is also
-    zipped for easy export.
+    Creates (re-creates) an anonymized/ subdirectory with all CSVs stripped of
+    identifying columns (names, Canvas/SIS ids, media paths), with student ids
+    replaced by a hashed anon_id. A mapping file is saved in the original data
+    directory. The anonymized directory is also zipped for easy export. With
+    ``consent_csv``, only consenting students' rows are exported and the
+    mapping lists only them (see ``_loadConsentIds``).
     """
-    from pathlib import Path
     data_path = Path(data_path)
 
     csv_files = sorted(f for f in data_path.glob("*.csv") if not f.name.startswith("anon_mapping_"))
+    if consent_csv is not None:
+        # Never export the consent list itself if it was saved in the data directory.
+        csv_files = [f for f in csv_files if f.resolve() != Path(consent_csv).resolve()]
     if not csv_files:
         print(f"No CSV files found in {data_path}")
         return
 
+    # Start from an empty anonymized/ so the zip holds exactly this export
+    # (stale files from an earlier, unfiltered run must not ride along).
     anon_dir = data_path / "anonymized"
-    anon_dir.mkdir(exist_ok=True)
+    if anon_dir.exists():
+        shutil.rmtree(anon_dir)
+    anon_dir.mkdir()
 
     # Collect all unique student IDs from all CSV files
     id_to_info = _collectStudentIds(csv_files)
+    if consent_csv is not None:
+        consent_ids = _loadConsentIds(consent_csv, data_path)
+        n_all = len(id_to_info)
+        id_to_info = {sid: info for sid, info in id_to_info.items() if sid in consent_ids}
+        print(f"Consent filter: exporting {len(id_to_info)} of {n_all} student(s) found in the data.")
     if not id_to_info:
         print("No student data found in CSV files.")
         shutil.rmtree(anon_dir)
         return
 
-    # Generate privacy-safe anon_ids (SHA-256 hash truncated to max 10 digits)
+    if not os.environ.get('CANVIGATOR_ANON_KEY'):
+        print(
+            "NOTE: CANVIGATOR_ANON_KEY is not set, so anon_ids are an unsalted hash of the Canvas id "
+            "and can be reversed by anyone able to list Canvas ids. Set it in set_env.sh (keep it "
+            "private and unchanged across exports) before exporting data you will share."
+        )
+
+    # Generate anon_ids (SHA-256, or HMAC-SHA256 when keyed, truncated to max 10 digits)
     id_to_anon = {sid: _make_anon_id(sid) for sid in id_to_info}
 
     # Save mapping file in original data directory
@@ -1163,7 +1326,8 @@ def exportAnonymizedData(data_path):
     logger.info(f"Saved anonymization mapping to {mapping_file}")
 
     # Create anonymized copies of each CSV
-    n_anonymized = sum(1 for f in csv_files if _anonymizeCsvFile(f, anon_dir, id_to_anon))
+    drop_unmapped = consent_csv is not None
+    n_anonymized = sum(1 for f in csv_files if _anonymizeCsvFile(f, anon_dir, id_to_anon, drop_unmapped=drop_unmapped))
 
     # Zip the anonymized directory
     zip_path = data_path / f"anonymized_{today_str()}"
@@ -1174,11 +1338,15 @@ def exportAnonymizedData(data_path):
     print(f"Exported {n_total} file{'s' if n_total != 1 else ''} ({n_anonymized} anonymized) to {anon_dir.name}/")
     logger.info(f"Exported {n_total} anonymized files to {zip_path}.zip")
     print(
-        "\nNOTE: This export is NOT automatically privacy-safe. Before sharing, "
-        "manually verify the CSVs contain no student IDs or names, and no "
-        "open-ended text (transcripts, replies, feedback, conversation subjects), "
-        "audio, or images."
+        "\nNOTE: Names, Canvas/SIS ids, and reply/recording file paths were removed, but this "
+        "export is NOT automatically privacy-safe: free text was kept and may still identify a "
+        "student. Review these before sharing (audio and images are never exported):"
     )
+    review = _freeTextReviewList(anon_dir)
+    for fname, text_cols in review:
+        print(f"  {fname}: {', '.join(text_cols)}")
+    if not review:
+        print("  (no free-text columns found)")
 
 
 def _renderQuestionPreview(question_dict):
