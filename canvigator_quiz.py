@@ -14,8 +14,10 @@ import os
 import re
 import html
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from requests.adapters import HTTPAdapter
 from canvigator_utils import today_str, selectCSVFromList, find_latest_csv, spin, spin_done, format_due_date, prompt_for_index
 from canvigator_assignment import _fetchAudio
 
@@ -759,6 +761,85 @@ def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False
     return sent_messages
 
 
+REPORT_POLL_SECONDS = 2.0             # how often to ask Canvas whether the quiz report is ready
+REPORT_DEADLINE_SECONDS = 300         # give up waiting for the report after this long
+REPORT_REQUEST_TIMEOUT_SECONDS = 30   # one progress request may take at most this long
+
+
+class QuizReportError(RuntimeError):
+    """Canvas could not generate a quiz report (its job ended in 'failed')."""
+
+
+class _TimeoutHTTPAdapter(HTTPAdapter):
+    """HTTPAdapter that applies a default timeout when the caller didn't set one (canvasapi never does)."""
+
+    def __init__(self, timeout, *args, **kwargs):
+        self.timeout = timeout
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        if kwargs.get('timeout') is None:
+            kwargs['timeout'] = self.timeout
+        return super().send(request, **kwargs)
+
+
+@contextmanager
+def _request_timeout(canvas, seconds):
+    """While active, every request canvasapi sends through `canvas` times out after `seconds`.
+
+    canvasapi's requests have no timeout, so one stalled connection used to freeze the report wait forever. The
+    session's previous adapters are restored afterwards, so no other API call changes behavior. No-op if the
+    session can't be found (e.g. a different canvasapi version).
+    """
+    session = getattr(getattr(canvas, '_Canvas__requester', None), '_session', None)
+    if session is None:
+        yield
+        return
+    saved = list(session.adapters.items())
+    adapter = _TimeoutHTTPAdapter(seconds)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    try:
+        yield
+    finally:
+        session.adapters.clear()
+        for prefix, previous in saved:
+            session.adapters[prefix] = previous
+        adapter.close()
+
+
+def _wait_for_progress(get_progress, progress_id, poll_s=None, deadline_s=None,
+                       sleep=time.sleep, clock=time.monotonic, on_tick=None):
+    """Poll a Canvas Progress until it completes and return it.
+
+    - asks every `poll_s` seconds (it used to ask 10 times a second);
+    - raises QuizReportError if Canvas reports the job as failed (that used to loop forever);
+    - raises TimeoutError after `deadline_s` seconds;
+    - retries a progress request that timed out or lost its connection.
+    Defaults come from REPORT_POLL_SECONDS / REPORT_DEADLINE_SECONDS when the wait runs, so they can be changed.
+    """
+    poll_s = REPORT_POLL_SECONDS if poll_s is None else poll_s
+    deadline_s = REPORT_DEADLINE_SECONDS if deadline_s is None else deadline_s
+    start = clock()
+    while True:
+        progress = None
+        try:
+            progress = get_progress(progress_id)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            logger.warning(f"Progress request for quiz report stalled ({e.__class__.__name__}); retrying")
+        if progress is not None:
+            if progress.workflow_state == 'completed':
+                return progress
+            if progress.workflow_state == 'failed':
+                raise QuizReportError(f"Canvas could not generate the quiz report: {getattr(progress, 'message', None) or 'no reason given'}")
+            if on_tick:
+                on_tick(progress)
+        if clock() - start > deadline_s:
+            raise TimeoutError(f"Quiz report not ready after {deadline_s:.0f} s. Try again later: Canvas reuses a "
+                               "finished report, so a rerun is usually quick.")
+        sleep(poll_s)
+
+
 class CanvigatorQuiz:
     """A class for one quiz and associated attributes/data."""
 
@@ -795,22 +876,22 @@ class CanvigatorQuiz:
 
     def getQuizData(self):
         """Download student_analysis csv quiz report."""
-        quiz_report_request = self.canvas_quiz.create_report('student_analysis')
-        request_id = quiz_report_request.progress_url.split('/')[-1]
-        if self.verbose:
-            print("type(quiz_report_request) = ", type(quiz_report_request))
-            print("quiz_report_request.__dict__ = ", quiz_report_request.__dict__)
+        frame = [0]
 
-        frame = 0
-        quiz_report_progress = self.canvas.get_progress(request_id)
-        while quiz_report_progress.workflow_state != 'completed':
-            pct = int(quiz_report_progress.completion)
-            self._spin(frame, f"Downloading {self.quiz_name} report... {pct}%")
-            frame += 1
-            time.sleep(0.1)
-            quiz_report_progress = self.canvas.get_progress(request_id)
+        def show(progress):
+            self._spin(frame[0], f"Downloading {self.quiz_name} report... {int(progress.completion or 0)}%")
+            frame[0] += 1
 
-        quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
+        # Every Canvas request of the report sequence is time-limited: requesting the report, waiting for it, and
+        # fetching it (offline fault injection, 2026-11-10: a stall in create/get_quiz_report still hung forever).
+        with _request_timeout(self.canvas, REPORT_REQUEST_TIMEOUT_SECONDS):
+            quiz_report_request = self.canvas_quiz.create_report('student_analysis')
+            request_id = quiz_report_request.progress_url.split('/')[-1]
+            if self.verbose:
+                print("type(quiz_report_request) = ", type(quiz_report_request))
+                print("quiz_report_request.__dict__ = ", quiz_report_request.__dict__)
+            _wait_for_progress(self.canvas.get_progress, request_id, on_tick=show)
+            quiz_report = self.canvas_quiz.get_quiz_report(quiz_report_request)
         quiz_csv_url = quiz_report.file['url']
         quiz_csv = requests.get(quiz_csv_url, timeout=60)
         csv_name = self.config.data_path / f"{self.config.quiz_prefix}{self.canvas_quiz.id}_student_analysis_{today_str()}.csv"

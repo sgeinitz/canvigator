@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import pandas as pd
+import requests
 import canvigator_quiz as cq
 import canvigator_utils as cu
 from canvigator_utils import today_str, spin, spin_done, format_due_date
@@ -42,6 +43,35 @@ class CanvigatorCourse:
         self.config.addCourseToPath(_courseCodeToPath(self.canvas_course.course_code))
         logger.info(f"Initialized course: {self.canvas_course.name}")
 
+    def _loadQuizOrSkip(self, q):
+        """Load one quiz for an all-quizzes task, or return None if its report timed out, failed, or hit a network
+        error (with a warning). Any other error still stops the run.
+        """
+        try:
+            return cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
+        except (TimeoutError, cq.QuizReportError, requests.exceptions.RequestException) as e:
+            msg = f"Skipping '{q.title}' — its quiz report could not be loaded: {e}"
+            print(f"\n  WARNING: {msg}")
+            logger.warning(msg)
+            return None
+
+    def _loadQuizForReminder(self, q):
+        """Load one quiz and its tagged question info for the reminder run, as ``(quiz, question_info)``.
+
+        After a warning, returns ``(None, None)`` when the quiz report could not be loaded, and ``(quiz, None)`` when
+        the quiz has no tagged-questions CSV. Either way the quiz cannot be checked.
+        """
+        quiz = self._loadQuizOrSkip(q)
+        if quiz is None:
+            return None, None
+        try:
+            return quiz, quiz._loadQuestionInfo()
+        except FileNotFoundError as e:
+            msg = f"Skipping '{q.title}' — {e}"
+            print(f"  WARNING: {msg}")
+            logger.warning(msg)
+            return quiz, None
+
     def getAllQuizzesAndSubmissions(self):
         """Get all quizzes and their submissions for the course."""
         all_quizzes = list(self.canvas_course.get_quizzes())
@@ -50,7 +80,9 @@ class CanvigatorCourse:
         for i, q in enumerate(all_quizzes, start=1):
             print(f"\n[{i}/{len(all_quizzes)}] Processing: {q.title}")
             # if q is a legit quiz, with at least one submission, then get submissions
-            quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
+            quiz = self._loadQuizOrSkip(q)
+            if quiz is None:
+                continue
             # check that the dataframe, quiz.quiz_df has at least 2 rows (header + at least one submission)
             if quiz.published and quiz.n_students is not None and quiz.n_students > 1:
                 quiz.generateQuestionHistograms()
@@ -73,6 +105,10 @@ class CanvigatorCourse:
         student per quiz (no attempt / imperfect / page-blur on perfect), and
         composes a single message per student listing all eligible quizzes.
         Skips quizzes lacking a ``*_questions_w_tags_*.csv`` with a warning.
+
+        A quiz whose report could not be loaded is skipped too, but that failure can clear on its own, and the quiz
+        would then add reminders nobody previewed. So a dry run with such a skip writes no manifest and does not
+        authorize ``--send-all``.
         """
         if send_all and not cq._hasRecentDryRunManifest(self.config.data_path, "course_reminder_sent"):
             raise RuntimeError(
@@ -94,17 +130,15 @@ class CanvigatorCourse:
 
         # student_id -> list[dict(quiz_id, quiz_name, due_at, reason, bullets)]
         student_state = {}
+        # (title, report_unavailable) for each eligible quiz that could not be checked, so the reminders say nothing
+        # about it. report_unavailable is True when the quiz report could not be loaded.
+        skipped = []
 
         for i, q in enumerate(eligible, start=1):
             print(f"\n[{i}/{len(eligible)}] Processing: {q.title}")
-            quiz = cq.CanvigatorQuiz(self.canvas, self, q, self.config, self.verbose)
-
-            try:
-                question_info = quiz._loadQuestionInfo()
-            except FileNotFoundError as e:
-                msg = f"Skipping '{q.title}' — {e}"
-                print(f"  WARNING: {msg}")
-                logger.warning(msg)
+            quiz, question_info = self._loadQuizForReminder(q)
+            if question_info is None:
+                skipped.append((q.title, quiz is None))
                 continue
 
             if not quiz._tryLoadRecentSubmissions():
@@ -132,9 +166,18 @@ class CanvigatorCourse:
                     'bullets': bullets,
                 })
 
+        n_checked = len(eligible) - len(skipped)
+        not_checked = ", ".join(f"'{title}'" for title, _ in skipped)
+
         if not student_state:
-            print("\nAll students are caught up — no consolidated reminders to send.")
-            logger.info("sendAllQuizReminders: no students with reminder-worthy state")
+            if skipped:
+                msg = (f"No reminders to send from the {n_checked} of {len(eligible)} quiz(zes) that could be checked. "
+                       f"Not checked: {not_checked}")
+                print(f"\n  WARNING: {msg}")
+                logger.warning(f"sendAllQuizReminders: {msg}")
+            else:
+                print("\nAll students are caught up — no consolidated reminders to send.")
+                logger.info("sendAllQuizReminders: no students with reminder-worthy state")
             return
 
         enrolled_map = {s['id']: s['name'] for s in self.students}
@@ -154,12 +197,16 @@ class CanvigatorCourse:
 
         header_label = (
             f"Course: {self.canvas_course.course_code} "
-            f"(consolidated reminder covering {len(eligible)} quiz(zes))"
+            f"(consolidated reminder covering {n_checked} quiz(zes))"
         )
+        if skipped:
+            msg = f"These reminders do not cover {len(skipped)} quiz(zes) that could not be checked: {not_checked}"
+            header_label += f"\n  WARNING: {msg}"
+            logger.warning(f"sendAllQuizReminders: {msg}")
 
         if dry_run:
             cq._sendOrPreviewMessages(messages, subject_str, header_label)
-            _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, self.config.data_path)
+            _saveDryRunCourseReminderManifest(messages, student_state, subject_str, self.config.data_path, skipped)
         else:
             sent_messages = cq._interactiveSend(self.canvas, messages, subject_str, header_label, send_all=send_all)
             if sent_messages:
@@ -717,6 +764,23 @@ def _composeMultiQuizReminder(first_name, state_list):
         "struggle, that's where the learning happens. Good luck!"
     )
     return intro + "\n\n".join(sections) + closing + note_str
+
+
+def _saveDryRunCourseReminderManifest(messages, student_state, subject_str, data_path, skipped):
+    """Save the dry-run manifest that authorizes ``--send-all``, unless a quiz report could not be loaded.
+
+    ``skipped`` holds ``(title, report_unavailable)`` pairs. A report failure can clear before the real send, and
+    the quiz would then add reminders that were never previewed, so such a dry run writes no manifest.
+    """
+    report_unavailable = [title for title, unavailable in skipped if unavailable]
+    if not report_unavailable:
+        _saveCourseReminderManifest(messages, student_state, subject_str, True, data_path)
+        return
+    msg = (f"No dry-run manifest written: the report for {len(report_unavailable)} quiz(zes) could not be loaded "
+           f"({', '.join(repr(t) for t in report_unavailable)}), so this preview is incomplete. "
+           "Re-run --dry-run before using --send-all.")
+    print(f"\n  WARNING: {msg}")
+    logger.warning(f"sendAllQuizReminders: {msg}")
 
 
 def _saveCourseReminderManifest(messages, student_state, subject_str, dry_run, data_path):

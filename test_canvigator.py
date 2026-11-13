@@ -2637,8 +2637,109 @@ class TestSendAllQuizRemindersFiltering:
         captured = capsys.readouterr().out
         assert "Skipping 'Quiz Z'" in captured
         assert any("Skipping 'Quiz Z'" in r.message for r in caplog.records)
-        # No reminder-worthy state, so we hit the "all caught up" branch
-        assert 'All students are caught up' in captured
+        # The only quiz was not checked, so the run must not claim everyone is caught up
+        assert 'All students are caught up' not in captured
+        assert "No reminders to send from the 0 of 1 quiz(zes) that could be checked. Not checked: 'Quiz Z'" in captured
+
+    def _eligible_quizzes(self, monkeypatch, titles):
+        """Return future-due stub quizzes with the given titles, with 'now' frozen before their due date."""
+        from datetime import timezone as _tz
+        from canvigator_utils import is_quiz_open_for_reminder as orig
+        ref_now = datetime(2026, 4, 24, 12, 0, 0, tzinfo=_tz.utc)
+        monkeypatch.setattr('canvigator_course.cu.is_quiz_open_for_reminder', lambda q: orig(q, now=ref_now))
+        quizzes = []
+        for n, title in enumerate(titles, start=1):
+            q = _StubQuiz(published=True, due_at='2026-12-31T12:00:00Z')
+            q.id, q.title, q.points_possible = n, title, 10
+            quizzes.append(q)
+        return quizzes
+
+    def test_all_reports_unavailable_does_not_claim_caught_up(self, capsys, monkeypatch):
+        """When every quiz report times out, the run says the quizzes were not checked, not that all are caught up."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A', 'Quiz B'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[TimeoutError('not ready'), TimeoutError('not ready')]):
+            course.sendAllQuizReminders(dry_run=True)
+        captured = capsys.readouterr().out
+        assert 'All students are caught up' not in captured
+        assert "No reminders to send from the 0 of 2 quiz(zes) that could be checked. Not checked: 'Quiz A', 'Quiz B'" in captured
+
+    def test_skipped_quiz_is_named_at_the_send_step(self, monkeypatch):
+        """With one report unavailable, the send-step header counts only the checked quiz and names the skipped one."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A', 'Quiz B'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        course.config = MagicMock()
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = ('not attempted', ['Q1'])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[TimeoutError('not ready'), loaded]), \
+             patch('canvigator_course.cq._sendOrPreviewMessages') as preview, \
+             patch('canvigator_course._saveCourseReminderManifest'), \
+             patch('canvigator_course._composeMultiQuizReminder', return_value='msg'):
+            course.sendAllQuizReminders(dry_run=True)
+        messages, _, header = preview.call_args.args
+        assert len(messages) == 1
+        assert 'covering 1 quiz(zes)' in header
+        assert "do not cover 1 quiz(zes) that could not be checked: 'Quiz A'" in header
+
+    def test_no_skips_keeps_the_caught_up_message_and_plain_header(self, capsys, monkeypatch):
+        """With every quiz checked, the caught-up message and the header are unchanged."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        course.config = MagicMock()
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = None
+        with patch('canvigator_course.cq.CanvigatorQuiz', return_value=loaded):
+            course.sendAllQuizReminders(dry_run=True)
+        assert 'All students are caught up' in capsys.readouterr().out
+
+        loaded._classifyStudentForQuiz.return_value = ('not attempted', ['Q1'])
+        with patch('canvigator_course.cq.CanvigatorQuiz', return_value=loaded), \
+             patch('canvigator_course.cq._sendOrPreviewMessages') as preview, \
+             patch('canvigator_course._saveCourseReminderManifest'), \
+             patch('canvigator_course._composeMultiQuizReminder', return_value='msg'):
+            course.sendAllQuizReminders(dry_run=True)
+        header = preview.call_args.args[2]
+        assert 'covering 1 quiz(zes)' in header and 'WARNING' not in header
+
+    def _dry_run_two_quizzes(self, monkeypatch, tmp_path, first_quiz):
+        """Dry-run two eligible quizzes into ``tmp_path``; the first loads as ``first_quiz``, the second has a reminder."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A', 'Quiz B'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        course.config = SimpleNamespace(data_path=tmp_path)
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = ('not attempted', ['Q1'])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[first_quiz, loaded]), \
+             patch('canvigator_course.cq._sendOrPreviewMessages'), \
+             patch('canvigator_course._composeMultiQuizReminder', return_value='msg'):
+            course.sendAllQuizReminders(dry_run=True)
+        return course
+
+    def test_dry_run_with_unavailable_report_does_not_authorize_send_all(self, capsys, monkeypatch, tmp_path):
+        """A dry run that skipped a quiz for an unavailable report writes no manifest, so --send-all refuses."""
+        course = self._dry_run_two_quizzes(monkeypatch, tmp_path, TimeoutError('not ready'))
+        assert list(tmp_path.glob('course_reminder_sent_dryrun_*.csv')) == []
+        captured = capsys.readouterr().out
+        assert "No dry-run manifest written" in captured and "'Quiz A'" in captured
+        with pytest.raises(RuntimeError, match='--send-all requires a fresh --dry-run'):
+            course.sendAllQuizReminders(send_all=True)
+
+    def test_dry_run_with_untagged_quiz_still_writes_manifest(self, monkeypatch, tmp_path):
+        """A quiz skipped for a missing tagged-questions CSV does not withhold the dry-run manifest."""
+        untagged = MagicMock()
+        untagged._loadQuestionInfo.side_effect = FileNotFoundError('No *_questions_w_tags_*.csv found for quiz')
+        self._dry_run_two_quizzes(monkeypatch, tmp_path, untagged)
+        assert len(list(tmp_path.glob('course_reminder_sent_dryrun_*.csv'))) == 1
+
+    def test_clean_dry_run_writes_manifest(self, monkeypatch, tmp_path):
+        """With every quiz checked, the dry run writes the manifest that authorizes --send-all."""
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = None
+        self._dry_run_two_quizzes(monkeypatch, tmp_path, loaded)
+        assert len(list(tmp_path.glob('course_reminder_sent_dryrun_*.csv'))) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -5099,3 +5200,209 @@ class TestConsentFlagCli:
         """A flag with no short form renders without a 'None,' prefix."""
         from canvigator_help import _flag_label
         assert _flag_label('--consent') == '    --consent <CSV>'
+
+
+class TestWaitForQuizReport:
+    """The student_analysis report wait: poll gently, give up after a deadline, stop on a failed job, retry stalls."""
+
+    @staticmethod
+    def _progress(state, completion=0, message=None):
+        return SimpleNamespace(workflow_state=state, completion=completion, message=message)
+
+    @staticmethod
+    def _clock(step):
+        t = {'now': 0.0}
+
+        def clock():
+            t['now'] += step
+            return t['now']
+        return clock
+
+    def test_polls_every_two_seconds_until_completed(self):
+        """Polls at REPORT_POLL_SECONDS until the job completes."""
+        from canvigator_quiz import _wait_for_progress, REPORT_POLL_SECONDS
+        states = iter([self._progress('queued'), self._progress('running', 50), self._progress('completed', 100)])
+        sleeps = []
+        done = _wait_for_progress(lambda pid: next(states), '7', sleep=sleeps.append, clock=self._clock(0.1))
+        assert done.workflow_state == 'completed'
+        assert REPORT_POLL_SECONDS >= 1 and sleeps == [REPORT_POLL_SECONDS, REPORT_POLL_SECONDS]
+
+    def test_failed_job_raises_instead_of_looping(self):
+        """A failed report job raises instead of looping forever."""
+        from canvigator_quiz import _wait_for_progress
+        with pytest.raises(RuntimeError, match='could not generate'):
+            _wait_for_progress(lambda pid: self._progress('failed', message='boom'), '7',
+                               sleep=lambda s: None, clock=self._clock(0.1))
+
+    def test_gives_up_after_the_deadline(self):
+        """The wait raises TimeoutError once the deadline passes."""
+        from canvigator_quiz import _wait_for_progress
+        calls = []
+        with pytest.raises(TimeoutError, match='not ready'):
+            _wait_for_progress(lambda pid: calls.append(pid) or self._progress('queued'), '7',
+                               deadline_s=10, sleep=lambda s: None, clock=self._clock(2.0))
+        assert 3 <= len(calls) <= 6
+
+    def test_a_stalled_request_is_retried(self):
+        """A progress request that timed out is retried."""
+        import requests
+        from canvigator_quiz import _wait_for_progress
+        replies = iter([requests.exceptions.ReadTimeout('stalled'), self._progress('completed', 100)])
+
+        def get_progress(pid):
+            r = next(replies)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        assert _wait_for_progress(get_progress, '7', sleep=lambda s: None,
+                                  clock=self._clock(0.1)).workflow_state == 'completed'
+
+
+class TestRequestTimeout:
+    """canvasapi sets no timeout on its requests; the report wait gets one, and the session is restored afterwards."""
+
+    def test_timeout_adapter_fills_in_missing_timeout(self):
+        """The adapter adds its timeout when the caller gave none."""
+        from canvigator_quiz import _TimeoutHTTPAdapter
+        adapter = _TimeoutHTTPAdapter(30)
+        with patch('requests.adapters.HTTPAdapter.send', return_value='ok') as send:
+            assert adapter.send(MagicMock()) == 'ok'
+        assert send.call_args.kwargs['timeout'] == 30
+
+    def test_context_mounts_and_restores(self):
+        """The timeout adapter is mounted inside the block and removed after it."""
+        import requests
+        from canvigator_quiz import _request_timeout, _TimeoutHTTPAdapter
+        session = requests.Session()
+        canvas = SimpleNamespace(_Canvas__requester=SimpleNamespace(_session=session))
+        before = session.get_adapter('https://canvas.example')
+        with _request_timeout(canvas, 30):
+            inside = session.get_adapter('https://canvas.example')
+            assert isinstance(inside, _TimeoutHTTPAdapter) and inside.timeout == 30
+        assert session.get_adapter('https://canvas.example') is before
+
+    def test_context_is_a_no_op_without_a_session(self):
+        """Without a canvasapi session the context does nothing."""
+        from canvigator_quiz import _request_timeout
+        with _request_timeout(SimpleNamespace(), 30):
+            pass
+
+
+class TestAllQuizzesSkipStuckReport:
+    """With --all, one quiz whose report times out or fails is skipped instead of ending the whole run."""
+
+    def _course(self, quizzes):
+        import canvigator_course as cc
+        course = cc.CanvigatorCourse.__new__(cc.CanvigatorCourse)
+        course.canvas = MagicMock()
+        course.canvas_course = MagicMock()
+        course.canvas_course.get_quizzes.return_value = quizzes
+        course.config = MagicMock()
+        course.verbose = False
+        return course
+
+    def test_timeout_on_one_quiz_skips_it(self, capsys):
+        """A TimeoutError from one quiz's report wait skips that quiz; the next quiz is still processed."""
+        stuck, ok = SimpleNamespace(title='Stuck'), SimpleNamespace(title='Fine')
+        good = MagicMock(published=True, n_students=5)
+        course = self._course([stuck, ok])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[TimeoutError('not ready'), good]):
+            course.getAllQuizzesAndSubmissions()
+        assert good.getAllSubmissionsAndEvents.called
+        assert "Skipping 'Stuck'" in capsys.readouterr().out
+
+    def test_failed_report_on_one_quiz_skips_it(self):
+        """A failed report (QuizReportError) skips that quiz too."""
+        from canvigator_quiz import QuizReportError
+        good = MagicMock(published=True, n_students=5)
+        course = self._course([SimpleNamespace(title='Bad'), SimpleNamespace(title='Fine')])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[QuizReportError('failed'), good]):
+            course.getAllQuizzesAndSubmissions()
+        assert good.getAllSubmissionsAndEvents.called
+
+    def test_other_errors_still_surface(self):
+        """Unrelated errors are not swallowed."""
+        course = self._course([SimpleNamespace(title='X')])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=ValueError('bug')):
+            with pytest.raises(ValueError):
+                course.getAllQuizzesAndSubmissions()
+
+
+class TestRequestTimeoutCleanup:
+    """The temporary timeout adapter is closed when the wait ends."""
+
+    def test_adapter_closed_after_block(self):
+        """Its connection pool is released instead of waiting for garbage collection."""
+        import requests
+        from canvigator_quiz import _request_timeout
+        session = requests.Session()
+        canvas = SimpleNamespace(_Canvas__requester=SimpleNamespace(_session=session))
+        with patch('canvigator_quiz._TimeoutHTTPAdapter.close') as close:
+            with _request_timeout(canvas, 30):
+                pass
+        assert close.called
+
+
+class TestReportWaitGaps:
+    """Gaps found by offline fault injection (fake Canvas server, 2026-11-10)."""
+
+    def test_report_request_and_fetch_are_time_limited(self, tmp_path):
+        """create_report and get_quiz_report run inside the request-timeout block, not only the progress wait."""
+        from contextlib import contextmanager
+        import canvigator_quiz as cq
+        active, seen = {'on': False}, {}
+
+        @contextmanager
+        def fake_timeout(canvas, seconds):
+            active['on'] = True
+            yield
+            active['on'] = False
+
+        class Stop(Exception):
+            pass
+
+        def create_report(kind):
+            seen['create'] = active['on']
+            return SimpleNamespace(progress_url='https://x/api/v1/progress/7')
+
+        def get_quiz_report(req):
+            seen['fetch'] = active['on']
+            raise Stop()
+
+        quiz = cq.CanvigatorQuiz.__new__(cq.CanvigatorQuiz)
+        quiz.canvas = SimpleNamespace(get_progress=lambda pid: SimpleNamespace(workflow_state='completed', completion=100))
+        quiz.canvas_quiz = SimpleNamespace(create_report=create_report, get_quiz_report=get_quiz_report, id=5)
+        quiz.verbose, quiz.quiz_name = False, 'q'
+        quiz._spin = lambda *a, **k: None
+        with patch('canvigator_quiz._request_timeout', fake_timeout):
+            with pytest.raises(Stop):
+                quiz.getQuizData()
+        assert seen == {'create': True, 'fetch': True}
+
+    def test_deadline_is_read_when_the_wait_runs(self):
+        """Changing REPORT_DEADLINE_SECONDS takes effect (the default used to be frozen at definition time)."""
+        import canvigator_quiz as cq
+        t = {'now': 0.0}
+
+        def clock():
+            t['now'] += 0.6
+            return t['now']
+        calls = []
+        with patch.object(cq, 'REPORT_DEADLINE_SECONDS', 1):
+            with pytest.raises(TimeoutError):
+                cq._wait_for_progress(lambda pid: calls.append(pid) or SimpleNamespace(workflow_state='queued', completion=0),
+                                      '7', sleep=lambda s: None, clock=clock)
+        assert len(calls) <= 3
+
+    def test_all_quizzes_skips_a_network_error(self):
+        """With --all, a connection error on one quiz's report skips that quiz instead of ending the run."""
+        import requests
+        import canvigator_course as cc
+        course = cc.CanvigatorCourse.__new__(cc.CanvigatorCourse)
+        course.canvas, course.config, course.verbose = MagicMock(), MagicMock(), False
+        course.canvas_course = MagicMock()
+        course.canvas_course.get_quizzes.return_value = [SimpleNamespace(title='Down'), SimpleNamespace(title='Fine')]
+        good = MagicMock(published=True, n_students=5)
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[requests.exceptions.ConnectionError('reset'), good]):
+            course.getAllQuizzesAndSubmissions()
+        assert good.getAllSubmissionsAndEvents.called
