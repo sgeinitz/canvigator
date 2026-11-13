@@ -260,12 +260,25 @@ class TestMakeAnonId:
             result = _make_anon_id(sid)
             assert 0 <= result < 10_000_000_000
 
-    def test_matches_sha256(self):
-        """Verify the hash matches the expected SHA-256 derivation."""
+    def test_matches_sha256(self, monkeypatch):
+        """Without CANVIGATOR_ANON_KEY the hash matches the plain SHA-256 derivation (earlier exports)."""
         from canvigator_course import _make_anon_id
+        monkeypatch.delenv('CANVIGATOR_ANON_KEY', raising=False)
         sid = 42
         expected = int(hashlib.sha256(str(sid).encode()).hexdigest(), 16) % 10_000_000_000
         assert _make_anon_id(sid) == expected
+
+    def test_keyed_hash_uses_hmac(self, monkeypatch):
+        """With CANVIGATOR_ANON_KEY set the id is an HMAC-SHA256, different from the unkeyed hash."""
+        import hmac
+        from canvigator_course import _make_anon_id
+        monkeypatch.delenv('CANVIGATOR_ANON_KEY', raising=False)
+        unkeyed = _make_anon_id(42)
+        monkeypatch.setenv('CANVIGATOR_ANON_KEY', 'secret')
+        expected = int(hmac.new(b'secret', b'42', hashlib.sha256).hexdigest(), 16) % 10_000_000_000
+        assert _make_anon_id(42) == expected
+        assert _make_anon_id(42) == _make_anon_id(42)
+        assert expected != unkeyed
 
 
 class TestCollectStudentIds:
@@ -2160,12 +2173,31 @@ class TestVoteAssessments:
         assert confidence == 'borderline'
         assert feedback == 'Missed it.'
 
-    def test_empty_runs_returns_fail(self):
-        """Empty runs list returns a sane fail default."""
+    def test_empty_runs_returns_error(self):
+        """Empty runs list returns 'error' with empty feedback, so nothing can be sent."""
         from canvigator_llm import _vote_assessments
         result, confidence, feedback, _ = _vote_assessments([])
+        assert result == 'error'
+        assert feedback == ''
+
+    def test_error_runs_are_ignored(self):
+        """Errored runs don't vote and their (empty) feedback is never chosen."""
+        from canvigator_llm import _vote_assessments
+        runs = [
+            ('error', '', {}),
+            ('fail', 'Missed the base case.', {}),
+            ('error', '', {}),
+        ]
+        result, confidence, feedback, _ = _vote_assessments(runs)
         assert result == 'fail'
-        assert 'No assessment runs' in feedback
+        assert confidence == 'high'
+        assert feedback == 'Missed the base case.'
+
+    def test_all_error_runs_return_error(self):
+        """When every run errored the verdict is 'error', not a default fail or pass."""
+        from canvigator_llm import _vote_assessments
+        result, confidence, feedback, _ = _vote_assessments([('error', '', {})] * 3)
+        assert (result, confidence, feedback) == ('error', '', '')
 
 
 # ---------------------------------------------------------------------------
@@ -4328,3 +4360,659 @@ class TestTranscribeAudio:
                             lambda client, **kw: {'message': {'content': 'fallback'}})
         result = canvigator_llm.transcribe_audio(str(audio), MagicMock(), 'fake')
         assert result == 'fallback'
+
+
+# ---------------------------------------------------------------------------
+# Follow-up loop, study-data capture, and export fixes (Spring 2027 study prep)
+# ---------------------------------------------------------------------------
+
+def _bare_quiz(data_path, quiz_id=999):
+    """Return a CanvigatorQuiz built without __init__, with file I/O pointed at ``data_path``."""
+    from canvigator_quiz import CanvigatorQuiz
+    quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+    quiz.canvas_quiz = SimpleNamespace(id=quiz_id, title='Quiz 3', points_possible=5)
+    quiz.config = SimpleNamespace(data_path=data_path, quiz_prefix='quiz3_')
+    quiz.quiz_name = 'quiz3'
+    quiz.canvas = MagicMock()
+    return quiz
+
+
+def _write_followup_manifest(path, rows):
+    """Write a follow-up send manifest with the required columns."""
+    cols = ['student_id', 'student_name', 'question_id', 'question_mode',
+            'conversation_id', 'conversation_subject', 'sent_at']
+    pd.DataFrame(rows, columns=cols).to_csv(path, index=False)
+
+
+class TestPickLatestReplyIndex:
+    """`_pickLatestReplyIndex` picks the newest reply that carries the media the question asks for."""
+
+    def test_trailing_text_reply_does_not_hide_the_recording(self):
+        """A newer text-only 'thanks!' loses to the newest reply with audio."""
+        from canvigator_quiz import _pickLatestReplyIndex
+        rows = [
+            {'audio_path': '', 'attachment_path': ''},
+            {'audio_path': 'r/a_902.wav', 'attachment_path': ''},
+            {'audio_path': 'r/a_901.wav', 'attachment_path': ''},
+        ]
+        assert _pickLatestReplyIndex(rows, 'explain') == 1
+
+    def test_draw_mode_looks_for_an_attachment(self):
+        """Draw questions are answered with an image attachment, not audio."""
+        from canvigator_quiz import _pickLatestReplyIndex
+        rows = [
+            {'audio_path': 'r/a.wav', 'attachment_path': ''},
+            {'audio_path': '', 'attachment_path': 'r/d.png'},
+        ]
+        assert _pickLatestReplyIndex(rows, 'draw') == 1
+
+    def test_falls_back_to_newest_reply(self):
+        """With no media anywhere, the newest reply is still the one assessed."""
+        from canvigator_quiz import _pickLatestReplyIndex
+        rows = [{'audio_path': '', 'attachment_path': ''}, {'audio_path': '', 'attachment_path': ''}]
+        assert _pickLatestReplyIndex(rows, 'explain') == 0
+
+    def test_no_replies(self):
+        """No replies -> None."""
+        from canvigator_quiz import _pickLatestReplyIndex
+        assert _pickLatestReplyIndex([], 'explain') is None
+
+
+class TestWriteManifestCsv:
+    """Real-send manifests append to today's file; dry-run manifests are replaced."""
+
+    def test_real_send_appends(self, tmp_path):
+        """A second real send on the same day keeps the first send's rows."""
+        from canvigator_quiz import _writeManifestCsv
+        path = tmp_path / "quiz3_999_reminder_sent_20270201.csv"
+        _writeManifestCsv(pd.DataFrame([{'student_id': 1}]), path, dry_run=False)
+        _writeManifestCsv(pd.DataFrame([{'student_id': 2}]), path, dry_run=False)
+        assert list(pd.read_csv(path)['student_id']) == [1, 2]
+
+    def test_dry_run_overwrites(self, tmp_path):
+        """Dry-run previews are replaced, not accumulated."""
+        from canvigator_quiz import _writeManifestCsv
+        path = tmp_path / "quiz3_999_reminder_sent_dryrun_20270201.csv"
+        _writeManifestCsv(pd.DataFrame([{'student_id': 1}]), path, dry_run=True)
+        _writeManifestCsv(pd.DataFrame([{'student_id': 2}]), path, dry_run=True)
+        assert list(pd.read_csv(path)['student_id']) == [2]
+
+
+class TestFollowUpManifestUnion:
+    """Replies are fetched for every real send, and re-sends skip students already reached."""
+
+    def test_reads_every_real_manifest_and_dedupes(self, tmp_path):
+        """Manifests from different days are combined; dry-runs are ignored; duplicates collapse."""
+        quiz = _bare_quiz(tmp_path)
+        _write_followup_manifest(tmp_path / "quiz3_999_followup_sent_20270201.csv", [
+            (1, 'Ann Lee', 100, 'explain', 501, 's', '2027-02-01T10:00:00+00:00'),
+        ])
+        _write_followup_manifest(tmp_path / "quiz3_999_followup_sent_20270203.csv", [
+            (2, 'Bo Diaz', 100, 'explain', 502, 's', '2027-02-03T10:00:00+00:00'),
+            (1, 'Ann Lee', 100, 'explain', 501, 's', '2027-02-01T10:00:00+00:00'),
+        ])
+        _write_followup_manifest(tmp_path / "quiz3_999_followup_sent_dryrun_20270204.csv", [
+            (3, 'Cy Park', 100, 'explain', None, 's', '2027-02-04T10:00:00+00:00'),
+        ])
+        manifest = quiz._loadFollowUpManifest()
+        assert sorted(manifest['conversation_id'].astype(int)) == [501, 502]
+
+    def test_missing_manifest_raises(self, tmp_path):
+        """No real-send manifest -> FileNotFoundError with a next-step hint."""
+        with pytest.raises(FileNotFoundError, match='send-follow-up-question'):
+            _bare_quiz(tmp_path)._loadFollowUpManifest()
+
+    def test_students_already_sent_this_question_are_dropped(self, tmp_path, capsys):
+        """Only a prior send of the *same* question counts."""
+        quiz = _bare_quiz(tmp_path)
+        _write_followup_manifest(tmp_path / "quiz3_999_followup_sent_20270201.csv", [
+            (1, 'Ann Lee', 100, 'explain', 501, 's', '2027-02-01T10:00:00+00:00'),
+            (2, 'Bo Diaz', 200, 'draw', 502, 's', '2027-02-01T10:00:00+00:00'),
+        ])
+        kept = quiz._dropStudentsAlreadySent({1: 'missed', 2: 'correct', 3: 'missed'}, 100)
+        assert kept == {2: 'correct', 3: 'missed'}
+        assert 'Skipping 1 student' in capsys.readouterr().out
+
+    def test_no_prior_send_keeps_everyone(self, tmp_path):
+        """The first send of a quiz has no manifest to check against."""
+        quiz = _bare_quiz(tmp_path)
+        assert quiz._dropStudentsAlreadySent({1: 'missed'}, 100) == {1: 'missed'}
+
+
+class TestSaveFollowUpManifestColumns:
+    """The follow-up manifest records each student's status and the question text actually sent."""
+
+    def test_status_and_question_text_recorded_and_appended(self, tmp_path):
+        """Two same-day real sends land in one file with per-student status."""
+        quiz = _bare_quiz(tmp_path)
+        quiz._saveFollowUpManifest(
+            [(1, 'Ann Lee', 'body', 'missed Q2', 501)], 100, 'explain', 'subj', dry_run=False,
+            status_by_student={1: 'missed'}, open_ended_question='Explain X.',
+        )
+        quiz._saveFollowUpManifest(
+            [(2, 'Bo Diaz', 'body', 'correct Q2', 502)], 100, 'explain', 'subj', dry_run=False,
+            status_by_student={2: 'correct'}, open_ended_question='Explain X.',
+        )
+        files = list(tmp_path.glob("quiz3_999_followup_sent_*.csv"))
+        assert len(files) == 1
+        df = pd.read_csv(files[0])
+        assert list(df['status']) == ['missed', 'correct']
+        assert set(df['open_ended_question']) == {'Explain X.'}
+        assert list(df['conversation_id']) == [501, 502]
+
+
+class TestFetchRepliesForSend:
+    """Each reply gets its own media file, and 'latest' points at the newest reply with audio."""
+
+    def test_older_recording_no_longer_overwrites_newer(self, tmp_path, monkeypatch):
+        """Regression: two recordings used to share one filename, so the oldest audio was graded."""
+        import canvigator_quiz
+        from datetime import timezone
+        data_path = tmp_path / 'data' / 'cs1000_12345'
+        replies_dir = data_path / 'replies'
+        replies_dir.mkdir(parents=True)
+        quiz = _bare_quiz(data_path)
+
+        def fake_fetch(url, path):
+            path.write_bytes(url.encode())  # file content records which reply it came from
+            return True
+        monkeypatch.setattr(canvigator_quiz, '_fetchAudio', fake_fetch)
+
+        messages = [  # newest first, as Canvas returns them
+            {'id': 903, 'author_id': 42, 'body': 'thanks!', 'created_at': '2027-02-02T12:00:00Z'},
+            {'id': 902, 'author_id': 42, 'body': '', 'created_at': '2027-02-02T11:00:00Z',
+             'media_comment': {'url': 'https://media/second'}},
+            {'id': 901, 'author_id': 42, 'body': '', 'created_at': '2027-02-02T10:00:00Z',
+             'media_comment': {'url': 'https://media/first'}},
+            {'id': 900, 'author_id': 7, 'body': 'the question', 'created_at': '2027-02-01T10:00:01Z'},
+        ]
+        quiz.canvas.get_conversation.return_value = SimpleNamespace(messages=messages)
+        mrow = pd.Series({
+            'student_id': 42, 'student_name': 'Ann Lee', 'question_id': 100,
+            'question_mode': 'explain', 'conversation_id': 501,
+            'sent_at': '2027-02-01T10:00:00+00:00',
+        })
+        now = datetime(2027, 2, 3, tzinfo=timezone.utc)
+        rows = quiz._fetchRepliesForSend(mrow, 7, now, 5, 'quiz3_999_', replies_dir)
+
+        assert [r['message_id'] for r in rows] == [903, 902, 901]
+        assert [r['latest'] for r in rows] == [False, True, False]
+        assert rows[1]['audio_path'] != rows[2]['audio_path']
+        assert (data_path.parent / rows[1]['audio_path']).read_bytes() == b'https://media/second'
+
+
+class TestSelectRepliesToAssess:
+    """Re-runs re-grade only new replies (or errored ones); sent feedback is never re-graded in place."""
+
+    @staticmethod
+    def _select(existing_row, reply_message_id):
+        """Run the selector for one student/question with an optional existing assessment row."""
+        from canvigator_quiz import CanvigatorQuiz
+        reply = {'student_id': 1, 'question_id': 100, 'message_id': reply_message_id}
+        index = {}
+        if existing_row is not None:
+            row = {'student_id': 1, 'question_id': 100, 'message_id': 900, 'result': 'pass', 'sent_assessment': 0}
+            row.update(existing_row)
+            index[(1, 100)] = row
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        return quiz._selectRepliesToAssess([reply], index)
+
+    def test_new_student_is_assessed(self):
+        """No existing row -> assess."""
+        assert len(self._select(None, 900)) == 1
+
+    def test_same_reply_already_graded_keeps_instructor_edits(self):
+        """Same message_id, usable result -> skip (an edited, unsent feedback survives)."""
+        assert self._select({}, 900) == []
+
+    def test_same_reply_with_error_is_regraded(self):
+        """An errored assessment is retried on the next run."""
+        assert len(self._select({'result': 'error'}, 900)) == 1
+
+    def test_newer_reply_is_regraded(self):
+        """A newer reply replaces the unsent assessment of the older one."""
+        assert len(self._select({}, 901)) == 1
+
+    def test_legacy_unsent_row_is_regraded_once(self):
+        """Rows from before message_id was recorded can't be compared, so they are re-graded."""
+        assert len(self._select({'message_id': float('nan')}, 900)) == 1
+
+    def test_sent_feedback_for_same_reply_is_skipped(self):
+        """Sent feedback for this reply -> skip."""
+        assert self._select({'sent_assessment': 1}, 900) == []
+
+    def test_sent_legacy_row_is_skipped(self):
+        """Sent rows without message_id keep the old never-re-grade behavior."""
+        assert self._select({'sent_assessment': 1, 'message_id': ''}, 901) == []
+
+    def test_retry_after_sent_feedback_is_assessed(self):
+        """A retry after sent 'please give it another try' feedback gets its own assessment."""
+        assert len(self._select({'sent_assessment': 1}, 901)) == 1
+
+
+class TestMergeKeepsSentHistory:
+    """`_mergeAssessments` keeps sent rows verbatim and appends the newer reply's assessment."""
+
+    def test_sent_row_kept_and_retry_appended(self):
+        """A retry after sent feedback adds a row; the index then points at the newest one."""
+        from canvigator_quiz import CanvigatorQuiz
+        cols = CanvigatorQuiz.ASSESSMENTS_COLUMNS
+        sent = {c: '' for c in cols}
+        sent.update({'student_id': 1, 'question_id': 100, 'message_id': '900', 'result': 'fail', 'sent_assessment': 1})
+        existing = pd.DataFrame([sent], columns=cols)
+        new = [{'student_id': 1, 'question_id': 100, 'message_id': '901', 'result': 'pass', 'sent_assessment': 0}]
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        merged = quiz._mergeAssessments(existing, new)
+        assert list(merged['message_id'].astype(str)) == ['900', '901']
+        assert list(merged['sent_assessment']) == [1, 0]
+        assert quiz._indexAssessments(merged)[(1, 100)]['message_id'] == '901'
+
+
+class TestSendOneAssessmentFullMessage:
+    """The [y/N] gate shows the entire message it approves."""
+
+    def test_long_feedback_is_not_truncated(self, capsys):
+        """Feedback past 300 characters is printed in full."""
+        from canvigator_quiz import CanvigatorQuiz
+        feedback = 'word ' * 120 + 'END'
+        df = pd.DataFrame([{
+            'student_id': 1, 'student_name': 'Ann Lee', 'question_id': 99,
+            'feedback': feedback, 'result': 'fail', 'sent_assessment': 0, 'sent_at': '',
+        }])
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        quiz.canvas = MagicMock()
+        CanvigatorQuiz._sendOneAssessment(quiz, df, 0, 555, df.iloc[0], dry_run=True)
+        out = capsys.readouterr().out
+        assert 'END' in out
+        assert '...' not in out
+
+
+class TestChooseFollowUpQuestion:
+    """With several selected follow-ups the instructor picks one; with one, no prompt."""
+
+    def test_single_selection_needs_no_prompt(self, monkeypatch):
+        """One selected question is returned without calling input()."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        def _no_input(prompt):  # noqa: ARG001
+            raise AssertionError("input() should not be called")
+        monkeypatch.setattr('builtins.input', _no_input)
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        rows = {100: {'question_mode': 'explain'}}
+        info = {100: {'position': 2, 'keywords': 'relu'}}
+        assert quiz._chooseFollowUpQuestion(rows, info) == 100
+
+    def test_multiple_selections_listed_in_quiz_order(self, monkeypatch):
+        """Choices are numbered by question position, not CSV/dict order."""
+        from canvigator_quiz import CanvigatorQuiz
+        monkeypatch.setattr('builtins.input', lambda prompt: '2')
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        rows = {300: {'question_mode': 'draw'}, 100: {'question_mode': float('nan')}}
+        info = {100: {'position': 1, 'keywords': 'a'}, 300: {'position': 4, 'keywords': 'b'}}
+        assert quiz._chooseFollowUpQuestion(rows, info) == 300
+
+
+class TestPrintAssessmentSummary:
+    """The run summary counts every result value and names rows that need a manual look."""
+
+    def test_counts_and_names(self, capsys):
+        """no_media and error rows are listed by student."""
+        from canvigator_quiz import _printAssessmentSummary
+        results = [
+            {'result': 'pass', 'student_name': 'Ann Lee'},
+            {'result': 'no_media', 'student_name': 'Bo Diaz'},
+            {'result': 'error', 'student_name': 'Cy Park'},
+        ]
+        _printAssessmentSummary(results, 7)
+        out = capsys.readouterr().out
+        assert '1 pass, 0 fail, 1 no media, 1 error' in out
+        assert 'Bo Diaz' in out and 'Cy Park' in out
+        assert 'Total in assessments file: 7' in out
+
+
+class TestAssessRunErrors:
+    """A failed or unparseable grading run is an 'error', never a silent pass or a sendable fail."""
+
+    @staticmethod
+    def _client(content=None, exc=None):
+        """Build a mock Ollama client whose chat() returns ``content`` or raises ``exc``."""
+        client = MagicMock()
+        if exc is not None:
+            client.chat.side_effect = exc
+        else:
+            client.chat.return_value = {'message': {'content': content}}
+        return client
+
+    def test_exception_is_error_with_no_feedback(self):
+        """Previously: 'fail' with 'Assessment error: ...' as the student-facing feedback."""
+        from canvigator_llm import _assess_explain_once
+        result, feedback, _ = _assess_explain_once('p', self._client(exc=ValueError('boom')), 'm', 3)
+        assert (result, feedback) == ('error', '')
+
+    def test_unparseable_reply_is_error_not_pass(self):
+        """Previously: empty per-criterion lists aggregated to a vacuous 'pass'."""
+        from canvigator_llm import _assess_explain_once
+        result, _, _ = _assess_explain_once('p', self._client(content='Sorry, I cannot help.'), 'm', 3)
+        assert result == 'error'
+
+    def test_draw_unparseable_reply_is_error(self):
+        """Same guard on the draw path."""
+        from canvigator_llm import _assess_draw_once
+        result, _, _ = _assess_draw_once('p', '/tmp/x.png', self._client(content='not json'), 'm', 2)
+        assert result == 'error'
+
+    def test_valid_reply_is_still_graded(self):
+        """A well-formed reply is aggregated as before."""
+        import json
+        from canvigator_llm import _assess_explain_once
+        content = json.dumps({
+            'pass_criteria_evaluations': [{'criterion': 'names vanishing gradients', 'status': 'met'}],
+            'fatal_errors_evaluations': [],
+            'feedback': 'Good.',
+        })
+        result, feedback, _ = _assess_explain_once('p', self._client(content=content), 'm', 1)
+        assert (result, feedback) == ('pass', 'Good.')
+
+    def test_rubricless_reply_keeps_old_behavior(self):
+        """With no pass criteria in the rubric, an empty evaluation is not treated as an error."""
+        from canvigator_llm import _assess_explain_once
+        result, _, _ = _assess_explain_once('p', self._client(content='{}'), 'm', 0)
+        assert result == 'pass'
+
+    def test_assess_explain_all_garbage_returns_error(self):
+        """Three unparseable runs -> 'error' with empty feedback (never sent)."""
+        from canvigator_llm import assess_explain, _empty_rubric
+        rubric = _empty_rubric('explain')
+        rubric['pass_criteria'] = ['names vanishing gradients', 'contrasts ReLU with sigmoid']
+        result, confidence, feedback, _ = assess_explain(
+            'transcript', 'relu', 'Explain why ReLU...', 'orig', self._client(content='garbage'), 'm',
+            rubric=rubric,
+        )
+        assert (result, feedback) == ('error', '')
+
+
+class TestAssessRepliesSkipRows:
+    """Rows that can't be graded carry a distinct result instead of a 'fail'."""
+
+    def test_no_media_and_empty_transcript(self, tmp_path, monkeypatch):
+        """Missing audio -> 'no_media'; empty transcript -> 'error' with empty feedback."""
+        import canvigator_llm
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: MagicMock())
+        monkeypatch.setattr(canvigator_llm, 'transcribe_audio', lambda *a, **k: '')
+        audio = tmp_path / 'a.wav'
+        audio.write_bytes(b'x' * 2048)
+        replies = [
+            {'student_id': 1, 'student_name': 'Ann', 'question_id': 100, 'question_mode': 'explain', 'audio_path': ''},
+            {'student_id': 2, 'student_name': 'Bo', 'question_id': 100, 'question_mode': 'explain', 'audio_path': str(audio)},
+        ]
+        oe_row = {'keywords': 'k', 'open_ended_question': 'Explain', 'original_question_text': 'o',
+                  'question_mode': 'explain'}
+        results = canvigator_llm.assess_replies(replies, oe_row)
+        assert [r['result'] for r in results] == ['no_media', 'error']
+        assert results[0]['feedback'] == 'No valid audio submission to assess.'
+        assert results[1]['feedback'] == ''
+
+
+class TestLocalOnlyGuard:
+    """The student-data client refuses non-local hosts and Ollama cloud models."""
+
+    @staticmethod
+    def _local_models(monkeypatch):
+        """Pin the module's default models to local ones."""
+        import canvigator_llm
+        monkeypatch.setattr(canvigator_llm, 'DEFAULT_MODEL', 'gemma4:31b')
+        monkeypatch.setattr(canvigator_llm, 'DEFAULT_AUDIO_MODEL', 'gemma4:e4b')
+
+    @pytest.mark.parametrize('host', [
+        '', 'localhost', '127.0.0.1:11434', 'http://localhost:11434', 'http://[::1]:11434', '0.0.0.0',
+    ])
+    def test_loopback_hosts_allowed(self, monkeypatch, host):
+        """Unset or loopback OLLAMA_HOST passes."""
+        import canvigator_llm
+        self._local_models(monkeypatch)
+        monkeypatch.setenv('OLLAMA_HOST', host)
+        canvigator_llm._assert_local_only()
+
+    @pytest.mark.parametrize('host', ['gpu-box.local:11434', 'http://10.0.0.5:11434', 'https://ollama.com'])
+    def test_remote_hosts_refused(self, monkeypatch, host):
+        """Any other host would send student work off this machine."""
+        import canvigator_llm
+        self._local_models(monkeypatch)
+        monkeypatch.setenv('OLLAMA_HOST', host)
+        with pytest.raises(RuntimeError, match='not this machine'):
+            canvigator_llm._assert_local_only()
+
+    @pytest.mark.parametrize('attr,name', [
+        ('DEFAULT_MODEL', 'gpt-oss:120b-cloud'), ('DEFAULT_AUDIO_MODEL', 'glm-4.6:cloud'),
+    ])
+    def test_cloud_models_refused(self, monkeypatch, attr, name):
+        """Cloud-tagged models are forwarded to ollama.com by the local daemon."""
+        import canvigator_llm
+        self._local_models(monkeypatch)
+        monkeypatch.delenv('OLLAMA_HOST', raising=False)
+        monkeypatch.setattr(canvigator_llm, attr, name)
+        with pytest.raises(RuntimeError, match='cloud model'):
+            canvigator_llm._assert_local_only()
+
+    def test_make_client_local_runs_the_guard(self, monkeypatch):
+        """`_make_client(cloud=False)` is the choke point every student-data path uses."""
+        import canvigator_llm
+        self._local_models(monkeypatch)
+        monkeypatch.setenv('OLLAMA_HOST', 'gpu-box.local')
+        with pytest.raises(RuntimeError):
+            canvigator_llm._make_client(cloud=False)
+
+    def test_picker_hides_cloud_models(self, monkeypatch):
+        """--choose-model never offers a gemma4 cloud variant."""
+        import canvigator_llm
+        mock_client = MagicMock()
+        mock_client.list.return_value = SimpleNamespace(
+            models=[SimpleNamespace(model=n) for n in ('gemma4:31b', 'gemma4:31b-cloud')]
+        )
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: mock_client)
+        captured = {}
+
+        def fake_select(items, item_type="item"):
+            captured['items'] = list(items)
+            return items[0]
+        monkeypatch.setattr(canvigator_llm, 'selectFromList', fake_select)
+        canvigator_llm.pickLocalGemmaModel()
+        assert captured['items'] == ['gemma4:31b']
+
+
+class TestFetchAudioTimeout:
+    """A stalled media download is abandoned instead of hanging the run."""
+
+    def test_timeout_returns_false(self, tmp_path, monkeypatch):
+        """An ffmpeg TimeoutExpired returns False (caller logs and skips)."""
+        import canvigator_assignment
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd='ffmpeg', timeout=kwargs.get('timeout'))
+        monkeypatch.setattr(canvigator_assignment.subprocess, 'run', fake_run)
+        assert canvigator_assignment._fetchAudio('https://x', tmp_path / 'a.wav') is False
+
+
+class TestAnonymizeInterventionLogs:
+    """export-anon-data now covers the student_id/student_name files and conversation lists."""
+
+    def test_student_id_files_lose_names_ids_and_paths(self, tmp_path):
+        """Replies-style CSV: student_id -> anon_id; names and media paths dropped; free text kept."""
+        from canvigator_course import _anonymizeCsvFile
+        csv_file = tmp_path / 'quiz3_999_followup_replies_20270201.csv'
+        anon_dir = tmp_path / 'anon'
+        anon_dir.mkdir()
+        pd.DataFrame({
+            'student_id': [100, 200], 'student_name': ['Ann Lee', 'Bo Diaz'],
+            'question_id': [7, 7], 'reply_text': ['hi', 'yo'],
+            'audio_path': ['data/x/replies/quiz3_999_100_Ann_7_901.wav', ''],
+            'attachment_path': ['', ''], 'has_audio': [True, False],
+        }).to_csv(csv_file, index=False)
+
+        assert _anonymizeCsvFile(csv_file, anon_dir, {100: 111, 200: 222}) is True
+        out = pd.read_csv(anon_dir / csv_file.name)
+        assert list(out.columns)[0] == 'anon_id'
+        assert list(out['anon_id']) == [111, 222]
+        for col in ('student_id', 'student_name', 'audio_path', 'attachment_path'):
+            assert col not in out.columns
+        assert list(out['reply_text']) == ['hi', 'yo']
+        text = (anon_dir / csv_file.name).read_text()
+        assert 'Ann' not in text and 'Bo Diaz' not in text
+
+    def test_conversation_student_id_lists(self, tmp_path):
+        """conversations_*.csv: student_ids -> anon_ids, student_names dropped."""
+        from canvigator_course import _anonymizeCsvFile
+        csv_file = tmp_path / 'conversations_20270201.csv'
+        anon_dir = tmp_path / 'anon'
+        anon_dir.mkdir()
+        pd.DataFrame({
+            'conversation_id': [501], 'student_ids': ['100,200'],
+            'student_names': ['Ann Lee; Bo Diaz'], 'last_message': ['see you'],
+        }).to_csv(csv_file, index=False)
+        _anonymizeCsvFile(csv_file, anon_dir, {100: 111, 200: 222})
+        out = pd.read_csv(anon_dir / csv_file.name, dtype=str)
+        assert list(out['anon_ids']) == ['111,222']
+        assert 'student_ids' not in out.columns and 'student_names' not in out.columns
+
+    def test_consent_filter_drops_non_consenters(self, tmp_path):
+        """With drop_unmapped, only consenting students remain in every kind of file."""
+        from canvigator_course import _anonymizeCsvFile
+        anon_dir = tmp_path / 'anon'
+        anon_dir.mkdir()
+        consenting = {100: 111}
+
+        rows_csv = tmp_path / 'course_activity_20270201.csv'
+        pd.DataFrame({'name': ['Ann Lee', 'Bo Diaz'], 'id': [100, 200], 'page_views': [5, 9]}).to_csv(rows_csv, index=False)
+        _anonymizeCsvFile(rows_csv, anon_dir, consenting, drop_unmapped=True)
+        assert list(pd.read_csv(anon_dir / rows_csv.name)['anon_id']) == [111]
+
+        pairs_csv = tmp_path / 'pairs.csv'
+        pd.DataFrame({
+            'person1': ['Ann Lee', 'Bo Diaz'], 'id1': [100, 200],
+            'person2': ['Bo Diaz', 'Cy Park'], 'id2': [200, 300],
+        }).to_csv(pairs_csv, index=False)
+        _anonymizeCsvFile(pairs_csv, anon_dir, consenting, drop_unmapped=True)
+        pairs = pd.read_csv(anon_dir / pairs_csv.name)
+        assert len(pairs) == 1  # the pair with no consenting member is gone
+        assert pairs.loc[0, 'anon_id1'] == 111 and pd.isna(pairs.loc[0, 'anon_id2'])
+
+        convo_csv = tmp_path / 'conversations_20270201.csv'
+        pd.DataFrame({'conversation_id': [501, 502], 'student_ids': ['100,200', '200']}).to_csv(convo_csv, index=False)
+        _anonymizeCsvFile(convo_csv, anon_dir, consenting, drop_unmapped=True)
+        convos = pd.read_csv(anon_dir / convo_csv.name, dtype=str)
+        assert list(convos['anon_ids']) == ['111']
+
+    def test_collects_ids_from_intervention_logs(self, tmp_path):
+        """_collectStudentIds sees student_id files and conversation id lists."""
+        from canvigator_course import _collectStudentIds
+        f1 = tmp_path / 'quiz3_999_followup_sent_20270201.csv'
+        f2 = tmp_path / 'conversations_20270201.csv'
+        pd.DataFrame({'student_id': [100], 'student_name': ['Ann Lee']}).to_csv(f1, index=False)
+        pd.DataFrame({'student_ids': ['100,300']}).to_csv(f2, index=False)
+        result = _collectStudentIds([f1, f2])
+        assert set(result) == {100, 300}
+        assert result[100]['name'] == 'Ann Lee'
+
+
+class TestLoadConsentIds:
+    """The --consent CSV lists students by Canvas id or by SIS id (via the roster)."""
+
+    def test_canvas_ids(self, tmp_path):
+        """An 'id' column is used directly."""
+        from canvigator_course import _loadConsentIds
+        consent = tmp_path / 'consent.csv'
+        pd.DataFrame({'id': [100, 200]}).to_csv(consent, index=False)
+        assert _loadConsentIds(consent, tmp_path) == {100, 200}
+
+    def test_sis_ids_via_roster(self, tmp_path, capsys):
+        """sis_id values (leading zeros kept) are matched through the latest roster; unmatched ones warn."""
+        from canvigator_course import _loadConsentIds
+        pd.DataFrame({
+            'name': ['Ann Lee', 'Bo Diaz'], 'id': [100, 200], 'sis_id': ['000901', '000902'],
+            'enrollment_type': ['StudentEnrollment'] * 2, 'state': ['active'] * 2,
+        }).to_csv(tmp_path / 'roster_20270115.csv', index=False)
+        consent = tmp_path / 'consent.csv'
+        pd.DataFrame({'SIS_ID': ['000902', '000999']}).to_csv(consent, index=False)
+        assert _loadConsentIds(consent, tmp_path) == {200}
+        assert '1 sis_id value(s)' in capsys.readouterr().out
+
+    def test_sis_ids_without_roster_raise(self, tmp_path):
+        """No roster -> a clear instruction to run get-roster."""
+        from canvigator_course import _loadConsentIds
+        consent = tmp_path / 'consent.csv'
+        pd.DataFrame({'sis_id': ['000902']}).to_csv(consent, index=False)
+        with pytest.raises(FileNotFoundError, match='get-roster'):
+            _loadConsentIds(consent, tmp_path)
+
+    def test_unknown_columns_raise(self, tmp_path):
+        """Neither id nor sis_id -> ValueError naming the expected columns."""
+        from canvigator_course import _loadConsentIds
+        consent = tmp_path / 'consent.csv'
+        pd.DataFrame({'email': ['a@x.edu']}).to_csv(consent, index=False)
+        with pytest.raises(ValueError, match="'id'"):
+            _loadConsentIds(consent, tmp_path)
+
+
+class TestExportAnonymizedDataConsent:
+    """End to end: consent-filtered export of a course directory."""
+
+    def test_only_consenting_students_are_exported(self, tmp_path, monkeypatch, capsys):
+        """Non-consenters, names, SIS ids, the consent file, and stale output never reach the zip."""
+        import zipfile
+        from canvigator_course import exportAnonymizedData
+        monkeypatch.setenv('CANVIGATOR_ANON_KEY', 'test-key')
+        data = tmp_path / 'cs1000_12345'
+        data.mkdir()
+        pd.DataFrame({
+            'name': ['Ann Lee', 'Bo Diaz'], 'id': [100, 200], 'sis_id': ['900901', '900902'],
+            'enrollment_type': ['StudentEnrollment'] * 2, 'state': ['active'] * 2,
+        }).to_csv(data / 'roster_20270115.csv', index=False)
+        pd.DataFrame({
+            'student_id': [100, 200], 'student_name': ['Ann Lee', 'Bo Diaz'],
+            'reason': ['no attempt', 'score 3/5'],
+        }).to_csv(data / 'quiz3_999_reminder_sent_20270201.csv', index=False)
+        consent = data / 'consent_20270520.csv'  # deliberately saved inside the data directory
+        pd.DataFrame({'sis_id': ['900902']}).to_csv(consent, index=False)
+        (data / 'anonymized').mkdir()
+        (data / 'anonymized' / 'stale.csv').write_text('name,id\nAnn Lee,100\n')
+
+        exportAnonymizedData(data, consent_csv=consent)
+
+        anon = data / 'anonymized'
+        assert sorted(p.name for p in anon.glob('*.csv')) == [
+            'quiz3_999_reminder_sent_20270201.csv', 'roster_20270115.csv',
+        ]
+        for p in anon.glob('*.csv'):
+            df = pd.read_csv(p)
+            assert len(df) == 1
+            assert not {'id', 'student_id', 'name', 'student_name', 'sis_id'} & set(df.columns)
+            text = p.read_text()
+            assert 'Ann' not in text and 'Bo Diaz' not in text and '900902' not in text
+        mapping = pd.read_csv(next(data.glob('anon_mapping_*.csv')))
+        assert list(mapping['id']) == [200]
+        with zipfile.ZipFile(next(data.glob('anonymized_*.zip'))) as zf:
+            assert not any('stale' in n or 'consent' in n for n in zf.namelist())
+        assert 'CANVIGATOR_ANON_KEY is not set' not in capsys.readouterr().out
+
+
+class TestConsentFlagCli:
+    """--consent is accepted only by export-anon-data."""
+
+    def test_consent_with_other_task_rejected(self):
+        """Using --consent elsewhere is an error, not silently ignored."""
+        import os
+        import sys
+        env = {k: os.environ[k] for k in ('PATH', 'HOME', 'PYTHONPATH', 'PYTHONHOME') if k in os.environ}
+        env['CANVAS_URL'] = ''
+        env['CANVAS_TOKEN'] = ''
+        result = subprocess.run(
+            [sys.executable, 'canvigator.py', '--consent', 'consent.csv', 'get-roster'],
+            capture_output=True, text=True, cwd=Path(__file__).parent, env=env, timeout=15,
+        )
+        assert result.returncode != 0
+        assert 'applies only to export-anon-data' in result.stdout
+
+    def test_help_renders_flag_without_short_alias(self):
+        """A flag with no short form renders without a 'None,' prefix."""
+        from canvigator_help import _flag_label
+        assert _flag_label('--consent') == '    --consent <CSV>'
