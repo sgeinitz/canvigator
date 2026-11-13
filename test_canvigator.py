@@ -2637,8 +2637,71 @@ class TestSendAllQuizRemindersFiltering:
         captured = capsys.readouterr().out
         assert "Skipping 'Quiz Z'" in captured
         assert any("Skipping 'Quiz Z'" in r.message for r in caplog.records)
-        # No reminder-worthy state, so we hit the "all caught up" branch
-        assert 'All students are caught up' in captured
+        # The only quiz was not checked, so the run must not claim everyone is caught up
+        assert 'All students are caught up' not in captured
+        assert "No reminders to send from the 0 of 1 quiz(zes) that could be checked. Not checked: 'Quiz Z'" in captured
+
+    def _eligible_quizzes(self, monkeypatch, titles):
+        """Return future-due stub quizzes with the given titles, with 'now' frozen before their due date."""
+        from datetime import timezone as _tz
+        from canvigator_utils import is_quiz_open_for_reminder as orig
+        ref_now = datetime(2026, 4, 24, 12, 0, 0, tzinfo=_tz.utc)
+        monkeypatch.setattr('canvigator_course.cu.is_quiz_open_for_reminder', lambda q: orig(q, now=ref_now))
+        quizzes = []
+        for n, title in enumerate(titles, start=1):
+            q = _StubQuiz(published=True, due_at='2026-12-31T12:00:00Z')
+            q.id, q.title, q.points_possible = n, title, 10
+            quizzes.append(q)
+        return quizzes
+
+    def test_all_reports_unavailable_does_not_claim_caught_up(self, capsys, monkeypatch):
+        """When every quiz report times out, the run says the quizzes were not checked, not that all are caught up."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A', 'Quiz B'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[TimeoutError('not ready'), TimeoutError('not ready')]):
+            course.sendAllQuizReminders(dry_run=True)
+        captured = capsys.readouterr().out
+        assert 'All students are caught up' not in captured
+        assert "No reminders to send from the 0 of 2 quiz(zes) that could be checked. Not checked: 'Quiz A', 'Quiz B'" in captured
+
+    def test_skipped_quiz_is_named_at_the_send_step(self, monkeypatch):
+        """With one report unavailable, the send-step header counts only the checked quiz and names the skipped one."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A', 'Quiz B'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        course.config = MagicMock()
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = ('not attempted', ['Q1'])
+        with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[TimeoutError('not ready'), loaded]), \
+             patch('canvigator_course.cq._sendOrPreviewMessages') as preview, \
+             patch('canvigator_course._saveCourseReminderManifest'), \
+             patch('canvigator_course._composeMultiQuizReminder', return_value='msg'):
+            course.sendAllQuizReminders(dry_run=True)
+        messages, _, header = preview.call_args.args
+        assert len(messages) == 1
+        assert 'covering 1 quiz(zes)' in header
+        assert "do not cover 1 quiz(zes) that could not be checked: 'Quiz A'" in header
+
+    def test_no_skips_keeps_the_caught_up_message_and_plain_header(self, capsys, monkeypatch):
+        """With every quiz checked, the caught-up message and the header are unchanged."""
+        quizzes = self._eligible_quizzes(monkeypatch, ['Quiz A'])
+        course = self._make_course_stub(quizzes, students=[{'id': 1, 'name': 'Alice A'}])
+        course.config = MagicMock()
+        loaded = MagicMock()
+        loaded._tryLoadRecentSubmissions.return_value = True
+        loaded._classifyStudentForQuiz.return_value = None
+        with patch('canvigator_course.cq.CanvigatorQuiz', return_value=loaded):
+            course.sendAllQuizReminders(dry_run=True)
+        assert 'All students are caught up' in capsys.readouterr().out
+
+        loaded._classifyStudentForQuiz.return_value = ('not attempted', ['Q1'])
+        with patch('canvigator_course.cq.CanvigatorQuiz', return_value=loaded), \
+             patch('canvigator_course.cq._sendOrPreviewMessages') as preview, \
+             patch('canvigator_course._saveCourseReminderManifest'), \
+             patch('canvigator_course._composeMultiQuizReminder', return_value='msg'):
+            course.sendAllQuizReminders(dry_run=True)
+        header = preview.call_args.args[2]
+        assert 'covering 1 quiz(zes)' in header and 'WARNING' not in header
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,23 @@ class CanvigatorCourse:
             logger.warning(msg)
             return None
 
+    def _loadQuizForReminder(self, q):
+        """Load one quiz and its tagged question info for the reminder run, as ``(quiz, question_info)``.
+
+        Returns ``(None, None)``, after a warning, when the quiz cannot be checked: its report could not be loaded,
+        or it has no tagged-questions CSV.
+        """
+        quiz = self._loadQuizOrSkip(q)
+        if quiz is None:
+            return None, None
+        try:
+            return quiz, quiz._loadQuestionInfo()
+        except FileNotFoundError as e:
+            msg = f"Skipping '{q.title}' — {e}"
+            print(f"  WARNING: {msg}")
+            logger.warning(msg)
+            return None, None
+
     def getAllQuizzesAndSubmissions(self):
         """Get all quizzes and their submissions for the course."""
         all_quizzes = list(self.canvas_course.get_quizzes())
@@ -109,19 +126,14 @@ class CanvigatorCourse:
 
         # student_id -> list[dict(quiz_id, quiz_name, due_at, reason, bullets)]
         student_state = {}
+        # Titles of eligible quizzes that could not be checked, so the reminders say nothing about them.
+        skipped = []
 
         for i, q in enumerate(eligible, start=1):
             print(f"\n[{i}/{len(eligible)}] Processing: {q.title}")
-            quiz = self._loadQuizOrSkip(q)
+            quiz, question_info = self._loadQuizForReminder(q)
             if quiz is None:
-                continue
-
-            try:
-                question_info = quiz._loadQuestionInfo()
-            except FileNotFoundError as e:
-                msg = f"Skipping '{q.title}' — {e}"
-                print(f"  WARNING: {msg}")
-                logger.warning(msg)
+                skipped.append(q.title)
                 continue
 
             if not quiz._tryLoadRecentSubmissions():
@@ -149,9 +161,18 @@ class CanvigatorCourse:
                     'bullets': bullets,
                 })
 
+        n_checked = len(eligible) - len(skipped)
+        not_checked = ", ".join(f"'{title}'" for title in skipped)
+
         if not student_state:
-            print("\nAll students are caught up — no consolidated reminders to send.")
-            logger.info("sendAllQuizReminders: no students with reminder-worthy state")
+            if skipped:
+                msg = (f"No reminders to send from the {n_checked} of {len(eligible)} quiz(zes) that could be checked. "
+                       f"Not checked: {not_checked}")
+                print(f"\n  WARNING: {msg}")
+                logger.warning(f"sendAllQuizReminders: {msg}")
+            else:
+                print("\nAll students are caught up — no consolidated reminders to send.")
+                logger.info("sendAllQuizReminders: no students with reminder-worthy state")
             return
 
         enrolled_map = {s['id']: s['name'] for s in self.students}
@@ -171,8 +192,12 @@ class CanvigatorCourse:
 
         header_label = (
             f"Course: {self.canvas_course.course_code} "
-            f"(consolidated reminder covering {len(eligible)} quiz(zes))"
+            f"(consolidated reminder covering {n_checked} quiz(zes))"
         )
+        if skipped:
+            msg = f"These reminders do not cover {len(skipped)} quiz(zes) that could not be checked: {not_checked}"
+            header_label += f"\n  WARNING: {msg}"
+            logger.warning(f"sendAllQuizReminders: {msg}")
 
         if dry_run:
             cq._sendOrPreviewMessages(messages, subject_str, header_label)
