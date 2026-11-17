@@ -309,6 +309,7 @@ class CanvigatorAssignment:
 
         attachments = getattr(submission, 'attachments', None) or []
         for att in attachments:
+            att = att if isinstance(att, dict) else vars(att)  # canvasapi wraps attachments in File objects
             ct = (att.get('content-type') or att.get('content_type') or '').lower()
             if not (ct.startswith('audio/') or ct.startswith('video/')):
                 continue

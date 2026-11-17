@@ -5493,12 +5493,12 @@ class TestFollowUpAssignmentPayload:
 class TestCreateFollowUpAssignment:
     """create-follow-up-assignment creates one assignment per question and records it."""
 
-    def _create(self, quiz, dry_run=False):
-        """Run the task with canned answers: 2 points, no due date, do not publish."""
+    def _create(self, quiz, dry_run=False, confirm='y'):
+        """Run the task with canned answers: 2 points, no due date, do not publish, then ``confirm``."""
         import canvigator_followup as cf
         quiz.canvas_course.canvas_course.create_assignment.return_value = SimpleNamespace(
             id=77, name='Quiz 3 - Q3 Follow-Up', html_url='http://canvas/a/77')
-        with patch('builtins.input', side_effect=['2', '', 'n']):
+        with patch('builtins.input', side_effect=['2', '', 'n', confirm]):
             cf.createFollowUpAssignment(quiz, dry_run=dry_run)
 
     def test_creates_assignment_and_manifest_row(self, tmp_path):
@@ -5528,15 +5528,49 @@ class TestCreateFollowUpAssignment:
         assert not (tmp_path / 'quiz3_999_followup_assignments.csv').exists()
         assert 'Quiz 3 - Q3 Follow-Up' in capsys.readouterr().out
 
+    def test_declining_the_confirmation_creates_nothing(self, tmp_path, capsys):
+        """The assignment is shown first, and N at the final prompt leaves Canvas and the manifest untouched."""
+        quiz = _followup_quiz(tmp_path)
+        self._create(quiz, confirm='')
+        assert not quiz.canvas_course.canvas_course.create_assignment.called
+        assert not (tmp_path / 'quiz3_999_followup_assignments.csv').exists()
+        out = capsys.readouterr().out
+        assert 'Quiz 3 - Q3 Follow-Up' in out and 'Not created' in out
+
+
+class TestOneDeliveryMethodPerQuestion:
+    """A follow-up question goes out as a Canvas message or as an assignment, never both."""
+
+    def test_create_refuses_a_question_already_sent_as_a_message(self, tmp_path, capsys):
+        """A real send manifest for the question blocks the assignment before any prompt."""
+        import canvigator_followup as cf
+        quiz = _followup_quiz(tmp_path)
+        _write_followup_manifest(tmp_path / 'quiz3_999_followup_sent_20270101.csv',
+                                 [{'student_id': 1, 'question_id': 100, 'conversation_id': 555}])
+        cf.createFollowUpAssignment(quiz)
+        assert not quiz.canvas_course.canvas_course.create_assignment.called
+        assert 'already sent as a Canvas message' in capsys.readouterr().out
+
+    def test_send_refuses_a_question_that_has_an_assignment(self, tmp_path, capsys):
+        """send-follow-up-question stops before fetching submissions or messaging anyone."""
+        quiz = _followup_quiz(tmp_path)
+        _write_assignments_manifest(tmp_path)
+        quiz._tryLoadRecentSubmissions = MagicMock()
+        quiz.getAllSubmissionsAndEvents = MagicMock()
+        quiz.sendFollowUpQuestions()
+        assert not quiz._tryLoadRecentSubmissions.called and not quiz.getAllSubmissionsAndEvents.called
+        assert not quiz.canvas.create_conversation.called
+        assert 'already has a follow-up assignment' in capsys.readouterr().out
+
 
 class TestSelectSubmissionsToAssess:
     """`_selectSubmissionsToAssess` grades each attempt once."""
 
     def _select(self, existing, attempt=1):
-        """Run the selector for student 1 / question 100 against one existing row (or none)."""
+        """Run the selector for student 1 / question 100 of assignment 77 against one existing row (or none)."""
         from canvigator_followup import _selectSubmissionsToAssess
-        index = {(1, 100): existing} if existing else {}
-        return _selectSubmissionsToAssess([{'student_id': 1, 'question_id': 100, 'attempt': attempt}], index)
+        index = {(1, 100): {'assignment_id': 77, **existing}} if existing else {}
+        return _selectSubmissionsToAssess([{'student_id': 1, 'question_id': 100, 'attempt': attempt}], index, 77)
 
     def test_new_submission_is_assessed(self):
         """A student with no assessment yet is graded."""
@@ -5554,6 +5588,18 @@ class TestSelectSubmissionsToAssess:
     def test_newer_attempt_is_assessed(self):
         """A resubmission is graded even after feedback on the earlier attempt was returned."""
         assert len(self._select({'attempt': 1.0, 'sent_assessment': 1, 'result': 'fail'}, attempt=2)) == 1
+
+    def test_row_from_another_assignment_does_not_count(self):
+        """After an assignment is replaced, attempt 1 on the new one is graded though an old row has attempt 1."""
+        assert len(self._select({'assignment_id': 55.0, 'attempt': 1.0, 'sent_assessment': 1, 'result': 'fail'})) == 1
+        assert len(self._select({'assignment_id': 55.0, 'attempt': 1.0, 'sent_assessment': 0, 'result': 'pass'})) == 1
+
+    def test_no_media_is_retried_until_the_instructor_judges_it(self):
+        """A failed download is retried on the next run; a row the instructor has judged is never re-graded."""
+        assert len(self._select({'attempt': 1.0, 'sent_assessment': 0, 'result': 'no_media',
+                                 'instructor_result': float('nan')})) == 1
+        assert self._select({'attempt': 1.0, 'sent_assessment': 0, 'result': 'no_media', 'instructor_result': 'fail'}) == []
+        assert self._select({'attempt': 1.0, 'sent_assessment': 0, 'result': 'error', 'instructor_result': 'pass'}) == []
 
 
 class TestQuizStatusByStudent:
@@ -5579,16 +5625,21 @@ class TestQuizStatusByStudent:
 class TestAssessFollowUpAssignment:
     """assess-follow-up-assignment grades the latest attempts without showing or sending anything."""
 
-    def _run(self, tmp_path, capsys):
-        """Assess one submitted attempt (student 1) and one never-submitted student; return (quiz, out, llm mock)."""
+    def _run(self, tmp_path, capsys, students=None, user=None, status=None, during_grading=None):
+        """Assess one submitted attempt (student 1) and one never-submitted student; return (quiz, out, llm mock).
+
+        ``user`` is the Canvas user on student 1's submission, ``status`` the
+        patch for ``_quizStatusByStudent`` (default: no quiz results), and
+        ``during_grading`` runs while the model is grading.
+        """
         import canvigator_followup as cf
-        quiz = _followup_quiz(tmp_path)
+        quiz = _followup_quiz(tmp_path, students=students)
         _write_assignments_manifest(tmp_path)
         assignment = MagicMock()
         assignment.name = 'Quiz 3 - Q3 Follow-Up'
         assignment.get_submissions.return_value = [
             SimpleNamespace(user_id=1, attempt=2, workflow_state='submitted', submitted_at='2027-02-01T10:00:00Z',
-                            media_comment={'url': 'http://canvas/media', 'media_type': 'audio'}),
+                            media_comment={'url': 'http://canvas/media', 'media_type': 'audio'}, user=user),
             SimpleNamespace(user_id=2, attempt=None, workflow_state='unsubmitted', submitted_at=None),
         ]
         quiz.canvas_course.canvas_course.get_assignment.return_value = assignment
@@ -5596,8 +5647,14 @@ class TestAssessFollowUpAssignment:
         llm_result = [{'student_id': 1, 'student_name': 'Ann Lee', 'question_id': 100, 'question_mode': 'explain',
                        'result': 'fail', 'confidence': 'high', 'feedback': 'Missing the base case.',
                        'transcript': 'um', 'criteria_evaluations': '', 'assessed_at': '2027-02-02T00:00:00+00:00'}]
-        with patch('canvigator_llm.assess_replies', return_value=llm_result) as llm, \
-                patch.object(cf, '_quizStatusByStudent', return_value={}):
+
+        def grade(*args, **kwargs):
+            if during_grading:
+                during_grading(quiz)
+            return llm_result
+
+        with patch('canvigator_llm.assess_replies', side_effect=grade) as llm, \
+                patch.object(cf, '_quizStatusByStudent', **(status or {'return_value': {}})):
             cf.assessFollowUpAssignment(quiz)
         return quiz, capsys.readouterr().out, llm
 
@@ -5630,6 +5687,69 @@ class TestAssessFollowUpAssignment:
             cf.assessFollowUpAssignment(quiz)
         assert not llm.called
         assert 'Nothing new to assess' in capsys.readouterr().out
+
+    def test_submitter_missing_from_roster_is_named_from_canvas(self, tmp_path, capsys):
+        """A submitter not on the roster (e.g. the Test Student) gets their Canvas name, not 'id=…'."""
+        quiz, _, llm = self._run(tmp_path, capsys, students=[{'id': 2, 'name': 'Bo Diaz'}],
+                                 user={'id': 1, 'name': 'Test Student'})
+        assert llm.call_args[0][0][0]['student_name'] == 'Test Student'
+        assignment = quiz.canvas_course.canvas_course.get_assignment.return_value
+        assert assignment.get_submissions.call_args.kwargs == {'include': ['user']}
+
+    def test_quiz_status_failure_still_saves_the_assessments(self, tmp_path, capsys):
+        """When the quiz results can't be fetched, the graded rows are saved with quiz_status 'unknown'."""
+        _, out, _ = self._run(tmp_path, capsys, status={'side_effect': RuntimeError('report unavailable')})
+        df = pd.read_csv(tmp_path / 'quiz3_999_followup_assessments.csv')
+        assert df['quiz_status'].tolist() == ['unknown']
+        assert 'report unavailable' in out
+
+    def test_feedback_returned_during_grading_is_not_overwritten(self, tmp_path, capsys):
+        """A review that returns feedback while the model is grading keeps its sent flag when assess saves."""
+        path = tmp_path / 'quiz3_999_followup_assessments.csv'
+        from canvigator_quiz import CanvigatorQuiz
+        pd.DataFrame([_assignment_assessment_row(student_id=2, student_name='Bo Diaz')],
+                     columns=CanvigatorQuiz.ASSESSMENTS_COLUMNS).to_csv(path, index=False)
+
+        def review_returns_bo(quiz):
+            df = pd.read_csv(path)
+            df.loc[df['student_id'] == 2, 'sent_assessment'] = 1
+            df.to_csv(path, index=False)
+
+        self._run(tmp_path, capsys, during_grading=review_returns_bo)
+        df = pd.read_csv(path).set_index('student_id')
+        assert df.loc[2, 'sent_assessment'] == 1
+        assert df.loc[1, 'result'] == 'fail'
+
+
+class TestDownloadSubmissionMedia:
+    """Submissions from canvasapi carry attachments as File objects, not dicts."""
+
+    def test_draw_attachment_from_canvasapi_is_downloaded(self, tmp_path):
+        """A drawing on a real canvasapi Submission is downloaded and its path recorded."""
+        import canvigator_followup as cf
+        from canvasapi.submission import Submission
+        data_path = tmp_path / 'course'
+        replies_dir = data_path / 'replies'
+        replies_dir.mkdir(parents=True)
+        quiz = _bare_quiz(data_path)
+        sub = Submission(MagicMock(), {'id': 5, 'user_id': 1, 'attempt': 1, 'attachments': [
+            {'id': 9, 'url': 'http://canvas/files/9', 'filename': 'heap.jpg', 'display_name': 'heap.jpg',
+             'content-type': 'image/jpeg'}]})
+        reply = {'student_id': 1, 'student_name': 'Ann Lee', 'question_id': 200, 'question_mode': 'draw', 'attempt': 1}
+        with patch('canvigator_quiz.requests.get', return_value=MagicMock(content=b'jpegbytes')) as get, \
+                patch('canvigator_quiz._resizeImageInPlace'):
+            cf._downloadSubmissionMedia(quiz, sub, reply, replies_dir)
+        assert get.call_args[0][0] == 'http://canvas/files/9'
+        assert reply['media_path'] == 'course/replies/quiz3_999_1_Ann_200_a1.jpg'
+        assert (replies_dir / 'quiz3_999_1_Ann_200_a1.jpg').read_bytes() == b'jpegbytes'
+
+    def test_audio_attachment_fallback_reads_canvasapi_files(self):
+        """With no media_comment, an audio attachment on a real canvasapi Submission is found."""
+        from canvasapi.submission import Submission
+        from canvigator_assignment import CanvigatorAssignment
+        sub = Submission(MagicMock(), {'id': 5, 'attachments': [
+            {'id': 9, 'url': 'http://canvas/files/9', 'filename': 'answer.m4a', 'content-type': 'audio/mp4'}]})
+        assert CanvigatorAssignment._extractAudioUrl(sub) == ('http://canvas/files/9', '.m4a')
 
 
 class TestAssessRepliesShowVerdicts:
@@ -5721,9 +5841,9 @@ class TestReviewReturnFollowUpAssignment:
         assert pd.notna(row['reviewed_at']) and pd.notna(row['sent_at'])
 
     def test_disagreement_keeps_instructor_verdict_and_requires_new_feedback(self, tmp_path, capsys):
-        """On disagreement the instructor's verdict is the default, the draft must be rewritten, credit is still full."""
+        """On disagreement the instructor settles the result, the draft must be rewritten, credit is still full."""
         quiz, sub = self._setup(tmp_path)
-        events, row = self._review(quiz, ['f', '', '', 'y'], capsys)
+        events, row = self._review(quiz, ['f', 'f', '', 'y'], capsys)
         prompts = [e[1] for e in events if e[0] == 'prompt']
         assert 'Final result' in prompts[1] and 'press Enter to write it' in prompts[2]
         assert (row['instructor_result'], row['result'], row['llm_result']) == ('fail', 'fail', 'pass')
@@ -5782,6 +5902,22 @@ class TestReviewReturnFollowUpAssignment:
         assert (row['result'], row['feedback'], row['llm_result']) == ('pass', 'My own feedback.', 'error')
         assert sub.edit.call_args.kwargs['submission'] == {'posted_grade': 2}
 
+    def test_resumed_disagreement_must_be_settled_explicitly(self, tmp_path, capsys):
+        """On resume, Enter at the settle prompt asks again instead of reverting to the blind verdict."""
+        resumed = _assignment_assessment_row(instructor_result='fail', result='pass', feedback='Edited by me.')
+        quiz, sub = self._setup(tmp_path, row=resumed)
+        events, row = self._review(quiz, ['n', '', 'p', '', 'y'], capsys)
+        settle = [e[1] for e in events if e[0] == 'prompt' and 'Final result' in e[1]]
+        assert len(settle) == 2
+        assert (row['instructor_result'], row['result'], row['feedback']) == ('fail', 'pass', 'Edited by me.')
+        assert 'Nice work!' in sub.edit.call_args.kwargs['comment']['text_comment']
+
+    def test_comment_is_attached_to_the_reviewed_attempt(self, tmp_path, capsys):
+        """The comment names the reviewed attempt, so a resubmission mid-review doesn't receive it."""
+        quiz, sub = self._setup(tmp_path, row=_assignment_assessment_row(attempt=3), canvas_attempt=3)
+        self._review(quiz, ['p', '', 'y'], capsys)
+        assert sub.edit.call_args.kwargs['comment']['attempt'] == 3
+
     def test_resubmitted_attempt_is_not_reviewed(self, tmp_path, capsys):
         """A row for attempt 1 is held back when Canvas shows attempt 2, pending a new assessment."""
         quiz, sub = self._setup(tmp_path, canvas_attempt=2)
@@ -5794,6 +5930,37 @@ class TestReviewReturnFollowUpAssignment:
         quiz, sub = self._setup(tmp_path, row=_assignment_assessment_row(assignment_id='', attempt='', conversation_id=5))
         events, _ = self._review(quiz, [], capsys)
         assert events == [] and not sub.edit.called
+
+
+class TestReviewPrompts:
+    """The settle and feedback prompts act only on answers they recognize."""
+
+    def test_settle_prompt_honors_typed_words_and_reprompts_on_anything_else(self):
+        """Typing 'fail' records fail; Enter or junk asks again."""
+        import canvigator_followup as cf
+        with patch('builtins.input', side_effect=['fail']):
+            assert cf._reconcileResult('pass', 'fail') == 'fail'
+        with patch('builtins.input', side_effect=['', 'x', 'p']) as prompt:
+            assert cf._reconcileResult('fail', 'pass') == 'pass'
+        assert prompt.call_count == 3
+
+    def test_settle_prompt_is_skipped_without_a_pass_fail_disagreement(self):
+        """Agreement, or a 'no usable submission' verdict, needs no settling."""
+        import canvigator_followup as cf
+        with patch('builtins.input') as prompt:
+            assert cf._reconcileResult('pass', 'pass') == 'pass'
+            assert cf._reconcileResult('no_media', 'pass') == 'no_media'
+        assert not prompt.called
+
+    def test_feedback_prompt_edit_word_opens_the_editor(self):
+        """Typing 'edit' opens the editor; junk asks again rather than accepting the draft."""
+        import canvigator_followup as cf
+        row = {'feedback': 'Draft.', 'llm_feedback': 'Draft.', 'llm_result': 'pass'}
+        with patch('builtins.input', side_effect=['edit']), patch.object(cf, '_editText', return_value='Mine.'):
+            assert cf._chooseFeedback(row, 'pass') == 'Mine.'
+        with patch('builtins.input', side_effect=['?', 'a']) as prompt:
+            assert cf._chooseFeedback(row, 'pass') == 'Draft.'
+        assert prompt.call_count == 2
 
 
 class TestPresentSubmission:

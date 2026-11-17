@@ -1301,6 +1301,14 @@ class CanvigatorQuiz:
         question_mode = oe_row.get('question_mode', 'explain')
         open_ended_text = oe_row['open_ended_question']
 
+        # One delivery method per question: both share the assessments CSV, keyed by (student, question).
+        from canvigator_followup import _loadManifest
+        manifest = _loadManifest(self)
+        if (manifest['question_id'].astype(int) == int(selected_qid)).any():
+            print(f"\nQ{position} already has a follow-up assignment (create-follow-up-assignment).")
+            print("Use one delivery method per follow-up question; nothing was sent.")
+            return
+
         print(f"\nSelected follow-up: Q{position} — {keywords}")
         print(f"  Mode: {question_mode}")
         print(f"  Follow-up: {open_ended_text[:120]}{'...' if len(open_ended_text) > 120 else ''}")

@@ -548,7 +548,9 @@ TASK_HELP = {
             "selected in the CSV, you are asked which one to send. Reuses the "
             "quiz's submission CSVs if they were written within the last 10 "
             "minutes (e.g. just after a send-quiz-reminder run) instead of "
-            "refetching from Canvas. Message delivery, step 1 of 3; the "
+            "refetching from Canvas. A question that already has a follow-up "
+            "assignment is refused (one delivery method per question). "
+            "Message delivery, step 1 of 3; the "
             "assignment-delivery equivalent is create-follow-up-assignment."
         ),
         'prerequisites': [
@@ -647,7 +649,10 @@ TASK_HELP = {
             "The instructor edits the 'feedback' column between assess-replies "
             "and this task — feedback already sent is never overwritten. Rows "
             "with result 'error' have empty feedback and are not sent until "
-            "you write feedback for them. Message delivery, step 3 of 3; the "
+            "you write feedback for them. Rows that belong to a follow-up "
+            "assignment (non-empty assignment_id) are skipped; those are "
+            "returned by review-return-follow-up-assignment. "
+            "Message delivery, step 3 of 3; the "
             "assignment-delivery equivalent is "
             "review-return-follow-up-assignment."
         ),
@@ -687,8 +692,11 @@ TASK_HELP = {
             "question accepts only a media recording; a 'draw' question "
             "accepts only an uploaded JPG, PNG, or PDF. Prompts for "
             "points_possible (default 1), an optional ISO due_at, and a "
-            "publish-now y/N (default unpublished). One assignment per "
-            "question: a question that already has one is not given a second. "
+            "publish-now y/N (default unpublished), shows the assignment, and "
+            "asks y/N before creating it. One assignment per "
+            "question: a question that already has one is not given a second, "
+            "and a question already sent by send-follow-up-question is "
+            "refused (one delivery method per question). "
             "Assignment delivery, step 1 of 3; the message-delivery "
             "equivalent is send-follow-up-question."
         ),
@@ -734,7 +742,10 @@ TASK_HELP = {
             "newer attempt replaces an unreturned row, or becomes a new row "
             "when feedback was already returned. Each row also records the "
             "student's result on the original quiz question at assessment "
-            "time (quiz_status: missed / correct / no_attempt). This is the "
+            "time (quiz_status: missed / correct / no_attempt, or unknown if "
+            "the quiz results could not be fetched). A submission with no "
+            "usable media is retried on the next run until you have judged "
+            "it. This is the "
             "slow step — it can run unattended. Assignment delivery, step 2 "
             "of 3; the message-delivery equivalent is assess-replies."
         ),
@@ -764,8 +775,7 @@ TASK_HELP = {
             "python canvigator.py --crn 12345 -M assess-follow-up-assignment",
         ],
         'run_before': ['create-follow-up-assignment'],
-        'run_after': ['review-return-follow-up-assignment',
-                      'prep-class-digest'],
+        'run_after': ['review-return-follow-up-assignment'],
     },
 
     'review-return-follow-up-assignment': {
@@ -776,12 +786,15 @@ TASK_HELP = {
             "usable submission — which is saved as instructor_result. Only "
             "then does it show the transcript, the local model's verdict, and "
             "its draft feedback. If you and the model disagree you choose the "
-            "final result; you then accept or edit the feedback (in $EDITOR) "
+            "final result (p or f; there is no default); you then accept or "
+            "edit the feedback (in $EDITOR) "
             "and confirm [y/N] before it is posted as a submission comment. "
             "Credit is for completion: a real submission earns full points "
             "whether it passed or failed; 'no usable submission' gets the "
-            "comment and no grade. Progress is saved after every step, so you "
-            "can quit and resume. With --dry-run the whole review runs and is "
+            "comment and no grade. The comment is attached to the attempt "
+            "you reviewed. Progress is saved after every step, so you "
+            "can quit ([q] at the verdict prompt, Ctrl-C elsewhere) and "
+            "resume. With --dry-run the whole review runs and is "
             "saved, but nothing is posted to Canvas. There is no --send-all: "
             "every submission must be reviewed. Assignment delivery, step 3 "
             "of 3; the message-delivery equivalent is "

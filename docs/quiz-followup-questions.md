@@ -53,7 +53,7 @@ Then deliver the selected follow-up question in one of two ways:
 | **Your review** | Edit the model's verdict and feedback in the CSV | Give your own verdict on each submission before the model's is shown |
 | **Feedback returns as** | A reply on the conversation thread | A submission comment, with completion credit in the gradebook |
 
-Use one delivery method per follow-up question. Both write to the same `*_followup_assessments.csv`, keyed by student and question.
+Use one delivery method per follow-up question. Both write to the same `*_followup_assessments.csv`, keyed by student and question, so `create-follow-up-assignment` refuses a question already sent by `send-follow-up-question`, and vice versa.
 
 ### Deliver as a Canvas message
 
@@ -447,7 +447,10 @@ conversation thread (`Conversation.add_message`). On success, sets
 `sent_assessment=1` and stamps `sent_at`, then rewrites the file in place. The
 `--dry-run` flag previews what would be sent without touching Canvas (and
 leaves `sent_assessment=0`). Rows with `result=error` have empty feedback, so
-they are not sent until you write feedback for them.
+they are not sent until you write feedback for them. Rows that belong to a
+follow-up assignment (non-empty `assignment_id`) are skipped; those are
+returned by
+[`review-return-follow-up-assignment`](#review-return-follow-up-assignment).
 
 The expected workflow is to **edit the `feedback` column** between
 `assess-replies` and `send-follow-up-assessments` for any rows where the LLM
@@ -489,10 +492,15 @@ The task prompts for `points_possible` (default 1), an optional ISO `due_at`,
 and whether to publish immediately (default unpublished, so you can review —
 and edit — the assignment on Canvas first).
 
+It then shows the assignment's name, settings, and description and asks
+`Create this assignment on Canvas? [y/N]` before creating it.
+
 There is one assignment per follow-up question. If the selected question
 already has one, the task prints its URL and creates nothing. To replace an
 assignment, delete it on Canvas and remove its row from
-`*_followup_assignments.csv`.
+`*_followup_assignments.csv`. A question already sent as a Canvas message by
+`send-follow-up-question` is refused, since both methods share the
+assessments CSV.
 
 **Before running:** `get-quiz-questions --tag` and then
 `generate-follow-up-questions` must have been run for the same quiz.
@@ -536,10 +544,14 @@ Each row also records `quiz_status` — the student's result on the original
 quiz question on their latest quiz attempt at assessment time (`missed`,
 `correct`, or `no_attempt`) — so analyses can separate those groups even
 though everyone received the same assignment. The quiz's submission CSVs are
-refreshed for this (or reused when fetched in the last 10 minutes).
+refreshed for this (or reused when fetched in the last 10 minutes). If the
+quiz results can't be fetched, the assessments are still saved, with
+`quiz_status=unknown`.
 
 Re-running is safe: an attempt that has already been assessed is not graded
-again (unless that assessment ended in `result=error`). A newer attempt
+again, unless that assessment ended in `result=error` or `result=no_media`
+(e.g. a failed download) and you have not yet given your verdict on it in
+the review. A newer attempt
 replaces a row that has not been returned yet, and is added as a new row when
 feedback on the earlier attempt was already returned.
 
@@ -584,14 +596,15 @@ feedback has not been returned yet. For each one, in this order:
 3. **The model's assessment.** The transcript (for `explain`), the model's
    verdict and confidence, and its draft feedback.
 4. **Reconciliation.** If you and the model both gave pass/fail and differ,
-   you choose the final `result` (Enter keeps yours). The model's verdict stays
-   in `llm_result`.
+   you choose the final `result` (`p` or `f`; there is no default, so a stray
+   Enter can't settle it). The model's verdict stays in `llm_result`.
 5. **Feedback.** Accept the draft or edit it in your editor (`$VISUAL` /
    `$EDITOR`, else `nano`). The editor opens without asking when there is no
    draft (`result=error` rows) or when the draft argues a different result
    than the final one.
 6. **Return.** The exact comment and grade are shown, and `[y/N]` (default
-   no) posts them: the feedback as a submission comment, and the grade.
+   no) posts them: the feedback as a submission comment on the attempt you
+   reviewed, and the grade.
 
 Credit is for completion: a real submission earns the assignment's full
 `points_possible` whether the final result is pass or fail. A submission you
@@ -602,8 +615,8 @@ Because `instructor_result` is recorded before the model's verdict is shown,
 comparing it with `llm_result` gives an instructor–model agreement measure
 that is not anchored on the model.
 
-Progress is written to the CSV after every step, so you can quit at any
-prompt and resume later. On a later run, a submission that already has your
+Progress is written to the CSV after every step, so you can quit (`[q]` at
+the verdict prompt, Ctrl-C at any other) and resume later. On a later run, a submission that already has your
 verdict resumes at step 3 (it offers to replay first). A submission whose
 student has resubmitted since it was assessed is held back, with a note to run
 `assess-follow-up-assignment` again.

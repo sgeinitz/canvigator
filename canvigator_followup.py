@@ -143,9 +143,12 @@ def _buildAssignmentPayload(quiz_title, position, keywords, question_text, quest
     return payload
 
 
-def _printPayloadPreview(payload):
+def _printPayloadPreview(payload, dry_run):
     """Print what the assignment would look like on Canvas."""
-    print("\n=== DRY RUN MODE - No assignment will be created on Canvas ===\n")
+    if dry_run:
+        print("\n=== DRY RUN MODE - No assignment will be created on Canvas ===\n")
+    else:
+        print("\nAssignment to create on Canvas:\n")
     print(f"  Name:             {payload['name']}")
     print(f"  Submission types: {', '.join(payload['submission_types'])}")
     if 'allowed_extensions' in payload:
@@ -190,6 +193,11 @@ def createFollowUpAssignment(quiz, dry_run=False):
         print(f"\nQ{position} already has a follow-up assignment: {existing.iloc[0]['html_url']}")
         print(f"(To replace it, delete it on Canvas and remove its row from {_manifestPath(quiz).name}.)")
         return
+    # One delivery method per question: both share the assessments CSV, keyed by (student, question).
+    if any(qid == int(question_id) for _sid, qid in quiz._buildConversationLookup()):
+        print(f"\nQ{position} was already sent as a Canvas message (send-follow-up-question).")
+        print("Use one delivery method per follow-up question; no assignment was created.")
+        return
 
     print(f"\nSelected follow-up: Q{position} — {keywords}")
     print(f"  Mode: {question_mode}")
@@ -202,8 +210,11 @@ def createFollowUpAssignment(quiz, dry_run=False):
         quiz.canvas_quiz.title, position, keywords, question_text, question_mode,
         points_possible, due_at, published,
     )
+    _printPayloadPreview(payload, dry_run)
     if dry_run:
-        _printPayloadPreview(payload)
+        return
+    if not _promptYesNo("\nCreate this assignment on Canvas?", default=False):
+        print("Not created.")
         return
 
     assignment = quiz.canvas_course.canvas_course.create_assignment(payload)
@@ -235,29 +246,37 @@ def createFollowUpAssignment(quiz, dry_run=False):
 # ---------------------------------------------------------------------------
 
 def _submittedAttempts(assignment):
-    """Return the assignment's submissions that carry an actual attempt (Canvas lists every student)."""
+    """Return the assignment's submissions that carry an actual attempt (Canvas lists every student).
+
+    Each carries its ``user`` (a dict with ``name``), for submitters missing
+    from the course roster, such as the Test Student.
+    """
     return [
-        s for s in assignment.get_submissions()
+        s for s in assignment.get_submissions(include=['user'])
         if getattr(s, 'attempt', None) and getattr(s, 'workflow_state', '') in ('submitted', 'graded')
     ]
 
 
-def _selectSubmissionsToAssess(replies, existing_index):
+def _selectSubmissionsToAssess(replies, existing_index, assignment_id):
     """Return the submissions that need (re)grading, printing what was skipped.
 
-    Skipped: an attempt already assessed — whether its feedback was returned
-    or is still waiting for review — unless that assessment ended in a model
-    error. A newer attempt is always assessed.
+    Skipped: an attempt of this assignment already assessed — whether its
+    feedback was returned or is still waiting for review — unless that
+    assessment ended in a model error or found no usable media (a failed
+    download is retried) and the instructor has not judged it yet. A newer
+    attempt, or a row from another assignment, never counts as assessed.
     """
     to_assess = []
     n_returned = n_unchanged = 0
     for r in replies:
         existing = existing_index.get((int(r['student_id']), int(r['question_id'])))
-        if existing is not None and _normId(existing.get('attempt')) == _normId(r['attempt']):
+        if (existing is not None and _normId(existing.get('assignment_id')) == str(assignment_id) and
+                _normId(existing.get('attempt')) == _normId(r['attempt'])):
             if int(existing.get('sent_assessment', 0) or 0) == 1:
                 n_returned += 1
                 continue
-            if str(existing.get('result', '')) != 'error':
+            retry = str(existing.get('result', '')) in ('error', 'no_media') and not _cell(existing, 'instructor_result')
+            if not retry:
                 n_unchanged += 1
                 continue
         to_assess.append(r)
@@ -272,7 +291,9 @@ def _downloadSubmissionMedia(quiz, submission, reply, replies_dir):
     """Download one submission's recording or drawing and set the reply's media paths in place."""
     msg = {'id': f"a{reply['attempt']}"}
     if reply['question_mode'] == 'draw':
-        msg['attachments'] = getattr(submission, 'attachments', None) or []
+        # canvasapi wraps attachments in File objects; the downloader reads dicts.
+        attachments = getattr(submission, 'attachments', None) or []
+        msg['attachments'] = [a if isinstance(a, dict) else vars(a) for a in attachments]
     else:
         url, _ext = CanvigatorAssignment._extractAudioUrl(submission)
         if url:
@@ -311,7 +332,8 @@ def assessFollowUpAssignment(quiz, chosen_model=None, save_transcript=False):
     not re-graded; a newer attempt replaces an unreturned row, or is added as
     a new row when feedback on the earlier one was already returned. Each row
     records the student's status on the original quiz question at assessment
-    time (``missed`` / ``correct`` / ``no_attempt``).
+    time (``missed`` / ``correct`` / ``no_attempt``; ``unknown`` when the
+    quiz results could not be fetched).
 
     Nothing is written to Canvas, and no pass/fail is printed: the instructor
     judges each submission in review-return-follow-up-assignment before seeing
@@ -341,7 +363,7 @@ def assessFollowUpAssignment(quiz, chosen_model=None, save_transcript=False):
     names = {s['id']: s.get('name', '') for s in quiz.canvas_course.students}
     replies = [{
         'student_id': sid,
-        'student_name': names.get(sid) or f"id={sid}",
+        'student_name': names.get(sid) or (getattr(sub, 'user', None) or {}).get('name', ''),
         'question_id': question_id,
         'question_mode': question_mode,
         'attempt': int(sub.attempt),
@@ -349,7 +371,7 @@ def assessFollowUpAssignment(quiz, chosen_model=None, save_transcript=False):
     } for sid, sub in submissions.items()]
 
     existing_df = quiz._loadOrMigrateAssessments()
-    to_assess = _selectSubmissionsToAssess(replies, quiz._indexAssessments(existing_df))
+    to_assess = _selectSubmissionsToAssess(replies, quiz._indexAssessments(existing_df), assignment_id)
     if not to_assess:
         print("  Nothing new to assess.")
         return
@@ -361,7 +383,12 @@ def assessFollowUpAssignment(quiz, chosen_model=None, save_transcript=False):
         _downloadSubmissionMedia(quiz, submissions[reply['student_id']], reply, replies_dir)
 
     print("\nChecking each student's result on the original quiz question...")
-    quiz_status = _quizStatusByStudent(quiz, question_id, question_info)
+    try:
+        quiz_status, default_status = _quizStatusByStudent(quiz, question_id, question_info), 'no_attempt'
+    except Exception as e:  # quiz_status is informational; don't lose the downloads and grading over it
+        logger.warning(f"Quiz results unavailable for question_id {question_id}: {e}")
+        print(f"  Could not get the quiz results ({e}); quiz_status will be recorded as 'unknown'.")
+        quiz_status, default_status = {}, 'unknown'
 
     by_student = {r['student_id']: dict(r) for r in to_assess}  # keeps the relative media paths
     quiz._absolutizeMediaPaths(to_assess)
@@ -380,7 +407,7 @@ def assessFollowUpAssignment(quiz, chosen_model=None, save_transcript=False):
             'assignment_id': assignment_id,
             'attempt': reply['attempt'],
             'submitted_at': reply['submitted_at'],
-            'quiz_status': quiz_status.get(int(res['student_id']), 'no_attempt'),
+            'quiz_status': quiz_status.get(int(res['student_id']), default_status),
             'media_path': reply['media_path'],
             'sent_assessment': 0,
             'llm_result': res['result'],
@@ -388,7 +415,8 @@ def assessFollowUpAssignment(quiz, chosen_model=None, save_transcript=False):
             'llm_feedback': res['feedback'],
         })
 
-    quiz._writeAssessmentsCsv(quiz._mergeAssessments(existing_df, results))
+    # Merge into the file as it is now: a review run during grading may have returned feedback since.
+    quiz._writeAssessmentsCsv(quiz._mergeAssessments(quiz._loadOrMigrateAssessments(), results))
     n_no_media = sum(1 for r in results if r['result'] == 'no_media')
     n_error = sum(1 for r in results if r['result'] == 'error')
     print(f"\n  Assessed this run: {len(results)} ({len(results) - n_no_media - n_error} graded by the model, "
@@ -499,13 +527,18 @@ def _revealModelAssessment(row):
 def _reconcileResult(blind, llm_result):
     """Return the final result given the instructor's blind verdict and the model's.
 
-    The instructor is asked only when both gave pass/fail and they differ;
-    otherwise the instructor's verdict stands.
+    The instructor is asked only when both gave pass/fail and they differ,
+    and must answer explicitly — there is no default, so a reflexive Enter or
+    a typo can't settle it; otherwise the instructor's verdict stands.
     """
     if blind in ('pass', 'fail') and llm_result in ('pass', 'fail') and blind != llm_result:
         print(f"\n  You said {blind}; the model said {llm_result}.")
-        choice = input(f"  Final result — [p]ass / [f]ail (Enter keeps yours: {blind}): ").strip().lower()
-        return {'p': 'pass', 'f': 'fail'}.get(choice, blind)
+        while True:
+            choice = input("  Final result — [p]ass / [f]ail: ").strip().lower()
+            if choice in ('p', 'pass'):
+                return 'pass'
+            if choice in ('f', 'fail'):
+                return 'fail'
     return blind
 
 
@@ -521,8 +554,12 @@ def _chooseFeedback(row, final_result):
         reason = "There is no draft feedback" if not draft else "The draft feedback was written for a different result"
         input(f"\n  {reason} — press Enter to write it in your editor: ")
         return _editText(draft)
-    choice = input("\n  Feedback — [a]ccept the draft / [e]dit it (Enter accepts): ").strip().lower()
-    return _editText(draft) if choice == 'e' else draft
+    while True:
+        choice = input("\n  Feedback — [a]ccept the draft / [e]dit it (Enter accepts): ").strip().lower()
+        if choice in ('', 'a', 'accept'):
+            return draft
+        if choice in ('e', 'edit'):
+            return _editText(draft)
 
 
 def _returnToStudent(submission, student_name, body, grade, points_possible, dry_run):
@@ -537,7 +574,8 @@ def _returnToStudent(submission, student_name, body, grade, points_possible, dry
     if input(f"  Return to {student_name}? [y/N]: ").strip().lower() != 'y':
         print(f"  Not returned to {student_name}; your review is saved.")
         return False
-    kwargs = {'comment': {'text_comment': body}}
+    # Pin the comment to the reviewed attempt, in case the student resubmits during the review.
+    kwargs = {'comment': {'text_comment': body, 'attempt': submission.attempt}}
     if grade is not None:
         kwargs['submission'] = {'posted_grade': grade}
     try:
