@@ -1982,12 +1982,17 @@ class CanvigatorQuiz:
 
     # result/confidence/feedback are the instructor-editable columns; the llm_*
     # columns are written once at assessment time and never edited, so draft vs.
-    # final feedback and instructor–LLM agreement stay measurable.
+    # final feedback and instructor–LLM agreement stay measurable. The columns
+    # from assignment_id on are filled only for follow-ups delivered as a Canvas
+    # assignment (canvigator_followup); conversation_id / message_id only for
+    # follow-ups delivered as a Canvas message.
     ASSESSMENTS_COLUMNS = [
         'student_id', 'student_name', 'question_id', 'question_mode',
         'conversation_id', 'message_id', 'result', 'confidence', 'feedback', 'transcript',
         'criteria_evaluations', 'assessed_at', 'sent_assessment', 'sent_at',
         'llm_result', 'llm_confidence', 'llm_feedback',
+        'assignment_id', 'attempt', 'submitted_at', 'quiz_status', 'media_path',
+        'instructor_result', 'reviewed_at',
     ]
 
     def _assessmentsPath(self):
@@ -2210,11 +2215,14 @@ class CanvigatorQuiz:
         Returns a list of ``(row_index, conversation_id, row_dict)`` tuples,
         one per row with ``sent_assessment=0``, non-empty ``feedback``, and a
         resolvable ``conversation_id`` (from the row itself or the manifest
-        lookup as a fallback).
+        lookup as a fallback). Rows for a follow-up assignment are left to
+        review-return-follow-up-assignment.
         """
         to_send = []
         for idx, row in df.iterrows():
             if int(row.get('sent_assessment', 0) or 0) == 1:
+                continue
+            if _normId(row.get('assignment_id')):
                 continue
             feedback = row.get('feedback', '')
             if pd.isna(feedback) or not str(feedback).strip():

@@ -266,7 +266,9 @@ TASK_HELP = {
             "*_questions_w_tags_*.csv so untagged and tagged exports do not "
             "overwrite each other. The 'position' column is a 1..N enumeration "
             "in the order Canvas returns the questions, which is what students "
-            "see."
+            "see. With --tag, this is the first step for follow-up questions, "
+            "whichever way they are delivered (as a Canvas message or as a "
+            "Canvas assignment)."
         ),
         'prerequisites': [
             "With --tag: OLLAMA_API_KEY must be set in set_env.sh (cloud "
@@ -288,7 +290,8 @@ TASK_HELP = {
         'run_before': [],
         'run_after': [
             'generate-follow-up-questions', 'send-quiz-reminder',
-            'send-follow-up-question', 'analyze-media-recordings',
+            'send-follow-up-question', 'create-follow-up-assignment',
+            'analyze-media-recordings',
         ],
     },
 
@@ -455,7 +458,12 @@ TASK_HELP = {
             "also drafts a structured rubric, an assessment guide, and "
             "pass / fail exemplars. Output goes to *_open_ended_*.csv with "
             "selected_question=0 — the instructor reviews offline and sets "
-            "exactly one row per group to selected_question=1."
+            "exactly one row per group to selected_question=1. This step is "
+            "shared by both delivery methods: next, deliver the selected "
+            "question either with send-follow-up-question (a Canvas message "
+            "to each student, worded by whether they missed the original "
+            "question) or with create-follow-up-assignment (one Canvas "
+            "assignment asking every student the same question)."
         ),
         'prerequisites': [
             "get-quiz-questions --tag must have produced "
@@ -477,7 +485,7 @@ TASK_HELP = {
             "python canvigator.py --crn 12345 generate-follow-up-questions",
         ],
         'run_before': ['get-quiz-questions'],
-        'run_after': ['send-follow-up-question'],
+        'run_after': ['send-follow-up-question', 'create-follow-up-assignment'],
     },
 
     'send-quiz-reminder': {
@@ -540,7 +548,8 @@ TASK_HELP = {
             "selected in the CSV, you are asked which one to send. Reuses the "
             "quiz's submission CSVs if they were written within the last 10 "
             "minutes (e.g. just after a send-quiz-reminder run) instead of "
-            "refetching from Canvas."
+            "refetching from Canvas. Message delivery, step 1 of 3; the "
+            "assignment-delivery equivalent is create-follow-up-assignment."
         ),
         'prerequisites': [
             "get-quiz-questions --tag must have produced "
@@ -591,7 +600,8 @@ TASK_HELP = {
             "unsent edits survive re-runs; sent rows are preserved verbatim, "
             "and a newer reply after sent feedback is assessed as a new row. "
             "llm_result / llm_confidence / llm_feedback keep the model's "
-            "original verdict."
+            "original verdict. Message delivery, step 2 of 3; the "
+            "assignment-delivery equivalent is assess-follow-up-assignment."
         ),
         'prerequisites': [
             "send-follow-up-question must have produced "
@@ -637,7 +647,9 @@ TASK_HELP = {
             "The instructor edits the 'feedback' column between assess-replies "
             "and this task — feedback already sent is never overwritten. Rows "
             "with result 'error' have empty feedback and are not sent until "
-            "you write feedback for them."
+            "you write feedback for them. Message delivery, step 3 of 3; the "
+            "assignment-delivery equivalent is "
+            "review-return-follow-up-assignment."
         ),
         'prerequisites': [
             "assess-replies must have produced "
@@ -664,6 +676,146 @@ TASK_HELP = {
         ],
         'run_before': ['assess-replies'],
         'run_after': [],
+    },
+
+    'create-follow-up-assignment': {
+        'description': (
+            "Create a Canvas assignment that asks every student in the course "
+            "the instructor-selected open-ended follow-up question (the row "
+            "with selected_question=1 in *_open_ended_*.csv; if several "
+            "questions are selected you are asked which one). An 'explain' "
+            "question accepts only a media recording; a 'draw' question "
+            "accepts only an uploaded JPG, PNG, or PDF. Prompts for "
+            "points_possible (default 1), an optional ISO due_at, and a "
+            "publish-now y/N (default unpublished). One assignment per "
+            "question: a question that already has one is not given a second. "
+            "Assignment delivery, step 1 of 3; the message-delivery "
+            "equivalent is send-follow-up-question."
+        ),
+        'prerequisites': [
+            "get-quiz-questions --tag must have produced "
+            "*_questions_w_tags_*.csv for the same quiz.",
+            "generate-follow-up-questions must have produced *_open_ended_*"
+            ".csv, with selected_question=1 on the question to use.",
+        ],
+        'inputs': [
+            "Canvas quiz (selected interactively or via --crn).",
+            "data/<course>/quiz<id>_questions_w_tags_*.csv",
+            "data/<course>/quiz<id>_open_ended_*.csv",
+            "Instructor input at the prompt.",
+        ],
+        'outputs': [
+            "Canvas: a new assignment (unpublished by default; skipped in "
+            "--dry-run).",
+            "data/<course>/quiz<id>_followup_assignments.csv (persistent; one "
+            "row per assignment created, read by the assess and review tasks).",
+        ],
+        'flags': ['--dry-run'],
+        'examples': [
+            "python canvigator.py --crn 12345 --dry-run "
+            "create-follow-up-assignment",
+            "python canvigator.py --crn 12345 create-follow-up-assignment",
+        ],
+        'run_before': ['generate-follow-up-questions'],
+        'run_after': ['assess-follow-up-assignment',
+                      'review-return-follow-up-assignment'],
+    },
+
+    'assess-follow-up-assignment': {
+        'description': (
+            "Download each student's latest submission to a follow-up "
+            "assignment and assess it with a local LLM, exactly as "
+            "assess-replies does (transcribe + grade for 'explain', grade "
+            "the image for 'draw'; N=3 runs, majority-voted). Nothing is "
+            "written to Canvas and no pass/fail is printed, so that your own "
+            "verdict in review-return-follow-up-assignment is made before you "
+            "see the model's — do not open the assessments CSV until after "
+            "that review. An attempt already assessed is not re-graded; a "
+            "newer attempt replaces an unreturned row, or becomes a new row "
+            "when feedback was already returned. Each row also records the "
+            "student's result on the original quiz question at assessment "
+            "time (quiz_status: missed / correct / no_attempt). This is the "
+            "slow step — it can run unattended. Assignment delivery, step 2 "
+            "of 3; the message-delivery equivalent is assess-replies."
+        ),
+        'prerequisites': [
+            "create-follow-up-assignment must have produced "
+            "*_followup_assignments.csv.",
+            "ffmpeg installed and on PATH (for 'explain' recordings).",
+            "Local Ollama running with OLLAMA_MODEL (default gemma4:31b) and "
+            "OLLAMA_AUDIO_MODEL (default gemma4:e4b) available.",
+        ],
+        'inputs': [
+            "Canvas quiz (selected interactively or via --crn), its "
+            "follow-up assignment's submissions, and the quiz's submissions.",
+            "data/<course>/quiz<id>_followup_assignments.csv",
+            "data/<course>/quiz<id>_open_ended_*.csv (provides the rubric, "
+            "assessment guide, and exemplars).",
+        ],
+        'outputs': [
+            "data/<course>/replies/ (downloaded recordings + drawings).",
+            "data/<course>/quiz<id>_followup_assessments.csv (persistent; "
+            "shared with assess-replies — these rows carry an assignment_id).",
+            "Fresh quiz submission CSVs (*_all_submissions_* etc.).",
+        ],
+        'flags': ['--choose-model', '--save-transcript'],
+        'examples': [
+            "python canvigator.py --crn 12345 assess-follow-up-assignment",
+            "python canvigator.py --crn 12345 -M assess-follow-up-assignment",
+        ],
+        'run_before': ['create-follow-up-assignment'],
+        'run_after': ['review-return-follow-up-assignment',
+                      'prep-class-digest'],
+    },
+
+    'review-return-follow-up-assignment': {
+        'description': (
+            "Review each assessed submission and return feedback. For every "
+            "unreturned assessment the task first plays the recording (or "
+            "opens the drawing) and asks for YOUR verdict — pass, fail, or no "
+            "usable submission — which is saved as instructor_result. Only "
+            "then does it show the transcript, the local model's verdict, and "
+            "its draft feedback. If you and the model disagree you choose the "
+            "final result; you then accept or edit the feedback (in $EDITOR) "
+            "and confirm [y/N] before it is posted as a submission comment. "
+            "Credit is for completion: a real submission earns full points "
+            "whether it passed or failed; 'no usable submission' gets the "
+            "comment and no grade. Progress is saved after every step, so you "
+            "can quit and resume. With --dry-run the whole review runs and is "
+            "saved, but nothing is posted to Canvas. There is no --send-all: "
+            "every submission must be reviewed. Assignment delivery, step 3 "
+            "of 3; the message-delivery equivalent is "
+            "send-follow-up-assessments."
+        ),
+        'prerequisites': [
+            "assess-follow-up-assignment must have added rows to "
+            "*_followup_assessments.csv.",
+            "The recordings/drawings it downloaded to data/<course>/replies/ "
+            "(run the review on the same machine).",
+        ],
+        'inputs': [
+            "Canvas quiz (selected interactively or via --crn) and its "
+            "follow-up assignment's submissions.",
+            "data/<course>/quiz<id>_followup_assignments.csv",
+            "data/<course>/quiz<id>_followup_assessments.csv",
+            "Instructor input at the prompt.",
+        ],
+        'outputs': [
+            "Canvas: a submission comment and a grade for each returned "
+            "submission (skipped in --dry-run).",
+            "data/<course>/quiz<id>_followup_assessments.csv (rewritten in "
+            "place: instructor_result, reviewed_at, result, feedback, "
+            "sent_assessment, sent_at).",
+        ],
+        'flags': ['--dry-run'],
+        'examples': [
+            "python canvigator.py --crn 12345 --dry-run "
+            "review-return-follow-up-assignment",
+            "python canvigator.py --crn 12345 "
+            "review-return-follow-up-assignment",
+        ],
+        'run_before': ['assess-follow-up-assignment'],
+        'run_after': ['prep-class-digest'],
     },
 
     'create-media-recording-assignment': {

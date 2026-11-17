@@ -1409,7 +1409,7 @@ def _parse_rubric_from_row(question_info_row):
 
 def assess_replies(replies, question_info_row, model=None, audio_model=None,
                    locked_examples=None, n_consistency=_SELF_CONSISTENCY_N,
-                   save_transcript=False):
+                   save_transcript=False, show_verdicts=True):
     """Assess a list of student reply dicts, returning a list of assessment result dicts.
 
     Each reply dict should have keys: student_id, student_name, question_id,
@@ -1422,6 +1422,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
     locked_examples (optional): list of dicts {response, result, feedback}
     drawn from previously instructor-approved assessments for the same question.
     Used as in-context few-shot calibration.
+
+    show_verdicts=False keeps each pass/fail off the screen, for the workflow
+    in which the instructor judges every submission before seeing the model's
+    verdict (assess-follow-up-assignment).
     """
     try:
         import ollama  # noqa: F401
@@ -1525,7 +1529,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
         from datetime import datetime, timezone
         assessed_at = datetime.now(timezone.utc).isoformat()
         elapsed_min = (time.monotonic() - student_start) / 60
-        verdict = "error — every grading run failed" if result == 'error' else f"{result} ({confidence})"
+        if result == 'error':
+            verdict = "error — every grading run failed"
+        else:
+            verdict = f"{result} ({confidence})" if show_verdicts else "assessed"
         print(f" {verdict}... processed in {elapsed_min:.1f}min")
 
         results.append({

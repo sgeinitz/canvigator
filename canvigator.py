@@ -12,12 +12,19 @@ task_groups = [
         ('award-bonus-partner-only', 'Award only the partner bonus points'),
         ('award-bonus-retake-only', 'Award only the retake bonus points'),
     ]),
-    ('Quiz Follow-up Questions', [
-        ('get-quiz-questions', 'Export quiz question content'),
+    ('Quiz Follow-up Questions: first steps (shared by both delivery methods)', [
+        ('get-quiz-questions', 'Export quiz question content (use --tag to add the topic tags the follow-up tasks need)'),
         ('generate-follow-up-questions', 'Generate open-ended questions from a tagged quiz (requires get-quiz-questions --tag)'),
-        ('send-follow-up-question', 'Send the instructor-selected open-ended follow-up question to students who missed it'),
-        ('assess-replies', 'Fetch the latest student follow-up replies from Canvas and assess them with a local LLM'),
+    ]),
+    ('Quiz Follow-up Questions: deliver as a Canvas message (worded per student)', [
+        ('send-follow-up-question', 'Send the instructor-selected follow-up question to every student who attempted the quiz'),
+        ('assess-replies', 'Fetch the students\' replies from Canvas and assess them with a local LLM'),
         ('send-follow-up-assessments', 'Send instructor-curated assessment feedback back to students (requires assess-replies)'),
+    ]),
+    ('Quiz Follow-up Questions: deliver as a Canvas assignment (same question for every student)', [
+        ('create-follow-up-assignment', 'Create a Canvas assignment for the instructor-selected follow-up question'),
+        ('assess-follow-up-assignment', 'Download the students\' submissions from Canvas and assess them with a local LLM'),
+        ('review-return-follow-up-assignment', 'Give your own verdict on each submission before the LLM\'s is shown, then return feedback + credit'),
     ]),
     ('Media Recording Check-Ins', [
         ('create-media-recording-assignment', 'Create a Canvas assignment that accepts only media_recording submissions'),
@@ -125,6 +132,26 @@ def _run_quiz_task(task, quiz, dry_run, tag, reply_window_days, send_all=False, 
     elif task == 'award-bonus-retake-only':
         quiz.detectRetakers()
         quiz.awardBonusPoints(dry_run=dry_run)
+
+
+FOLLOWUP_ASSIGNMENT_TASKS = (
+    'create-follow-up-assignment', 'assess-follow-up-assignment', 'review-return-follow-up-assignment',
+)
+
+
+def _run_followup_assignment_task(task, quiz, dry_run, choose_model=False, save_transcript=False):
+    """Dispatch the tasks that deliver a follow-up question as a Canvas assignment."""
+    import canvigator_followup as cf
+    if task == 'create-follow-up-assignment':
+        cf.createFollowUpAssignment(quiz, dry_run=dry_run)
+    elif task == 'assess-follow-up-assignment':
+        chosen_model = None
+        if choose_model:
+            import canvigator_llm
+            chosen_model = canvigator_llm.pickLocalGemmaModel()
+        cf.assessFollowUpAssignment(quiz, chosen_model=chosen_model, save_transcript=save_transcript)
+    else:
+        cf.reviewReturnFollowUpAssignment(quiz, dry_run=dry_run)
 
 
 # Normalize short flag aliases to their long form so the rest of the parser
@@ -425,11 +452,16 @@ else:
             raise ValueError("No published quizzes were found.")
     quiz_choice = cu.selectFromList(candidates, "quiz")
     print(f"\nSelected quiz: {quiz_choice.title}")
-    skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments')
+    skip = task in ('get-quiz-questions', 'assess-replies', 'send-follow-up-assessments') or task in FOLLOWUP_ASSIGNMENT_TASKS
     quiz = cq.CanvigatorQuiz(canvas, course, quiz_choice, canv_config, verbose=False, skip_student_data=skip)
-    _run_quiz_task(
-        task, quiz, dry_run, tag, reply_window_days,
-        send_all=send_all, choose_model=choose_model_flag, save_transcript=save_transcript_flag,
-    )
+    if task in FOLLOWUP_ASSIGNMENT_TASKS:
+        _run_followup_assignment_task(
+            task, quiz, dry_run, choose_model=choose_model_flag, save_transcript=save_transcript_flag,
+        )
+    else:
+        _run_quiz_task(
+            task, quiz, dry_run, tag, reply_window_days,
+            send_all=send_all, choose_model=choose_model_flag, save_transcript=save_transcript_flag,
+        )
 
 print("\n*** Done ***\n")

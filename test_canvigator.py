@@ -3989,6 +3989,16 @@ class TestPerTaskHelp:
         # A representative task name should appear.
         assert 'send-quiz-reminder' in stdout
 
+    def test_global_help_lists_follow_up_delivery_methods_as_sibling_groups(self):
+        """The shared follow-up tasks come first, then message and assignment delivery as equal groups."""
+        _, stdout, _ = self._run_cli('--help')
+        shared = stdout.index('Quiz Follow-up Questions: first steps (shared by both delivery methods)')
+        message = stdout.index('Quiz Follow-up Questions: deliver as a Canvas message')
+        assignment = stdout.index('Quiz Follow-up Questions: deliver as a Canvas assignment')
+        assert shared < stdout.index('  generate-follow-up-questions') < message
+        assert message < stdout.index('  send-follow-up-question') < assignment
+        assert assignment < stdout.index('  create-follow-up-assignment')
+
     def test_cli_dispatch_task_help(self):
         """`canvigator.py <task> --help` exits 0 and prints task-specific help."""
         rc, stdout, stderr = self._run_cli('create-pairs', '--help')
@@ -5406,3 +5416,435 @@ class TestReportWaitGaps:
         with patch('canvigator_course.cq.CanvigatorQuiz', side_effect=[requests.exceptions.ConnectionError('reset'), good]):
             course.getAllQuizzesAndSubmissions()
         assert good.getAllSubmissionsAndEvents.called
+
+
+# ---------------------------------------------------------------------------
+# canvigator_followup tests (follow-up questions delivered as a Canvas assignment)
+# ---------------------------------------------------------------------------
+
+def _followup_quiz(data_path, students=None):
+    """Return a bare quiz with tagged-question and open-ended CSVs on disk and a mocked Canvas course."""
+    quiz = _bare_quiz(data_path)
+    pd.DataFrame([
+        {'question_id': 100, 'position': 3, 'keywords': 'recursion', 'question_name': 'Q3', 'points_possible': 1.0},
+        {'question_id': 200, 'position': 5, 'keywords': 'heaps', 'question_name': 'Q5', 'points_possible': 1.0},
+    ]).to_csv(data_path / 'quiz3_999_questions_w_tags_20260101.csv', index=False)
+    pd.DataFrame([
+        {'selected_question': 1, 'question_id': 100, 'question_mode': 'explain',
+         'open_ended_question': 'Explain <base cases>.', 'keywords': 'recursion', 'original_question_text': 'orig'},
+        {'selected_question': 0, 'question_id': 200, 'question_mode': 'draw',
+         'open_ended_question': 'Draw a heap.', 'keywords': 'heaps', 'original_question_text': 'orig'},
+    ]).to_csv(data_path / 'quiz3_999_open_ended_20260101.csv', index=False)
+    quiz.canvas_course = SimpleNamespace(
+        canvas_course=MagicMock(),
+        students=students if students is not None else [{'id': 1, 'name': 'Ann Lee'}, {'id': 2, 'name': 'Bo Diaz'}],
+    )
+    return quiz
+
+
+def _write_assignments_manifest(data_path, rows=None):
+    """Write the follow-up assignments manifest (default: one 'explain' assignment, id 77, for question 100)."""
+    import canvigator_followup as cf
+    rows = rows or [{'assignment_id': 77, 'question_id': 100, 'position': 3, 'question_mode': 'explain',
+                     'keywords': 'recursion', 'open_ended_question': 'Explain <base cases>.',
+                     'points_possible': 2, 'html_url': 'http://canvas/a/77'}]
+    pd.DataFrame(rows, columns=cf.MANIFEST_COLUMNS).to_csv(data_path / 'quiz3_999_followup_assignments.csv', index=False)
+
+
+def _assignment_assessment_row(**overrides):
+    """Return one unreturned assignment-based assessment row (model said pass)."""
+    from canvigator_quiz import CanvigatorQuiz
+    row = {c: '' for c in CanvigatorQuiz.ASSESSMENTS_COLUMNS}
+    row.update({
+        'student_id': 1, 'student_name': 'Ann Lee', 'question_id': 100, 'question_mode': 'explain',
+        'result': 'pass', 'confidence': 'high', 'feedback': 'SECRETDRAFT good base case.',
+        'transcript': 'TRANSCRIPTTEXT', 'sent_assessment': 0,
+        'llm_result': 'pass', 'llm_confidence': 'high', 'llm_feedback': 'SECRETDRAFT good base case.',
+        'assignment_id': 77, 'attempt': 1, 'submitted_at': '2027-02-01T10:00:00Z',
+        'quiz_status': 'missed', 'media_path': '',
+    })
+    row.update(overrides)
+    return row
+
+
+class TestFollowUpAssignmentPayload:
+    """`_buildAssignmentPayload` restricts the submission type to what the question asks for."""
+
+    def test_explain_accepts_only_a_media_recording(self):
+        """An 'explain' question is a media-recording assignment named after the quiz and question."""
+        from canvigator_followup import _buildAssignmentPayload
+        payload = _buildAssignmentPayload('Quiz 3', 3, 'recursion', 'Explain <base cases>.', 'explain', 1, None, False)
+        assert payload['name'] == 'Quiz 3 - Q3 Follow-Up'
+        assert payload['submission_types'] == ['media_recording']
+        assert 'allowed_extensions' not in payload and 'due_at' not in payload
+        assert payload['published'] is False
+        assert 'Explain &lt;base cases&gt;.' in payload['description']
+
+    def test_draw_accepts_only_image_or_pdf_uploads(self):
+        """A 'draw' question is an upload assignment limited to image/PDF files; the due date is passed through."""
+        from canvigator_followup import _buildAssignmentPayload, DRAW_EXTENSIONS
+        payload = _buildAssignmentPayload('Quiz 3', 5, 'heaps', 'Draw a heap.', 'draw', 2, '2027-02-01T23:59:00', True)
+        assert payload['submission_types'] == ['online_upload']
+        assert payload['allowed_extensions'] == DRAW_EXTENSIONS
+        assert payload['due_at'] == '2027-02-01T23:59:00'
+        assert payload['points_possible'] == 2
+
+
+class TestCreateFollowUpAssignment:
+    """create-follow-up-assignment creates one assignment per question and records it."""
+
+    def _create(self, quiz, dry_run=False):
+        """Run the task with canned answers: 2 points, no due date, do not publish."""
+        import canvigator_followup as cf
+        quiz.canvas_course.canvas_course.create_assignment.return_value = SimpleNamespace(
+            id=77, name='Quiz 3 - Q3 Follow-Up', html_url='http://canvas/a/77')
+        with patch('builtins.input', side_effect=['2', '', 'n']):
+            cf.createFollowUpAssignment(quiz, dry_run=dry_run)
+
+    def test_creates_assignment_and_manifest_row(self, tmp_path):
+        """The selected question becomes an assignment, and the manifest records its id and mode."""
+        quiz = _followup_quiz(tmp_path)
+        self._create(quiz)
+        payload = quiz.canvas_course.canvas_course.create_assignment.call_args[0][0]
+        assert payload['submission_types'] == ['media_recording']
+        assert payload['points_possible'] == 2
+        manifest = pd.read_csv(tmp_path / 'quiz3_999_followup_assignments.csv')
+        assert manifest.iloc[0][['assignment_id', 'question_id', 'question_mode']].tolist() == [77, 100, 'explain']
+
+    def test_second_run_for_same_question_creates_nothing(self, tmp_path, capsys):
+        """A question that already has an assignment is not given another one."""
+        quiz = _followup_quiz(tmp_path)
+        self._create(quiz)
+        import canvigator_followup as cf
+        cf.createFollowUpAssignment(quiz)
+        assert quiz.canvas_course.canvas_course.create_assignment.call_count == 1
+        assert 'already has a follow-up assignment' in capsys.readouterr().out
+
+    def test_dry_run_previews_without_creating(self, tmp_path, capsys):
+        """--dry-run prints the assignment and touches neither Canvas nor the manifest."""
+        quiz = _followup_quiz(tmp_path)
+        self._create(quiz, dry_run=True)
+        assert not quiz.canvas_course.canvas_course.create_assignment.called
+        assert not (tmp_path / 'quiz3_999_followup_assignments.csv').exists()
+        assert 'Quiz 3 - Q3 Follow-Up' in capsys.readouterr().out
+
+
+class TestSelectSubmissionsToAssess:
+    """`_selectSubmissionsToAssess` grades each attempt once."""
+
+    def _select(self, existing, attempt=1):
+        """Run the selector for student 1 / question 100 against one existing row (or none)."""
+        from canvigator_followup import _selectSubmissionsToAssess
+        index = {(1, 100): existing} if existing else {}
+        return _selectSubmissionsToAssess([{'student_id': 1, 'question_id': 100, 'attempt': attempt}], index)
+
+    def test_new_submission_is_assessed(self):
+        """A student with no assessment yet is graded."""
+        assert len(self._select(None)) == 1
+
+    def test_same_attempt_is_not_regraded(self):
+        """An attempt already assessed is kept, whether or not its feedback was returned (CSV reads attempt as float)."""
+        assert self._select({'attempt': 1.0, 'sent_assessment': 0, 'result': 'pass'}) == []
+        assert self._select({'attempt': 1.0, 'sent_assessment': 1, 'result': 'fail'}) == []
+
+    def test_model_error_is_retried(self):
+        """An attempt whose assessment ended in a model error is graded again."""
+        assert len(self._select({'attempt': 1.0, 'sent_assessment': 0, 'result': 'error'})) == 1
+
+    def test_newer_attempt_is_assessed(self):
+        """A resubmission is graded even after feedback on the earlier attempt was returned."""
+        assert len(self._select({'attempt': 1.0, 'sent_assessment': 1, 'result': 'fail'}, attempt=2)) == 1
+
+
+class TestQuizStatusByStudent:
+    """`_quizStatusByStudent` reports each attempter's result on the original question."""
+
+    def test_missed_and_correct_from_latest_attempt(self, tmp_path):
+        """Status comes from the latest quiz attempt (the quiz report is fetched on demand); non-attempters are absent."""
+        import canvigator_followup as cf
+        quiz = _bare_quiz(tmp_path)
+        quiz.quiz_df = None
+        quiz.getQuizData = MagicMock(side_effect=lambda: setattr(quiz, 'quiz_df', pd.DataFrame()))
+        quiz._ensureFreshSubmissions = lambda: None
+        quiz.all_subs_by_question = pd.DataFrame([
+            {'id': 1, 'attempt': 1, 'question_id': 100, 'points': 0.0},
+            {'id': 1, 'attempt': 2, 'question_id': 100, 'points': 1.0},
+            {'id': 2, 'attempt': 1, 'question_id': 100, 'points': 0.0},
+        ])
+        status = cf._quizStatusByStudent(quiz, 100, {100: {'points_possible': 1.0}})
+        assert status == {1: 'correct', 2: 'missed'}
+        assert quiz.getQuizData.call_count == 1
+
+
+class TestAssessFollowUpAssignment:
+    """assess-follow-up-assignment grades the latest attempts without showing or sending anything."""
+
+    def _run(self, tmp_path, capsys):
+        """Assess one submitted attempt (student 1) and one never-submitted student; return (quiz, out, llm mock)."""
+        import canvigator_followup as cf
+        quiz = _followup_quiz(tmp_path)
+        _write_assignments_manifest(tmp_path)
+        assignment = MagicMock()
+        assignment.name = 'Quiz 3 - Q3 Follow-Up'
+        assignment.get_submissions.return_value = [
+            SimpleNamespace(user_id=1, attempt=2, workflow_state='submitted', submitted_at='2027-02-01T10:00:00Z',
+                            media_comment={'url': 'http://canvas/media', 'media_type': 'audio'}),
+            SimpleNamespace(user_id=2, attempt=None, workflow_state='unsubmitted', submitted_at=None),
+        ]
+        quiz.canvas_course.canvas_course.get_assignment.return_value = assignment
+        quiz._downloadReplyMedia = MagicMock(return_value=(None, 'course/replies/ann_a2.wav'))
+        llm_result = [{'student_id': 1, 'student_name': 'Ann Lee', 'question_id': 100, 'question_mode': 'explain',
+                       'result': 'fail', 'confidence': 'high', 'feedback': 'Missing the base case.',
+                       'transcript': 'um', 'criteria_evaluations': '', 'assessed_at': '2027-02-02T00:00:00+00:00'}]
+        with patch('canvigator_llm.assess_replies', return_value=llm_result) as llm, \
+                patch.object(cf, '_quizStatusByStudent', return_value={}):
+            cf.assessFollowUpAssignment(quiz)
+        return quiz, capsys.readouterr().out, llm
+
+    def test_row_records_attempt_status_media_and_model_verdict(self, tmp_path, capsys):
+        """The assessment row carries the assignment fields and freezes the model's verdict."""
+        self._run(tmp_path, capsys)
+        df = pd.read_csv(tmp_path / 'quiz3_999_followup_assessments.csv')
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert (row['assignment_id'], row['attempt'], row['sent_assessment']) == (77, 2, 0)
+        assert row['quiz_status'] == 'no_attempt'
+        assert row['media_path'] == 'course/replies/ann_a2.wav'
+        assert (row['result'], row['llm_result'], row['llm_feedback']) == ('fail', 'fail', 'Missing the base case.')
+        assert pd.isna(row['instructor_result'])
+
+    def test_verdicts_are_hidden_and_media_is_passed_by_absolute_path(self, tmp_path, capsys):
+        """The grader is told not to print verdicts, the summary gives none, and the audio path is absolute."""
+        quiz, out, llm = self._run(tmp_path, capsys)
+        assert llm.call_args.kwargs['show_verdicts'] is False
+        assert 'fail' not in out.lower() and 'Missing the base case' not in out
+        reply = llm.call_args[0][0][0]
+        assert reply['audio_path'] == str(tmp_path.parent / 'course/replies/ann_a2.wav')
+        assert quiz._downloadReplyMedia.call_args[0][0] == {'id': 'a2', 'media_comment': {'url': 'http://canvas/media'}}
+
+    def test_rerun_does_not_regrade_the_same_attempt(self, tmp_path, capsys):
+        """A second run with no new attempt calls the grader zero more times."""
+        import canvigator_followup as cf
+        quiz, _, _ = self._run(tmp_path, capsys)
+        with patch('canvigator_llm.assess_replies') as llm:
+            cf.assessFollowUpAssignment(quiz)
+        assert not llm.called
+        assert 'Nothing new to assess' in capsys.readouterr().out
+
+
+class TestAssessRepliesShowVerdicts:
+    """`assess_replies(show_verdicts=False)` keeps pass/fail off the screen."""
+
+    def _assess(self, tmp_path, monkeypatch, capsys, **kwargs):
+        """Grade one valid 'explain' reply with the model stubbed to 'pass (high)'; return stdout."""
+        import canvigator_llm
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: MagicMock())
+        monkeypatch.setattr(canvigator_llm, 'transcribe_audio', lambda *a, **k: 'a transcript')
+        monkeypatch.setattr(canvigator_llm, 'assess_explain', lambda *a, **k: ('pass', 'high', 'Good.', {}))
+        audio = tmp_path / 'a.wav'
+        audio.write_bytes(b'x' * 2048)
+        replies = [{'student_id': 1, 'student_name': 'Ann', 'question_id': 100, 'question_mode': 'explain',
+                    'audio_path': str(audio)}]
+        oe_row = {'keywords': 'k', 'open_ended_question': 'Explain', 'original_question_text': 'o',
+                  'question_mode': 'explain'}
+        results = canvigator_llm.assess_replies(replies, oe_row, **kwargs)
+        assert results[0]['result'] == 'pass'
+        return capsys.readouterr().out
+
+    def test_default_prints_the_verdict(self, tmp_path, monkeypatch, capsys):
+        """assess-replies still shows each verdict as before."""
+        assert 'pass (high)' in self._assess(tmp_path, monkeypatch, capsys)
+
+    def test_hidden_when_asked(self, tmp_path, monkeypatch, capsys):
+        """With show_verdicts=False the line says only that the reply was assessed."""
+        out = self._assess(tmp_path, monkeypatch, capsys, show_verdicts=False)
+        assert 'pass' not in out and 'assessed' in out
+
+
+class TestReviewReturnFollowUpAssignment:
+    """review-return-follow-up-assignment: submission first, own verdict second, the model's assessment last."""
+
+    def _setup(self, tmp_path, row=None, canvas_attempt=1):
+        """Write the manifest and one assessment row; return (quiz, the student's mocked Canvas submission)."""
+        data_path = tmp_path / 'course'
+        data_path.mkdir(parents=True)
+        quiz = _followup_quiz(data_path)
+        _write_assignments_manifest(data_path)
+        row = row or _assignment_assessment_row()
+        pd.DataFrame([row], columns=quiz.ASSESSMENTS_COLUMNS).to_csv(quiz._assessmentsPath(), index=False)
+        sub = MagicMock(user_id=1, attempt=canvas_attempt, workflow_state='submitted')
+        assignment = MagicMock(points_possible=2)
+        assignment.get_submissions.return_value = [sub]
+        quiz.canvas_course.canvas_course.get_assignment.return_value = assignment
+        return quiz, sub
+
+    def _review(self, quiz, answers, capsys, dry_run=False, edited='My own feedback.'):
+        """Run the review with canned prompt answers.
+
+        Returns ``(events, saved_row)``: ``events`` is the ordered list of
+        ('present',) / ('prompt', text, stdout_printed_since_last_event) tuples.
+        """
+        import canvigator_followup as cf
+        events = []
+        answers = iter(answers)
+
+        def fake_input(prompt=''):
+            events.append(('prompt', prompt, capsys.readouterr().out))
+            return next(answers)
+
+        with patch('builtins.input', side_effect=fake_input), \
+                patch.object(cf, '_presentSubmission', side_effect=lambda *a: events.append(('present',))), \
+                patch.object(cf, '_editText', return_value=edited):
+            cf.reviewReturnFollowUpAssignment(quiz, dry_run=dry_run)
+        return events, pd.read_csv(quiz._assessmentsPath()).iloc[0]
+
+    def test_submission_is_presented_before_the_verdict_and_model_output_after(self, tmp_path, capsys):
+        """Nothing from the model is printed until the instructor's own verdict has been read."""
+        quiz, _ = self._setup(tmp_path)
+        events, _ = self._review(quiz, ['p', '', 'y'], capsys)
+        assert events[0] == ('present',)
+        kind, prompt, printed_before = events[1]
+        assert kind == 'prompt' and prompt.strip().startswith('Your verdict')
+        for leaked in ('SECRETDRAFT', 'TRANSCRIPTTEXT', "model's verdict", 'high'):
+            assert leaked not in printed_before
+        printed_after = events[2][2]
+        assert 'SECRETDRAFT' in printed_after and 'TRANSCRIPTTEXT' in printed_after and 'pass (high)' in printed_after
+
+    def test_agreement_returns_draft_with_full_credit(self, tmp_path, capsys):
+        """Agree + accept + confirm posts the draft as a comment with points_possible, and marks the row returned."""
+        quiz, sub = self._setup(tmp_path)
+        _, row = self._review(quiz, ['p', '', 'y'], capsys)
+        kwargs = sub.edit.call_args.kwargs
+        assert kwargs['submission'] == {'posted_grade': 2}
+        assert 'SECRETDRAFT good base case.' in kwargs['comment']['text_comment']
+        assert (row['instructor_result'], row['result'], row['sent_assessment']) == ('pass', 'pass', 1)
+        assert pd.notna(row['reviewed_at']) and pd.notna(row['sent_at'])
+
+    def test_disagreement_keeps_instructor_verdict_and_requires_new_feedback(self, tmp_path, capsys):
+        """On disagreement the instructor's verdict is the default, the draft must be rewritten, credit is still full."""
+        quiz, sub = self._setup(tmp_path)
+        events, row = self._review(quiz, ['f', '', '', 'y'], capsys)
+        prompts = [e[1] for e in events if e[0] == 'prompt']
+        assert 'Final result' in prompts[1] and 'press Enter to write it' in prompts[2]
+        assert (row['instructor_result'], row['result'], row['llm_result']) == ('fail', 'fail', 'pass')
+        assert row['feedback'] == 'My own feedback.' and row['llm_feedback'] == 'SECRETDRAFT good base case.'
+        kwargs = sub.edit.call_args.kwargs
+        assert kwargs['submission'] == {'posted_grade': 2}
+        assert 'My own feedback.' in kwargs['comment']['text_comment']
+        assert 'SECRETDRAFT' not in kwargs['comment']['text_comment']
+
+    def test_no_usable_submission_gets_comment_but_no_grade(self, tmp_path, capsys):
+        """A 'no usable submission' verdict returns the comment only — completion credit needs a real submission."""
+        quiz, sub = self._setup(tmp_path)
+        _, row = self._review(quiz, ['n', '', 'y'], capsys, edited='Your recording was silent; please resubmit.')
+        kwargs = sub.edit.call_args.kwargs
+        assert 'submission' not in kwargs
+        assert 'please resubmit' in kwargs['comment']['text_comment']
+        assert (row['result'], row['sent_assessment']) == ('no_media', 1)
+
+    def test_declining_the_return_keeps_the_review(self, tmp_path, capsys):
+        """Answering N at the final prompt posts nothing but saves the verdict and feedback."""
+        quiz, sub = self._setup(tmp_path)
+        _, row = self._review(quiz, ['p', '', 'n'], capsys)
+        assert not sub.edit.called
+        assert (row['instructor_result'], row['sent_assessment']) == ('pass', 0)
+
+    def test_dry_run_saves_review_but_posts_nothing(self, tmp_path, capsys):
+        """--dry-run never asks to return and never calls Canvas, but the blind verdict is saved."""
+        quiz, sub = self._setup(tmp_path)
+        events, row = self._review(quiz, ['p', ''], capsys, dry_run=True)
+        assert not sub.edit.called
+        assert (row['instructor_result'], row['sent_assessment']) == ('pass', 0)
+        assert not any('Return to' in e[1] for e in events if e[0] == 'prompt')
+
+    def test_skip_and_quit_record_nothing(self, tmp_path, capsys):
+        """Skipping or quitting at the verdict prompt reveals nothing and leaves the row untouched."""
+        for answer in ('s', 'q'):
+            quiz, sub = self._setup(tmp_path / answer)
+            events, row = self._review(quiz, [answer], capsys)
+            assert pd.isna(row['instructor_result']) and not sub.edit.called
+            assert 'SECRETDRAFT' not in capsys.readouterr().out
+
+    def test_resume_uses_saved_verdict_without_asking_again(self, tmp_path, capsys):
+        """A row that already has instructor_result goes straight to the reveal (replay offered, not required)."""
+        quiz, sub = self._setup(tmp_path, row=_assignment_assessment_row(instructor_result='pass'))
+        events, row = self._review(quiz, ['n', '', 'y'], capsys)
+        assert ('present',) not in events
+        assert not any(e[1].strip().startswith('Your verdict') for e in events if e[0] == 'prompt')
+        assert row['sent_assessment'] == 1 and sub.edit.called
+
+    def test_model_error_row_requires_written_feedback(self, tmp_path, capsys):
+        """A row the model could not grade has no draft, so the editor opens and the instructor's text is returned."""
+        blank = _assignment_assessment_row(result='error', confidence='', feedback='', transcript='',
+                                           llm_result='error', llm_confidence='', llm_feedback='')
+        quiz, sub = self._setup(tmp_path, row=blank)
+        _, row = self._review(quiz, ['p', '', 'y'], capsys)
+        assert (row['result'], row['feedback'], row['llm_result']) == ('pass', 'My own feedback.', 'error')
+        assert sub.edit.call_args.kwargs['submission'] == {'posted_grade': 2}
+
+    def test_resubmitted_attempt_is_not_reviewed(self, tmp_path, capsys):
+        """A row for attempt 1 is held back when Canvas shows attempt 2, pending a new assessment."""
+        quiz, sub = self._setup(tmp_path, canvas_attempt=2)
+        events, _ = self._review(quiz, [], capsys)
+        assert events == [] and not sub.edit.called
+        assert 'Resubmitted since the last assessment' in capsys.readouterr().out
+
+    def test_message_based_rows_are_left_alone(self, tmp_path, capsys):
+        """An unsent row from the message-based chain (no assignment_id) is not offered for review."""
+        quiz, sub = self._setup(tmp_path, row=_assignment_assessment_row(assignment_id='', attempt='', conversation_id=5))
+        events, _ = self._review(quiz, [], capsys)
+        assert events == [] and not sub.edit.called
+
+
+class TestPresentSubmission:
+    """`_presentSubmission` plays audio, opens drawings, and falls back to Canvas when no file exists."""
+
+    def test_audio_is_played_and_drawing_is_opened(self, tmp_path):
+        """'explain' goes to the player; 'draw' opens the viewer and waits for Enter."""
+        import canvigator_followup as cf
+        media = tmp_path / 'm.bin'
+        media.write_bytes(b'x')
+        with patch.object(cf, '_playAudio') as play, patch.object(cf, '_openWithSystemViewer') as view, \
+                patch('builtins.input', return_value='') as prompt:
+            cf._presentSubmission(str(media), 'explain', 'http://canvas/sub')
+            assert play.called and not view.called and not prompt.called
+            cf._presentSubmission(str(media), 'draw', 'http://canvas/sub')
+            assert view.called and prompt.called
+
+    def test_missing_file_points_at_canvas(self, tmp_path, capsys):
+        """With no downloaded file the instructor is sent to the submission on Canvas."""
+        import canvigator_followup as cf
+        with patch.object(cf, '_playAudio') as play, patch('builtins.input', return_value=''):
+            cf._presentSubmission('', 'explain', 'http://canvas/sub')
+        assert not play.called
+        assert 'http://canvas/sub' in capsys.readouterr().out
+
+    def test_ctrl_c_stops_playback_not_the_task(self):
+        """A KeyboardInterrupt during playback is swallowed so the review continues."""
+        import canvigator_followup as cf
+        with patch.object(cf.shutil, 'which', return_value='/usr/bin/afplay'), \
+                patch.object(cf.subprocess, 'run', side_effect=KeyboardInterrupt):
+            cf._playAudio('/tmp/a.wav')
+
+
+class TestSendAssessmentsIgnoresAssignmentRows:
+    """send-follow-up-assessments leaves assignment-based rows to review-return-follow-up-assignment."""
+
+    def test_assignment_row_is_not_collected(self, tmp_path):
+        """Only the message-based row is collected for sending."""
+        quiz = _bare_quiz(tmp_path)
+        df = pd.DataFrame([
+            _assignment_assessment_row(),
+            _assignment_assessment_row(student_id=2, assignment_id='', attempt='', conversation_id=555),
+        ])
+        to_send = quiz._collectAssessmentsToSend(df, {})
+        assert [(convo_id, row['student_id']) for _, convo_id, row in to_send] == [(555, 2)]
+
+
+class TestAnonExportDropsMediaPath:
+    """export-anon-data drops the assignment flow's media_path (its filename embeds the student's id and name)."""
+
+    def test_media_path_is_an_identifier_column(self):
+        """media_path is removed alongside attachment_path / audio_path."""
+        from canvigator_course import _IDENTIFIER_DROP_COLUMNS
+        assert 'media_path' in _IDENTIFIER_DROP_COLUMNS

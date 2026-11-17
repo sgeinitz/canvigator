@@ -117,6 +117,19 @@ def _promptYesNo(prompt, default=False):
     return raw in ('y', 'yes')
 
 
+def _promptDueAt():
+    """Prompt for an optional ISO 8601 due date; returns the string as typed, or None."""
+    due_at_raw = input("Due at (ISO 8601, e.g. 2026-05-08T23:59:00; press Enter for none): ").strip()
+    if not due_at_raw:
+        return None
+    try:
+        datetime.fromisoformat(due_at_raw.replace('Z', '+00:00'))
+    except ValueError:
+        print(f"  Could not parse '{due_at_raw}' as ISO 8601 — leaving due_at unset.")
+        return None
+    return due_at_raw
+
+
 def _promptForGrade(student_label, transcript, audio_path, points_possible):
     """Show a transcript review screen and prompt for the points to award.
 
@@ -172,14 +185,7 @@ def createMediaRecordingAssignment(course):
 
     points_possible = _promptInt("Points possible", 1)
 
-    due_at_raw = input("Due at (ISO 8601, e.g. 2026-05-08T23:59:00; press Enter for none): ").strip()
-    due_at = None
-    if due_at_raw:
-        try:
-            datetime.fromisoformat(due_at_raw.replace('Z', '+00:00'))
-            due_at = due_at_raw
-        except ValueError:
-            print(f"  Could not parse '{due_at_raw}' as ISO 8601 — leaving due_at unset.")
+    due_at = _promptDueAt()
 
     publish_now = _promptYesNo("Publish immediately?", default=False)
 
@@ -285,7 +291,8 @@ class CanvigatorAssignment:
         self.config = config
         self.assignment_prefix = f"assignment{canvas_assignment.id}_"
 
-    def _extractAudioUrl(self, submission):
+    @staticmethod
+    def _extractAudioUrl(submission):
         """Return ``(url, ext)`` for an audio/video payload on a submission, or ``(None, None)``.
 
         Checks ``submission.media_comment`` first (the primary path for
