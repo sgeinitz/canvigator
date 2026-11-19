@@ -1131,7 +1131,7 @@ def _make_anon_id(student_id):
 # media paths, whose filenames embed the Canvas id and first name.
 _IDENTIFIER_DROP_COLUMNS = (
     'name', 'student_name', 'sortable_name', 'student_names', 'sis_id',
-    'attachment_path', 'audio_path',
+    'attachment_path', 'audio_path', 'media_path',
 )
 # Kept in the anonymized copy, but student-written or student-derived text
 # that may still mention names — listed in the closing review note.
