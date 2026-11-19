@@ -200,6 +200,19 @@ _STANDALONE_RULE = (
     "instead\n"
 )
 
+# Candidate i (0-based) of a complete set of three is labeled _DIFFICULTY_LEVELS[i] —
+# the system prompts below ask for the questions in this order.
+_DIFFICULTY_LEVELS = ('easy', 'medium', 'hard')
+
+_DIFFICULTY_RULE = (
+    "The three questions must also DIFFER IN DIFFICULTY relative to one another: one "
+    "relatively EASY compared with the other two, one relatively HARD compared with the "
+    "other two, and one MEDIUM in between. The easy question checks the core idea directly; "
+    "harder questions demand more steps of reasoning, applying the idea to a less familiar or "
+    "more concrete scenario, or handling edge cases or trade-offs. Even the hard question must "
+    "fit the time limit above and test understanding, not recall.\n\n"
+)
+
 _EXPLAIN_SYSTEM_PROMPT = (
     "You are an expert university instructor designing oral exam questions. "
     "Given a topic and details from an existing quiz question, create THREE distinct "
@@ -212,9 +225,11 @@ _EXPLAIN_SYSTEM_PROMPT = (
     "the underlying idea, not just recall a definition\n"
     "- NOT be a yes/no question or a question that can be answered in one word\n\n"
     "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
-    "do not reword the same question three times.\n\n"
-    "Respond with ONLY the three questions, numbered \"1.\", \"2.\", \"3.\", one per line. "
-    "No preamble, no explanation, no quotation marks."
+    "do not reword the same question three times.\n\n" +
+    _DIFFICULTY_RULE +
+    "Respond with ONLY the three questions, in order of increasing difficulty — \"1.\" the easy "
+    "one, \"2.\" the medium one, \"3.\" the hard one — one per line. "
+    "No preamble, no explanation, no difficulty labels, no quotation marks."
 )
 
 _DRAW_SYSTEM_PROMPT = (
@@ -228,9 +243,11 @@ _DRAW_SYSTEM_PROMPT = (
     "- Test understanding of structure, relationships, or processes — not artistic skill\n"
     "- Specify what key elements or labels should appear in the diagram\n\n"
     "The three questions must cover DIFFERENT angles, framings, or sub-aspects of the concept — "
-    "do not reword the same question three times.\n\n"
-    "Respond with ONLY the three questions, numbered \"1.\", \"2.\", \"3.\", one per line. "
-    "No preamble, no explanation, no quotation marks."
+    "do not reword the same question three times.\n\n" +
+    _DIFFICULTY_RULE +
+    "Respond with ONLY the three questions, in order of increasing difficulty — \"1.\" the easy "
+    "one, \"2.\" the medium one, \"3.\" the hard one — one per line. "
+    "No preamble, no explanation, no difficulty labels, no quotation marks."
 )
 
 _RUBRIC_COMMON_SCHEMA = (
@@ -1559,7 +1576,11 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
 
     Step 1: For each question, ask the LLM whether 'explain' or 'draw' is the
     better assessment mode based on the topic and question content.
-    Step 2: Generate n candidate open-ended questions using the mode-specific prompt.
+    Step 2: Generate n candidate open-ended questions using the mode-specific prompt,
+    which asks for them in order of increasing difficulty. Each candidate of a
+    complete set of three gets est_difficulty 'easy' / 'medium' / 'hard' by
+    position; if fewer came back, the group's est_difficulty is left blank since
+    it is unknown which level is missing.
     Returns a flat list of result dicts — n rows per input row (padded with empty
     candidate strings if the LLM returned fewer). Each row has selected_question=0;
     the instructor reviews the output CSV and sets one row per group to 1.
@@ -1605,6 +1626,7 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
             else:
                 print(f" {mode} — generating {n} candidates...", end="", flush=True)
             candidates = generate_open_ended_candidates(row, client, model, mode, n=n)
+            difficulties = list(_DIFFICULTY_LEVELS) if len(candidates) == len(_DIFFICULTY_LEVELS) else []
             non_empty = len([c for c in candidates if c])
             if spin_fn:
                 spin_fn(frame, f"[{i}/{total}] {label} — writing {non_empty} guide(s) + rubric(s) + exemplars")
@@ -1624,17 +1646,20 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
                 print(f" SKIPPED ({e})")
             mode = ''
             candidates = []
+            difficulties = []
             guides = []
             rubrics = []
             exemplars = []
 
         # Always emit exactly n rows per question so every group has a predictable shape.
         padded_candidates = (candidates + [''] * n)[:n]
+        padded_difficulties = (difficulties + [''] * n)[:n]
         padded_guides = (guides + [''] * n)[:n]
         padded_rubrics = (rubrics + [_empty_rubric(mode)] * n)[:n]
         padded_exemplars = (exemplars + [dict(_EMPTY_EXEMPLARS)] * n)[:n]
         original_text = _strip_html(row.get('question_text'))
-        for cand, guide, rubric, ex in zip(padded_candidates, padded_guides, padded_rubrics, padded_exemplars):
+        for cand, diff, guide, rubric, ex in zip(padded_candidates, padded_difficulties, padded_guides,
+                                                 padded_rubrics, padded_exemplars):
             results.append({
                 'selected_question': 0,
                 'question_id': row.get('question_id'),
@@ -1642,6 +1667,7 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
                 'question_name': row.get('question_name'),
                 'keywords': row.get('keywords'),
                 'question_mode': mode,
+                'est_difficulty': diff,
                 'open_ended_question': cand,
                 'assessment_guide': guide,
                 'rubric_json': json.dumps(rubric, ensure_ascii=False),

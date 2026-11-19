@@ -477,6 +477,7 @@ TASK_HELP = {
         'outputs': [
             "data/<course>/quiz<id>_open_ended_YYYYMMDD.csv (3 rows per "
             "original question; columns include question_mode, "
+            "est_difficulty (easy / medium / hard within the 3), "
             "open_ended_question, assessment_guide, rubric_json, "
             "exemplar_pass / exemplar_fail).",
         ],
