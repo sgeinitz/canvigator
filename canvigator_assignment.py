@@ -10,7 +10,7 @@ instructor can scan a CSV instead of listening to N recordings.
 import logging
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
@@ -118,16 +118,24 @@ def _promptYesNo(prompt, default=False):
 
 
 def _promptDueAt():
-    """Prompt for an optional ISO 8601 due date; returns the string as typed, or None."""
-    due_at_raw = input("Due at (ISO 8601, e.g. 2026-05-08T23:59:00; press Enter for none): ").strip()
+    """Prompt for an optional due date; returns a Canvas-valid ISO 8601 datetime string, or None.
+
+    A date alone (e.g. 2026-05-08) means 23:59:00 that day. Canvas rejects
+    anything but a full YYYY-MM-DDTHH:MM:SS timestamp, so the input is
+    normalized rather than passed through as typed.
+    """
+    due_at_raw = input("Due at (YYYY-MM-DD for 23:59 that day, or YYYY-MM-DDTHH:MM:SS; press Enter for none): ").strip()
     if not due_at_raw:
         return None
     try:
-        datetime.fromisoformat(due_at_raw.replace('Z', '+00:00'))
+        return f"{date.fromisoformat(due_at_raw).isoformat()}T23:59:00"
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(due_at_raw.replace('Z', '+00:00')).isoformat()
     except ValueError:
         print(f"  Could not parse '{due_at_raw}' as ISO 8601 — leaving due_at unset.")
         return None
-    return due_at_raw
 
 
 def _promptForGrade(student_label, transcript, audio_path, points_possible):
