@@ -647,7 +647,7 @@ def generateOpenEndedQuestions(tagged_csv_path):
 
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',
-        'keywords', 'question_mode', 'open_ended_question', 'assessment_guide',
+        'keywords', 'question_mode', 'est_difficulty', 'open_ended_question', 'assessment_guide',
         'rubric_json', 'exemplar_pass', 'exemplar_pass_note',
         'exemplar_fail', 'exemplar_fail_note', 'original_question_text',
     ])
