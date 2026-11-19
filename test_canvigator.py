@@ -5467,6 +5467,23 @@ def _assignment_assessment_row(**overrides):
     return row
 
 
+class TestPromptDueAt:
+    """`_promptDueAt` returns a timestamp Canvas accepts (it rejects a date alone)."""
+
+    @pytest.mark.parametrize('typed, expected', [
+        ('2026-12-10', '2026-12-10T23:59:00'),
+        ('2026-12-10T17:00:00', '2026-12-10T17:00:00'),
+        ('2026-12-10T17:00', '2026-12-10T17:00:00'),
+        ('', None),
+        ('not-a-date', None),
+    ])
+    def test_normalizes_input(self, typed, expected):
+        """A date alone is due at 23:59:00; a datetime is normalized; blank or unparseable is no due date."""
+        from canvigator_assignment import _promptDueAt
+        with patch('builtins.input', return_value=typed):
+            assert _promptDueAt() == expected
+
+
 class TestFollowUpAssignmentPayload:
     """`_buildAssignmentPayload` restricts the submission type to what the question asks for."""
 
