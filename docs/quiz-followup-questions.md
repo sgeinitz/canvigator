@@ -195,7 +195,11 @@ five steps:
    self-contained candidate open-ended questions. "Explain" questions begin with
    "Explain..." and target a ~1 minute oral response. "Draw" questions begin
    with "Draw a diagram..." or "Draw a figure..." and target a ~2 minute
-   hand-drawn response.
+   hand-drawn response. The 3 are generated together as a difficulty spread —
+   one relatively easy, one medium, one relatively hard compared with each
+   other — and the `est_difficulty` column records which is which. If the LLM
+   returns fewer than 3 candidates, `est_difficulty` is left blank for that
+   group.
 3. **Assessment guide** — For each candidate, the LLM writes a short
    `assessment_guide` describing the key concepts/elements a passing student
    response must include. This guide is the human-readable summary shown in
@@ -235,7 +239,9 @@ set — see [Ollama setup](installation.md#ollama-setup-optional).
 
 The output CSV contains columns: `selected_question`, `question_id`,
 `position`, `question_name`, `keywords`, `question_mode` (`explain` or
-`draw`), `open_ended_question`, `assessment_guide`, `rubric_json`,
+`draw`), `est_difficulty` (`easy`, `medium`, or `hard`, relative to the other
+two candidates for the same question), `open_ended_question`,
+`assessment_guide`, `rubric_json`,
 `exemplar_pass`, `exemplar_pass_note`, `exemplar_fail`, `exemplar_fail_note`,
 `original_question_text`.
 

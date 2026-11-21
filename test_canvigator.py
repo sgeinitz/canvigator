@@ -1021,12 +1021,33 @@ class TestBuildOpenEndedPrompt:
         assert "Oral explanation question" in result
 
 
+def _run_generate_open_ended(rows, fake_classify, fake_candidates):
+    """Run generate_open_ended_questions with every LLM call mocked."""
+    import canvigator_llm
+
+    def fake_guide(_row, _client, _model, _mode, _cand):
+        return 'guide'
+
+    def fake_rubric(_row, _client, _model, _mode, _cand):
+        return canvigator_llm._empty_rubric('explain')
+
+    def fake_exemplars(_row, _client, _model, _mode, _cand, _rub):
+        return dict(canvigator_llm._EMPTY_EXEMPLARS)
+
+    with patch.object(canvigator_llm, '_make_client', return_value=MagicMock()), \
+         patch.object(canvigator_llm, 'classify_question_mode', side_effect=fake_classify), \
+         patch.object(canvigator_llm, 'generate_open_ended_candidates', side_effect=fake_candidates), \
+         patch.object(canvigator_llm, 'generate_assessment_guide', side_effect=fake_guide), \
+         patch.object(canvigator_llm, 'generate_structured_rubric', side_effect=fake_rubric), \
+         patch.object(canvigator_llm, 'generate_exemplars', side_effect=fake_exemplars):
+        return canvigator_llm.generate_open_ended_questions(rows, n=3)
+
+
 class TestGenerateOpenEndedQuestionsRecovery:
     """generate_open_ended_questions must survive a per-row LLM failure with partial output."""
 
     def test_one_failing_row_does_not_kill_the_loop(self):
         """A row that raises mid-pipeline yields placeholder rows; other rows succeed normally."""
-        import canvigator_llm
         rows = [
             {'question_id': 1, 'question_name': 'Q1', 'question_text': '<p>Q1</p>', 'keywords': 'a', 'position': 1, 'answers': '[]'},
             {'question_id': 2, 'question_name': float('nan'), 'question_text': float('nan'), 'keywords': 'b', 'position': 2, 'answers': '[]'},
@@ -1042,37 +1063,91 @@ class TestGenerateOpenEndedQuestionsRecovery:
         def fake_candidates(_row, _client, _model, _mode, n=3):
             return [f'candidate {i + 1}' for i in range(n)]
 
-        def fake_guide(_row, _client, _model, _mode, _cand):
-            return 'guide'
-
-        def fake_rubric(_row, _client, _model, _mode, _cand):
-            return canvigator_llm._empty_rubric('explain')
-
-        def fake_exemplars(_row, _client, _model, _mode, _cand, _rub):
-            return dict(canvigator_llm._EMPTY_EXEMPLARS)
-
-        with patch.object(canvigator_llm, '_make_client', return_value=MagicMock()), \
-             patch.object(canvigator_llm, 'classify_question_mode', side_effect=fake_classify), \
-             patch.object(canvigator_llm, 'generate_open_ended_candidates', side_effect=fake_candidates), \
-             patch.object(canvigator_llm, 'generate_assessment_guide', side_effect=fake_guide), \
-             patch.object(canvigator_llm, 'generate_structured_rubric', side_effect=fake_rubric), \
-             patch.object(canvigator_llm, 'generate_exemplars', side_effect=fake_exemplars):
-            results = canvigator_llm.generate_open_ended_questions(rows, n=3)
+        results = _run_generate_open_ended(rows, fake_classify, fake_candidates)
 
         # 3 questions × 3 candidates = 9 rows total, regardless of failure.
         assert len(results) == 9
-        # Q1 and Q3 produce real candidates.
+        # Q1 and Q3 produce real candidates, rated easy → medium → hard in order.
         for qid in (1, 3):
             qrows = [r for r in results if r['question_id'] == qid]
             assert all(r['open_ended_question'].startswith('candidate') for r in qrows)
             assert all(r['question_mode'] == 'explain' for r in qrows)
-        # Q2 produces 3 placeholder rows: empty open_ended_question, empty mode.
+            assert [r['est_difficulty'] for r in qrows] == ['easy', 'medium', 'hard']
+        # Q2 produces 3 placeholder rows: empty open_ended_question, mode, and difficulty.
         q2_rows = [r for r in results if r['question_id'] == 2]
         assert len(q2_rows) == 3
         assert all(r['open_ended_question'] == '' for r in q2_rows)
         assert all(r['question_mode'] == '' for r in q2_rows)
+        assert all(r['est_difficulty'] == '' for r in q2_rows)
         # NaN question_text is coerced to empty string by _strip_html, not a crash.
         assert all(r['original_question_text'] == '' for r in q2_rows)
+
+    def test_fewer_than_three_candidates_leaves_difficulty_blank(self):
+        """With only 2 candidates it is unknown which level is missing, so none is guessed."""
+        rows = [{'question_id': 1, 'question_name': 'Q1', 'question_text': '<p>Q1</p>', 'keywords': 'a', 'position': 1, 'answers': '[]'}]
+
+        def fake_candidates(_row, _client, _model, _mode, n=3):
+            return ['candidate 1', 'candidate 2']
+
+        results = _run_generate_open_ended(rows, lambda *_: 'explain', fake_candidates)
+
+        assert [r['open_ended_question'] for r in results] == ['candidate 1', 'candidate 2', '']
+        assert all(r['est_difficulty'] == '' for r in results)
+
+    def test_est_difficulty_follows_question_mode(self):
+        """Result dicts place est_difficulty right after question_mode."""
+        rows = [{'question_id': 1, 'question_name': 'Q1', 'question_text': '<p>Q1</p>', 'keywords': 'a', 'position': 1, 'answers': '[]'}]
+        results = _run_generate_open_ended(
+            rows, lambda *_: 'draw', lambda *_a, n=3: [f'c{i}' for i in range(n)])
+        keys = list(results[0])
+        assert keys[keys.index('question_mode') + 1] == 'est_difficulty'
+
+
+class TestOpenEndedDifficultyPrompts:
+    """Both candidate-generation system prompts ask for an easy → medium → hard spread."""
+
+    @pytest.mark.parametrize('prompt_name', ['_EXPLAIN_SYSTEM_PROMPT', '_DRAW_SYSTEM_PROMPT'])
+    def test_prompt_requests_increasing_difficulty(self, prompt_name):
+        """The difficulty rule and the output-order instruction are in the prompt."""
+        import canvigator_llm
+        prompt = getattr(canvigator_llm, prompt_name)
+        assert canvigator_llm._DIFFICULTY_RULE in prompt
+        assert 'in order of increasing difficulty' in prompt
+        assert '"1." the easy one, "2." the medium one, "3." the hard one' in prompt
+
+    def test_levels_match_prompt_order(self):
+        """Position i of a complete set maps to the i-th level named in the prompt."""
+        import canvigator_llm
+        assert canvigator_llm._DIFFICULTY_LEVELS == ('easy', 'medium', 'hard')
+
+
+class TestGenerateOpenEndedQuestionsCsv:
+    """generateOpenEndedQuestions writes est_difficulty as the column after question_mode."""
+
+    def test_csv_column_order(self, tmp_path):
+        """The saved *_open_ended_*.csv has est_difficulty right after question_mode."""
+        import canvigator_llm
+        import canvigator_quiz
+        tagged = tmp_path / "quiz1_123_questions_w_tags_20261119.csv"
+        pd.DataFrame([{'question_id': 1, 'position': 1, 'question_name': 'Q1',
+                       'question_text': 'Q1?', 'answers': '[]', 'keywords': 'a'}]).to_csv(tagged, index=False)
+        fake_results = [
+            {'selected_question': 0, 'question_id': 1, 'position': 1, 'question_name': 'Q1',
+             'keywords': 'a', 'question_mode': 'explain', 'est_difficulty': level,
+             'open_ended_question': f'Explain {level}.', 'assessment_guide': '', 'rubric_json': '{}',
+             'exemplar_pass': '', 'exemplar_pass_note': '', 'exemplar_fail': '',
+             'exemplar_fail_note': '', 'original_question_text': 'Q1?'}
+            for level in ('easy', 'medium', 'hard')
+        ]
+        with patch.object(canvigator_llm, 'generate_open_ended_questions', return_value=fake_results):
+            canvigator_quiz.generateOpenEndedQuestions(tagged)
+
+        out_files = list(tmp_path.glob("quiz1_123_open_ended_*.csv"))
+        assert len(out_files) == 1
+        out = pd.read_csv(out_files[0])
+        cols = list(out.columns)
+        assert cols[cols.index('question_mode') + 1] == 'est_difficulty'
+        assert list(out['est_difficulty']) == ['easy', 'medium', 'hard']
 
 
 # ---------------------------------------------------------------------------
