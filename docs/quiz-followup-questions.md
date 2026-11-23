@@ -265,6 +265,11 @@ When not in `--dry-run` mode, the instructor is prompted for each student
 with a full message preview and a `[send/SKIP]` choice (default: skip), so
 every send is reviewed before going to Canvas.
 
+Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: the reminders
+already sent are still written to the `*_reminder_sent_*.csv` log, Canvigator
+prints "Stopped early", and it exits with code 130 instead of 0. A re-run does
+not skip students who were already reminded, so check the log first.
+
 **Before running:** `get-quiz-questions --tag` must have produced
 `*_questions_w_tags_*.csv` for the quiz. The reminder task will not run
 `get-quiz-questions` automatically — quiz content is static, so you should
@@ -337,6 +342,11 @@ with a full message preview and a `[send/SKIP]` choice (default: skip). Only
 messages the instructor approves are sent and recorded in the manifest.
 Submissions are auto-refreshed via `getAllSubmissionsAndEvents()` on every
 run so the recipient list reflects the latest attempts.
+
+Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: the students already
+messaged are recorded in the manifest, so running the task again won't message
+them twice. Canvigator prints "Stopped early" and exits with code 130 instead
+of 0.
 
 **Before running:** `get-quiz-questions --tag` and then
 `generate-follow-up-questions` must have been run for the same quiz so both
@@ -461,6 +471,11 @@ returned by
 The expected workflow is to **edit the `feedback` column** between
 `assess-replies` and `send-follow-up-assessments` for any rows where the LLM
 assessment needs correction; the curated text is what the student sees.
+
+Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: rows already sent
+are saved with `sent_assessment=1`, so running the task again won't send them
+twice. Canvigator prints "Stopped early" and exits with code 130 instead of 0.
+A stopped `--dry-run` preview saves no dry-run record.
 
 **Before running:** `assess-replies` must have produced
 `*_followup_assessments.csv`.
