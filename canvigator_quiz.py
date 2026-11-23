@@ -624,6 +624,35 @@ def _collect_timing_and_blurs(student_events, timing_by_q, blurs_by_q):
             blur_count = 0
 
 
+def _warnMissingRubricsOrExemplars(results):
+    """Log one warning naming candidates whose rubric or example answers came back empty.
+
+    A single failed or unparseable model call leaves that candidate's rubric_json or
+    exemplar columns empty while the rest of the run succeeds; the grader then has less
+    to go on for that question, so the instructor should know before choosing it.
+    """
+    missing = []
+    n_candidates = 0
+    seen = {}
+    for r in results:
+        if not r['open_ended_question']:
+            continue
+        n_candidates += 1
+        seen[r['position']] = seen.get(r['position'], 0) + 1
+        try:
+            rubric = json.loads(r['rubric_json'])
+        except (TypeError, ValueError):
+            rubric = {}
+        no_rubric = not rubric.get('canonical_answer') and not rubric.get('pass_criteria')
+        if no_rubric or not r['exemplar_pass'] or not r['exemplar_fail']:
+            missing.append(f"Q{r['position']} candidate {seen[r['position']]}")
+    if missing:
+        logger.warning(
+            f"{len(missing)} of {n_candidates} candidates are missing a rubric or example answers "
+            f"({', '.join(missing)}). Choose another candidate for those questions, re-run, or fill them in by hand."
+        )
+
+
 def generateOpenEndedQuestions(tagged_csv_path):
     """Generate open-ended questions from a *_questions_w_tags_*.csv.
 
@@ -664,6 +693,7 @@ def generateOpenEndedQuestions(tagged_csv_path):
             f"{len(failed)} of {len(rows)} questions got no candidates ({', '.join(failed)}); "
             "their rows are empty. Re-run 'generate-follow-up-questions' to retry."
         )
+    _warnMissingRubricsOrExemplars(results)
 
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',

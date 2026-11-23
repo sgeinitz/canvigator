@@ -36,6 +36,7 @@ def _isValidMediaFile(path, min_bytes=1024):
 
 # Retry policy for transient upstream errors (e.g. Ollama cloud 5xx).
 _CHAT_MAX_ATTEMPTS = 4
+_CHAT_BACKOFF_BASE_SECS = 1.0
 # HTTP statuses that mean the account can't be used (bad key, no credit, no access);
 # every later call would fail the same way, so callers stop instead of skipping a question.
 _ACCOUNT_ERROR_STATUSES = (401, 402, 403)
@@ -43,9 +44,6 @@ _ACCOUNT_ERROR_STATUSES = (401, 402, 403)
 
 class LLMAccountError(RuntimeError):
     """Ollama refused the request for an account reason (401/402/403); retrying or moving on won't help."""
-
-
-_CHAT_BACKOFF_BASE_SECS = 1.0
 
 
 def _chat_with_retry(client, **chat_kwargs):
@@ -1599,7 +1597,10 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
 
 
 def _question_label(row):
-    """Short display label for a question row: its name, else its id, else '?'."""
+    """Short display label for a question row: its name, else its id, else '?'.
+
+    Kept separate so generate_open_ended_questions stays under the CI complexity limit (15).
+    """
     label = row.get('question_name') or row.get('question_id')
     if not isinstance(label, str):
         label = str(label) if label is not None else '?'

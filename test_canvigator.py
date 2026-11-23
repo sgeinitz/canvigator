@@ -6659,7 +6659,7 @@ class TestLLMAccountErrors:
         assert 'Add usage credits' in str(exc.value)
 
     def test_other_client_errors_are_unchanged(self):
-        """A 404 (e.g. unknown model) still raises the original ResponseError, not LLMAccountError."""
+        """A 404 (e.g. unknown model) still raises the original ResponseError after one call, not LLMAccountError."""
         import ollama
         import canvigator_llm
         client = MagicMock()
@@ -6667,6 +6667,7 @@ class TestLLMAccountErrors:
         with pytest.raises(ollama.ResponseError) as exc:
             canvigator_llm._chat_with_retry(client, model='m', messages=[])
         assert not isinstance(exc.value, canvigator_llm.LLMAccountError)
+        assert client.chat.call_count == 1   # a client error is not retried like a 5xx
 
     def test_tagging_stops_on_first_account_error(self, monkeypatch):
         """tag_questions raises on a 402 instead of logging it for every question."""
@@ -6757,3 +6758,130 @@ class TestGenerationFailureReporting:
         assert len(df) == 9
         assert df.groupby('position')['open_ended_question'].apply(lambda s: s.notna().any()).tolist() == [True, False, True]
         assert any('1 of 3 questions' in r.message and 'Q2' in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 5xx retries, later generation steps stopping on account errors, missing rubric/exemplar report
+# ---------------------------------------------------------------------------
+
+class TestServerErrorRetries:
+    """5xx errors are retried with backoff, up to 4 calls in all (unchanged from main; pinned here)."""
+
+    def _err(self, status=503):
+        import ollama
+        return ollama.ResponseError('service unavailable', status)
+
+    def test_server_error_every_time_raises_after_four_calls(self, monkeypatch):
+        """Four 5xx replies in a row -> the original ResponseError after exactly 4 calls."""
+        import ollama
+        import canvigator_llm
+        monkeypatch.setattr(canvigator_llm.time, 'sleep', lambda s: None)
+        client = MagicMock()
+        client.chat.side_effect = self._err()
+        with pytest.raises(ollama.ResponseError):
+            canvigator_llm._chat_with_retry(client, model='m', messages=[])
+        assert client.chat.call_count == 4
+
+    def test_three_server_errors_then_reply_succeeds(self, monkeypatch):
+        """Three 5xx then a reply -> the reply, with growing waits between tries."""
+        import canvigator_llm
+        waits = []
+        monkeypatch.setattr(canvigator_llm.time, 'sleep', waits.append)
+        client = MagicMock()
+        client.chat.side_effect = [self._err(), self._err(500), self._err(502), {'message': {'content': 'ok'}}]
+        assert canvigator_llm._chat_with_retry(client, model='m', messages=[]) == {'message': {'content': 'ok'}}
+        assert client.chat.call_count == 4
+        assert waits == [1.0, 2.0, 4.0]
+
+
+class TestLaterStepsStopOnAccountError:
+    """An account error in any generation step stops the run, not just in the first (classify) call."""
+
+    @pytest.mark.parametrize('step', ['candidates', 'guide', 'rubric', 'exemplars'])
+    def test_later_generation_steps_also_stop(self, monkeypatch, step):
+        """An account error in the candidates, guide, rubric or exemplar step stops the run (not just classify)."""
+        import canvigator_llm
+
+        def fail_when(user):
+            """True for this step's prompt (same prompt endings _fake_chat_client answers by)."""
+            last = user.strip().splitlines()[-1]
+            if step == 'candidates':
+                return 'must start with' in last
+            if step == 'rubric':
+                return last.startswith('Rubric JSON:')
+            if step == 'exemplars':
+                return last.startswith('Exemplars JSON:')
+            other = ('Tags:', 'Best assessment mode', 'Rubric JSON:', 'Exemplars JSON:')
+            return not last.startswith(other) and 'must start with' not in last
+
+        client = _fake_chat_client(lambda u: False)
+        ok_chat = client.chat.side_effect
+
+        def chat(**kw):
+            user = [m for m in kw['messages'] if m['role'] == 'user'][-1]['content']
+            if fail_when(user):
+                raise canvigator_llm.LLMAccountError('simulated: Ollama refused the request (HTTP 402)')
+            return ok_chat(**kw)
+
+        client.chat.side_effect = chat
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', lambda c, **kw: c.chat(**kw))
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: client)
+        with pytest.raises(canvigator_llm.LLMAccountError):
+            canvigator_llm.generate_open_ended_questions(_gen_rows(2))
+
+
+class TestMissingRubricAndExemplarReport:
+    """generate-follow-up-questions names candidates whose rubric or example answers came back empty."""
+
+    def test_missing_rubric_or_exemplars_are_named(self, tmp_path, monkeypatch, caplog):
+        """A candidate with an empty rubric and one with empty exemplars are both listed in one warning."""
+        import canvigator_llm
+        import canvigator_quiz
+        path = tmp_path / 'quiz999_questions_w_tags_20260101.csv'
+        pd.DataFrame(_gen_rows(2)).to_csv(path, index=False)
+        state = {'rubric': 0, 'exemplars': 0}
+
+        def fail_some(user):
+            last = user.strip().splitlines()[-1]
+            for kind, marker in (('rubric', 'Rubric JSON:'), ('exemplars', 'Exemplars JSON:')):
+                if last.startswith(marker):
+                    state[kind] += 1
+                    # 2nd rubric call (Q1 candidate 2) and 6th exemplars call (Q2 candidate 3) fail
+                    return (kind, state[kind]) in (('rubric', 2), ('exemplars', 6))
+            return False
+
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: _fake_chat_client(fail_some))
+        with caplog.at_level('WARNING'):
+            canvigator_quiz.generateOpenEndedQuestions(path)
+        msgs = [r.message for r in caplog.records if 'missing a rubric or example answers' in r.message]
+        assert len(msgs) == 1
+        assert '2 of 6 candidates' in msgs[0]
+        assert 'Q1 candidate 2' in msgs[0] and 'Q2 candidate 3' in msgs[0]
+
+    def test_either_missing_example_answer_is_named(self, caplog):
+        """A candidate missing only its failing example, or only its passing one, is named; a complete one isn't."""
+        import json
+        from canvigator_quiz import _warnMissingRubricsOrExemplars
+        rubric = json.dumps({'canonical_answer': 'x', 'pass_criteria': ['y']})
+        rows = [
+            {'open_ended_question': 'Explain A.', 'position': 1, 'rubric_json': rubric, 'exemplar_pass': 'p', 'exemplar_fail': ''},
+            {'open_ended_question': 'Explain B.', 'position': 1, 'rubric_json': rubric, 'exemplar_pass': '', 'exemplar_fail': 'f'},
+            {'open_ended_question': 'Explain C.', 'position': 1, 'rubric_json': rubric, 'exemplar_pass': 'p', 'exemplar_fail': 'f'},
+        ]
+        with caplog.at_level('WARNING'):
+            _warnMissingRubricsOrExemplars(rows)
+        msgs = [r.message for r in caplog.records if 'missing a rubric or example answers' in r.message]
+        assert len(msgs) == 1
+        assert '2 of 3 candidates' in msgs[0]
+        assert 'Q1 candidate 1' in msgs[0] and 'Q1 candidate 2' in msgs[0] and 'Q1 candidate 3' not in msgs[0]
+
+    def test_complete_output_has_no_missing_warning(self, tmp_path, monkeypatch, caplog):
+        """When every candidate has a rubric and exemplars, no such warning is logged."""
+        import canvigator_llm
+        import canvigator_quiz
+        path = tmp_path / 'quiz999_questions_w_tags_20260101.csv'
+        pd.DataFrame(_gen_rows(2)).to_csv(path, index=False)
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: _fake_chat_client(lambda u: False))
+        with caplog.at_level('WARNING'):
+            canvigator_quiz.generateOpenEndedQuestions(path)
+        assert not any('missing a rubric' in r.message for r in caplog.records)

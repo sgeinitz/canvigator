@@ -171,6 +171,11 @@ each other. By default this uses the cloud-hosted text model
 to be set — see [Ollama setup](installation.md#ollama-setup-optional). The
 model can be overridden via `OLLAMA_TEXT_MODEL`.
 
+If tagging fails for some questions, the run ends with a warning naming them
+(e.g. "Q2"), and their `keywords` are empty. A rejected key or an account without
+credit stops the run at once, and no tagged file is saved when every question
+fails.
+
 Pass `--all` to skip the interactive quiz prompt and export every quiz in the
 selected course — one CSV per quiz, using each quiz's own filename prefix.
 `--all` and `--tag` can be used independently or together.
@@ -231,6 +236,12 @@ on exactly one row per question group** before running
 **Before running:** `get-quiz-questions --tag` must have produced
 `*_questions_w_tags_*.csv` for the same quiz. Requires `OLLAMA_API_KEY` to be
 set — see [Ollama setup](installation.md#ollama-setup-optional).
+
+If a model call for one candidate fails, that candidate's rubric or example
+answers are left empty, and the run ends with a warning naming those candidates
+(e.g. "Q2 candidate 1") so you can choose another one or fill them in. A rejected
+key or an account without credit stops the run at once, and no file is saved when
+every question fails.
 
 | | Files |
 |---|---|
