@@ -6107,3 +6107,169 @@ class TestAnonExportDropsMediaPath:
         """media_path is removed alongside attachment_path / audio_path."""
         from canvigator_course import _IDENTIFIER_DROP_COLUMNS
         assert 'media_path' in _IDENTIFIER_DROP_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# Student-safety fixes: leftover CLI args, sends recorded on interrupt,
+# glob-safe manifest lookup, award-bonus confirmation
+# ---------------------------------------------------------------------------
+
+def _run_cli_no_canvas(*args):
+    """Run canvigator.py with empty Canvas credentials; return (rc, stdout + stderr)."""
+    import os
+    import sys
+    env = {k: os.environ[k] for k in ('PATH', 'HOME', 'PYTHONPATH', 'PYTHONHOME') if k in os.environ}
+    env['CANVAS_URL'] = ''
+    env['CANVAS_TOKEN'] = ''
+    result = subprocess.run([sys.executable, 'canvigator.py', *args], capture_output=True, text=True,
+                            cwd=Path(__file__).parent, env=env, timeout=15)
+    return result.returncode, result.stdout + result.stderr
+
+
+class TestLeftoverCliArguments:
+    """A mistyped flag must stop the run instead of being ignored (e.g. a real award-bonus)."""
+
+    @pytest.mark.parametrize('typo', ['--dryrun', '-D', '--dry_run', 'extra'])
+    def test_mistyped_flag_after_task_is_rejected(self, typo):
+        """`award-bonus --dryrun` exits with an error naming the argument, before touching Canvas."""
+        rc, out = _run_cli_no_canvas('award-bonus', typo)
+        assert rc != 0
+        assert 'Unrecognized argument' in out and typo in out
+        assert 'CANVAS_URL' not in out
+
+    def test_valid_flags_still_reach_the_canvas_check(self):
+        """A correct `--dry-run` in either position is accepted (it then needs Canvas credentials)."""
+        for args in (('award-bonus', '--dry-run'), ('--dry-run', 'award-bonus')):
+            rc, out = _run_cli_no_canvas(*args)
+            assert 'Unrecognized argument' not in out
+            assert 'CANVAS_URL' in out
+
+    @pytest.mark.parametrize('task', ['create-quiz', 'create-media-recording-assignment'])
+    def test_dry_run_rejected_for_tasks_that_would_create_for_real(self, task):
+        """These tasks have no dry run, so `-d` must not be silently ignored."""
+        rc, out = _run_cli_no_canvas(task, '--dry-run')
+        assert rc != 0
+        assert 'does not support --dry-run' in out
+        assert 'CANVAS_URL' not in out
+
+
+class TestSendsRecordedOnInterrupt:
+    """Stopping mid-send (Ctrl-C / EOF) must keep the record of what was already sent."""
+
+    @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
+    def test_interactive_send_returns_what_was_sent(self, stop, capsys):
+        """After 'y' then an interrupt, the one sent message is returned (so callers save it)."""
+        from canvigator_quiz import _interactiveSend
+        canvas = MagicMock()
+        canvas.create_conversation.return_value = [SimpleNamespace(id=501)]
+        messages = [(11, 'Ann Lee', 'm1', 'missed'), (12, 'Bo Diaz', 'm2', 'missed'), (13, 'Cy Park', 'm3', 'correct')]
+        with patch('builtins.input', side_effect=['y', stop()]):
+            sent = _interactiveSend(canvas, messages, 'subj', 'hdr')
+        assert [m[0] for m in sent] == [11]
+        assert canvas.create_conversation.call_count == 1
+        assert 'Stopped early' in capsys.readouterr().out
+
+    def test_follow_up_manifest_saved_after_interrupt(self, tmp_path):
+        """The follow-up send path writes a manifest for the students sent before the interrupt."""
+        quiz = _bare_quiz(tmp_path)
+        quiz.canvas.create_conversation.return_value = [SimpleNamespace(id=501)]
+        messages = [(11, 'Ann Lee', 'm1', 'missed'), (12, 'Bo Diaz', 'm2', 'missed')]
+        with patch('builtins.input', side_effect=['y', KeyboardInterrupt()]):
+            sent = quiz._interactiveSend(messages, 'subj', 'Quiz 3', 5)
+        quiz._saveFollowUpManifest(sent, 100, 'explain', 'subj', False,
+                                   status_by_student={11: 'missed', 12: 'missed'}, open_ended_question='q')
+        files = list(tmp_path.glob('quiz3_999_followup_sent_*.csv'))
+        assert len(files) == 1
+        assert pd.read_csv(files[0])['student_id'].tolist() == [11]
+
+    def test_feedback_send_saves_rows_sent_before_interrupt(self, tmp_path, capsys):
+        """send-follow-up-assessments writes sent_assessment=1 for rows sent before Ctrl-C."""
+        quiz = _bare_quiz(tmp_path)
+        cols = quiz.ASSESSMENTS_COLUMNS
+        rows = [{c: '' for c in cols} for _ in range(3)]
+        for i, r in enumerate(rows):
+            r.update(student_id=11 + i, student_name=f'S{i}', question_id=100, result='pass',
+                     feedback=f'Nice work {i}', sent_assessment=0)
+        pd.DataFrame(rows, columns=cols).to_csv(quiz._assessmentsPath(), index=False)
+        quiz._buildConversationLookup = lambda: {}
+        quiz._collectAssessmentsToSend = lambda df, lookup: [(i, 511 + i, df.iloc[i]) for i in range(3)]
+        with patch('builtins.input', side_effect=['y', KeyboardInterrupt()]):
+            quiz.sendFollowUpAssessments()
+        saved = pd.read_csv(quiz._assessmentsPath())
+        assert saved['sent_assessment'].tolist() == [1, 0, 0]
+        assert 'Stopped early' in capsys.readouterr().out
+
+
+class TestManifestLookupWithSpecialTitles:
+    """Quiz titles with glob characters or '/' must not break the already-sent records."""
+
+    def _quiz(self, tmp_path, prefix):
+        quiz = _bare_quiz(tmp_path)
+        quiz.config.quiz_prefix = prefix
+        _write_followup_manifest(tmp_path / f"{prefix}999_followup_sent_20270201.csv", [
+            (1, 'Ann Lee', 100, 'explain', 501, 's', '2027-02-01T10:00:00+00:00'),
+        ])
+        return quiz
+
+    def test_brackets_in_title_still_find_manifest(self, tmp_path):
+        """A title like 'Quiz 4 [Ch. 5]' still finds the manifest, so already-sent students are skipped."""
+        quiz = self._quiz(tmp_path, 'quiz4_[ch._5]_')
+        assert quiz._loadFollowUpManifest()['student_id'].tolist() == [1]
+        assert quiz._dropStudentsAlreadySent({1: 'missed', 2: 'correct'}, 100) == {2: 'correct'}
+
+    def test_brackets_in_title_still_find_conversations(self, tmp_path):
+        """The conversation lookup used to send feedback finds the thread too."""
+        quiz = self._quiz(tmp_path, 'quiz4_[ch._5]_')
+        assert quiz._buildConversationLookup()
+
+    @pytest.mark.parametrize('title, expected', [
+        ('Quiz 3', 'quiz3'),
+        ('Quiz 3: Loops [Ch. 4]', 'quiz3:_loops_[ch._4]'),
+        ('Quiz 5 I/O', 'quiz5_i-o'),
+        ('Quiz 6 A\\B', 'quiz6_a-b'),
+    ])
+    def test_quiz_name_from_title(self, title, expected):
+        """Only path separators change; every other title keeps its existing file prefix."""
+        from canvigator_quiz import _quizNameFromTitle
+        assert _quizNameFromTitle(title) == expected
+
+
+class TestAwardBonusConfirmation:
+    """A live award-bonus run shows what it will do and asks first; Enter cancels."""
+
+    def _quiz(self, tmp_path):
+        quiz = _bare_quiz(tmp_path)
+        quiz.canvas_quiz = SimpleNamespace(id=999, title='Quiz 3', points_possible=5, assignment_id=5)
+        sub = MagicMock(user_id=11, score=3.0, attempt=1, started_at='s', finished_at='f', time_spent=60)
+        quiz.canvas_quiz.get_submissions = lambda: [sub]
+        quiz.canvas_course = SimpleNamespace(canvas_course=MagicMock())
+        quiz.df_paired_students = pd.DataFrame({'id': [11], 'bonus': [1.0]})
+        quiz.df_retake_students = None
+        quiz.quiz_df = pd.DataFrame({'name': ['Ann Lee'], 'id': [11], 'n_correct': [3], 'n_incorrect': [1], 'score': [3.0]})
+        quiz._loadAllSubmissions = lambda: pd.DataFrame({'id': [11], 'score': [3.0], 'attempt': [1]})
+        return quiz, sub
+
+    @pytest.mark.parametrize('answer', ['', 'n', 'yes'])
+    def test_anything_but_y_cancels(self, tmp_path, answer, capsys):
+        """Enter, 'n' or 'yes' -> nothing is sent to Canvas."""
+        quiz, sub = self._quiz(tmp_path)
+        with patch('builtins.input', return_value=answer):
+            quiz.awardBonusPoints(dry_run=False)
+        sub.update_score_and_comments.assert_not_called()
+        out = capsys.readouterr().out
+        assert '1 student' in out and 'replaces' in out
+        assert 'Cancelled' in out
+
+    def test_y_awards(self, tmp_path):
+        """'y' -> the bonus is set on the attempt."""
+        quiz, sub = self._quiz(tmp_path)
+        with patch('builtins.input', return_value='y'):
+            quiz.awardBonusPoints(dry_run=False)
+        sub.update_score_and_comments.assert_called_once_with(quiz_submissions=[{'attempt': 1, 'fudge_points': 1.0}])
+
+    def test_dry_run_does_not_ask(self, tmp_path):
+        """A dry run previews without a prompt."""
+        quiz, sub = self._quiz(tmp_path)
+        with patch('builtins.input', side_effect=AssertionError('should not prompt')):
+            quiz.awardBonusPoints(dry_run=True)
+        sub.update_score_and_comments.assert_not_called()

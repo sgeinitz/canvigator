@@ -304,6 +304,20 @@ if task not in tasks:
     print(f"Invalid task: '{task}'. Run with --help to see available tasks.")
     sys.exit(1)
 
+# Every known flag has been removed from `args` above and no task takes a
+# positional argument, so anything left over is a typo (e.g. `--dryrun`).
+# Stop rather than run the task for real without it.
+if len(args) > 1:
+    print(f"Error: Unrecognized argument(s): {' '.join(args[1:])}. "
+          f"Run 'python canvigator.py {task} --help' to see this task's options.")
+    sys.exit(1)
+
+# These tasks create things on Canvas and have no dry run; don't silently ignore -d.
+NO_DRY_RUN_TASKS = frozenset({'create-quiz', 'create-media-recording-assignment'})
+if dry_run and task in NO_DRY_RUN_TASKS:
+    print(f"Error: {task} does not support --dry-run (it shows what it will create and asks before creating).")
+    sys.exit(1)
+
 if help_requested:
     import canvigator_help as ch
     ch.print_task_help(task)
