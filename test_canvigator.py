@@ -6237,6 +6237,89 @@ class TestSendsRecordedOnInterrupt:
         assert cq.SEND_STOPPED_EARLY is False
 
 
+class TestSendTasksKeepRecordsAfterStop:
+    """Each real send task keeps its record after a Ctrl-C / Ctrl-D (Canvas faked; the task code is real)."""
+
+    STUDENTS = [{'id': 11, 'name': 'Ann Lee'}, {'id': 12, 'name': 'Bo Diaz'}, {'id': 13, 'name': 'Cy Park'}]
+
+    def _quiz(self, tmp_path, monkeypatch):
+        import canvigator_quiz as cq
+        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
+        quiz = _bare_quiz(tmp_path)
+        quiz.canvas.create_conversation.return_value = [SimpleNamespace(id=501)]
+        quiz.canvas_course = SimpleNamespace(students=self.STUDENTS,
+                                             canvas_course=SimpleNamespace(course_code='CSI-1000-001-12345'))
+        quiz._tryLoadRecentSubmissions = lambda: True
+        quiz.all_subs_by_question = pd.DataFrame({'student_id': [11, 12, 13]})
+        quiz.all_subs_and_events = pd.DataFrame()
+        return quiz
+
+    @staticmethod
+    def _sent_to(canvas):
+        return [int(c.args[0][0]) for c in canvas.create_conversation.call_args_list]
+
+    @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
+    def test_quiz_reminder_log_kept_after_stop(self, stop, tmp_path, monkeypatch):
+        """send-quiz-reminder: send to the first student, stop -> the reminder log lists that student."""
+        import canvigator_quiz as cq
+        quiz = self._quiz(tmp_path, monkeypatch)
+        quiz._loadQuestionInfo = lambda: {}
+        quiz._buildQuizScores = lambda: {}
+        quiz._classifyStudentForQuiz = lambda *a, **k: ('no attempt', None)
+        with patch('builtins.input', side_effect=['y', stop()]):
+            quiz.sendQuizReminders()
+        files = [f for f in tmp_path.glob('quiz3_999_reminder_sent_*.csv') if 'dryrun' not in f.name]
+        assert len(files) == 1
+        assert pd.read_csv(files[0])['student_id'].tolist() == [11]
+        assert cq.SEND_STOPPED_EARLY is True
+
+    @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
+    def test_all_quiz_reminder_log_kept_after_stop(self, stop, tmp_path, monkeypatch):
+        """send-quiz-reminder --all: send to the first student, stop -> the course reminder log lists that student."""
+        import canvigator_course
+        import canvigator_quiz as cq
+        from canvigator_course import CanvigatorCourse
+        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
+        monkeypatch.setattr(canvigator_course.cu, 'is_quiz_open_for_reminder', lambda q: True)
+        q = SimpleNamespace(id=999, title='Quiz 3', points_possible=5, due_at='2099-01-01T00:00:00Z')
+        per_quiz = SimpleNamespace(_tryLoadRecentSubmissions=lambda: True, all_subs_by_question=pd.DataFrame(),
+                                   all_subs_and_events=pd.DataFrame(), _buildQuizScores=lambda: {},
+                                   _classifyStudentForQuiz=lambda *a, **k: ('no attempt', None))
+        course = CanvigatorCourse.__new__(CanvigatorCourse)
+        course.canvas = MagicMock()
+        course.canvas.create_conversation.return_value = [SimpleNamespace(id=501)]
+        course.canvas_course = SimpleNamespace(get_quizzes=lambda: [q], course_code='CSI-1000-001-12345')
+        course.config = SimpleNamespace(data_path=tmp_path)
+        course.students = self.STUDENTS
+        course._loadQuizForReminder = lambda quiz: (per_quiz, {})
+        with patch('builtins.input', side_effect=['y', stop()]):
+            course.sendAllQuizReminders()
+        files = [f for f in tmp_path.glob('course_reminder_sent_*.csv') if 'dryrun' not in f.name]
+        assert len(files) == 1
+        assert pd.read_csv(files[0])['student_id'].tolist() == [11]
+        assert cq.SEND_STOPPED_EARLY is True
+
+    def test_follow_up_question_record_kept_and_rerun_skips_sent_student(self, tmp_path, monkeypatch):
+        """send-follow-up-question: send to the first student, stop; a re-run then messages only the other two."""
+        import canvigator_quiz as cq
+        quiz = self._quiz(tmp_path, monkeypatch)
+        quiz._loadQuestionInfo = lambda: {100: {'position': 2, 'keywords': 'water'}}
+        quiz._loadOpenEndedQuestions = lambda: {100: {'question_mode': 'explain', 'open_ended_question': 'Explain it.'}}
+        quiz._classifyStudentsByQuestionResult = lambda qid, df, info: {11: 'missed', 12: 'correct', 13: 'missed'}
+        with patch('builtins.input', side_effect=['y', KeyboardInterrupt()]):
+            quiz.sendFollowUpQuestions()
+        files = list(tmp_path.glob('quiz3_999_followup_sent_*.csv'))
+        assert len(files) == 1
+        assert pd.read_csv(files[0])['student_id'].tolist() == [11]
+        assert cq.SEND_STOPPED_EARLY is True
+        assert self._sent_to(quiz.canvas) == [11]
+
+        quiz.canvas.create_conversation.reset_mock()
+        with patch('builtins.input', return_value='y'):
+            quiz.sendFollowUpQuestions()
+        assert self._sent_to(quiz.canvas) == [12, 13]
+
+
 class TestManifestLookupWithSpecialTitles:
     """Quiz titles with glob characters or '/' must not break the already-sent records."""
 
