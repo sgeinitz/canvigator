@@ -6182,8 +6182,11 @@ class TestSendsRecordedOnInterrupt:
         assert len(files) == 1
         assert pd.read_csv(files[0])['student_id'].tolist() == [11]
 
-    def test_feedback_send_saves_rows_sent_before_interrupt(self, tmp_path, capsys):
-        """send-follow-up-assessments writes sent_assessment=1 for rows sent before Ctrl-C."""
+    @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
+    def test_feedback_send_saves_rows_sent_before_interrupt(self, stop, tmp_path, capsys, monkeypatch):
+        """send-follow-up-assessments writes sent_assessment=1 for rows sent before Ctrl-C / Ctrl-D, and flags the stop."""
+        import canvigator_quiz as cq
+        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
         quiz = _bare_quiz(tmp_path)
         cols = quiz.ASSESSMENTS_COLUMNS
         rows = [{c: '' for c in cols} for _ in range(3)]
@@ -6193,11 +6196,29 @@ class TestSendsRecordedOnInterrupt:
         pd.DataFrame(rows, columns=cols).to_csv(quiz._assessmentsPath(), index=False)
         quiz._buildConversationLookup = lambda: {}
         quiz._collectAssessmentsToSend = lambda df, lookup: [(i, 511 + i, df.iloc[i]) for i in range(3)]
-        with patch('builtins.input', side_effect=['y', KeyboardInterrupt()]):
+        with patch('builtins.input', side_effect=['y', stop()]):
             quiz.sendFollowUpAssessments()
         saved = pd.read_csv(quiz._assessmentsPath())
         assert saved['sent_assessment'].tolist() == [1, 0, 0]
         assert 'Stopped early' in capsys.readouterr().out
+        assert cq.SEND_STOPPED_EARLY is True
+
+    def test_feedback_send_without_a_stop_leaves_the_flag_clear(self, tmp_path, monkeypatch):
+        """Answering every prompt (here: skip all) is a normal finish, not a stop."""
+        import canvigator_quiz as cq
+        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
+        quiz = _bare_quiz(tmp_path)
+        cols = quiz.ASSESSMENTS_COLUMNS
+        rows = [{c: '' for c in cols} for _ in range(2)]
+        for i, r in enumerate(rows):
+            r.update(student_id=11 + i, student_name=f'S{i}', question_id=100, result='pass',
+                     feedback=f'Nice work {i}', sent_assessment=0)
+        pd.DataFrame(rows, columns=cols).to_csv(quiz._assessmentsPath(), index=False)
+        quiz._buildConversationLookup = lambda: {}
+        quiz._collectAssessmentsToSend = lambda df, lookup: [(i, 511 + i, df.iloc[i]) for i in range(2)]
+        with patch('builtins.input', return_value='n'):
+            quiz.sendFollowUpAssessments()
+        assert cq.SEND_STOPPED_EARLY is False
 
 
 class TestManifestLookupWithSpecialTitles:
@@ -6328,11 +6349,32 @@ class TestSafetyFixFollowUps:
             cq._interactiveSend(MagicMock(), [(11, 'Ann Lee', 'm1', 'missed')], 'subj', 'hdr')
         assert cq.SEND_STOPPED_EARLY is False
 
-    def test_cli_exits_nonzero_when_a_send_stopped_early(self):
-        """canvigator.py checks the flag before printing '*** Done ***'."""
-        src = (Path(__file__).parent / 'canvigator.py').read_text()
-        assert src.index('SEND_STOPPED_EARLY') < src.rindex('*** Done ***')
-        assert 'sys.exit(130)' in src
+    @pytest.mark.parametrize('stopped, rc_expected, text', [(True, 130, 'Stopped early'), (False, 0, '*** Done ***')])
+    def test_cli_exit_code_reflects_a_stopped_send(self, stopped, rc_expected, text, tmp_path):
+        """Run the real canvigator.py to the end (Canvas and the task faked): a stopped send exits 130, else 0."""
+        import os
+        import sys
+        wrapper = tmp_path / 'run_cli.py'
+        wrapper.write_text(
+            "import runpy, sys\n"
+            "from unittest.mock import MagicMock\n"
+            "import canvasapi, canvigator_utils as cu, canvigator_course as cc, canvigator_quiz as cq\n"
+            "canvasapi.Canvas = MagicMock()\n"
+            "cu.CanvigatorConfig = MagicMock()\n"
+            "cu.selectCourse = lambda canvas: MagicMock()\n"
+            "cc.CanvigatorCourse = MagicMock()\n"
+            "cu.selectCSVFromList = lambda *a, **k: 'tagged.csv'\n"
+            f"cq.generateOpenEndedQuestions = lambda path: setattr(cq, 'SEND_STOPPED_EARLY', {stopped})\n"
+            "sys.argv = ['canvigator.py', 'generate-follow-up-questions']\n"
+            "runpy.run_path('canvigator.py', run_name='__main__')\n"
+        )
+        env = {k: os.environ[k] for k in ('PATH', 'HOME', 'PYTHONHOME') if k in os.environ}
+        repo = str(Path(__file__).parent)
+        env.update(CANVAS_URL='https://canvas.invalid', CANVAS_TOKEN='fake', PYTHONPATH=repo)
+        result = subprocess.run([sys.executable, str(wrapper)], capture_output=True, text=True,
+                                cwd=repo, env=env, timeout=30)
+        assert result.returncode == rc_expected, result.stdout + result.stderr
+        assert text in result.stdout
 
     def test_constructor_uses_the_safe_prefix(self, tmp_path):
         """CanvigatorQuiz.__init__ builds the file prefix with _quizNameFromTitle."""
