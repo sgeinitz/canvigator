@@ -182,11 +182,11 @@ while '--help' in args:
     args.remove('--help')
 
 dry_run = '--dry-run' in args
-if dry_run:
+while '--dry-run' in args:   # a repeated flag is harmless
     args.remove('--dry-run')
 
 send_all = '--send-all' in args
-if send_all:
+while '--send-all' in args:   # a repeated flag is harmless
     args.remove('--send-all')
 
 if dry_run and send_all:
@@ -194,27 +194,27 @@ if dry_run and send_all:
     sys.exit(1)
 
 tag = '--tag' in args
-if tag:
+while '--tag' in args:   # a repeated flag is harmless
     args.remove('--tag')
 
 all_quizzes_flag = '--all' in args
-if all_quizzes_flag:
+while '--all' in args:   # a repeated flag is harmless
     args.remove('--all')
 
 auto_grade_flag = '--auto-grade' in args
-if auto_grade_flag:
+while '--auto-grade' in args:   # a repeated flag is harmless
     args.remove('--auto-grade')
 
 cloud_questions_flag = '--cloud-questions' in args
-if cloud_questions_flag:
+while '--cloud-questions' in args:   # a repeated flag is harmless
     args.remove('--cloud-questions')
 
 choose_model_flag = '--choose-model' in args
-if choose_model_flag:
+while '--choose-model' in args:   # a repeated flag is harmless
     args.remove('--choose-model')
 
 save_transcript_flag = '--save-transcript' in args
-if save_transcript_flag:
+while '--save-transcript' in args:   # a repeated flag is harmless
     args.remove('--save-transcript')
 
 crn = None

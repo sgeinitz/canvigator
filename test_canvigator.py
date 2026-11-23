@@ -6137,6 +6137,20 @@ class TestLeftoverCliArguments:
         assert 'Unrecognized argument' in out and typo in out
         assert 'CANVAS_URL' not in out
 
+    @pytest.mark.parametrize('args', [('award-bonus', '-d', '-d'), ('--dry-run', 'award-bonus', '-d'),
+                                      ('get-quiz-questions', '--tag', '-t')])
+    def test_repeated_on_off_flag_is_accepted(self, args):
+        """Typing the same on/off flag twice is harmless: it reaches the Canvas check, not 'Unrecognized argument'."""
+        rc, out = _run_cli_no_canvas(*args)
+        assert 'Unrecognized argument' not in out
+        assert 'CANVAS_URL' in out
+
+    def test_repeated_value_flag_is_still_rejected(self):
+        """Two --crn values could conflict, so the second one is still reported."""
+        rc, out = _run_cli_no_canvas('award-bonus', '--crn', '11111', '--crn', '22222')
+        assert rc != 0
+        assert 'Unrecognized argument' in out and '22222' in out
+
     def test_valid_flags_still_reach_the_canvas_check(self):
         """A correct `--dry-run` in either position is accepted (it then needs Canvas credentials)."""
         for args in (('award-bonus', '--dry-run'), ('--dry-run', 'award-bonus')):
@@ -6200,7 +6214,9 @@ class TestSendsRecordedOnInterrupt:
             quiz.sendFollowUpAssessments()
         saved = pd.read_csv(quiz._assessmentsPath())
         assert saved['sent_assessment'].tolist() == [1, 0, 0]
-        assert 'Stopped early' in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert out.count('Stopped early') == 1   # one notice, after the record is saved
+        assert 'Stopped early. Sent 1 feedback message(s); updated' in out
         assert cq.SEND_STOPPED_EARLY is True
 
     def test_feedback_send_without_a_stop_leaves_the_flag_clear(self, tmp_path, monkeypatch):
@@ -6280,6 +6296,18 @@ class TestAwardBonusConfirmation:
         out = capsys.readouterr().out
         assert '1 student' in out and 'replaces' in out
         assert 'Cancelled' in out
+
+    def test_summary_counts_only_students_getting_a_bonus(self, tmp_path, capsys):
+        """Three students, two with a bonus (1.0 and 0.5) -> '2 student(s), 1.5 points', not 3 students."""
+        quiz, sub = self._quiz(tmp_path)
+        quiz.df_paired_students = pd.DataFrame({'id': [11, 12], 'bonus': [1.0, 0.5]})
+        quiz.quiz_df = pd.DataFrame({'name': ['Ann Lee', 'Bo Diaz', 'Cy Park'], 'id': [11, 12, 13],
+                                     'n_correct': [3, 2, 4], 'n_incorrect': [1, 2, 0], 'score': [3.0, 2.0, 4.0]})
+        quiz._loadAllSubmissions = lambda: pd.DataFrame({'id': [11, 12, 13], 'score': [3.0, 2.0, 4.0], 'attempt': [1, 1, 1]})
+        with patch('builtins.input', return_value=''):
+            quiz.awardBonusPoints(dry_run=False)
+        out = capsys.readouterr().out
+        assert '2 student(s), 1.5 points in total' in out
 
     def test_y_awards(self, tmp_path):
         """'y' -> the bonus is set on the attempt."""

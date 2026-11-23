@@ -2225,15 +2225,14 @@ class CanvigatorQuiz:
             # A partial preview must not count as a reviewed dry run, or it would unlock --send-all.
             print("\n\n[DRY-RUN] Preview stopped early; no dry-run record was saved, so --send-all stays locked.")
             return
-        if stopped:
-            print(f"\n\nStopped early: {n_sent} feedback message(s) were sent and will be recorded.")
         if dry_run:
             self._saveAssessmentsDryRunManifest(to_send)
             print(f"\n[DRY-RUN] Would have sent {len(to_send)} feedback message(s). No changes written.")
             return
 
         df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
-        print(f"\n{'Stopped early. ' if stopped else ''}Sent {n_sent} feedback message(s); updated {path.name}.")
+        prefix = "\n\nStopped early. " if stopped else "\n"
+        print(f"{prefix}Sent {n_sent} feedback message(s); updated {path.name}.")
         logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
 
     def _sendAssessmentRows(self, df, to_send, dry_run, send_all):
