@@ -710,15 +710,20 @@ def _sendOrPreviewMessages(messages, subject_str, header_label):
 def _quizNameFromTitle(title):
     """Return the file-name stem for a quiz title (e.g. 'Quiz 3' -> 'quiz3').
 
-    Lower-cased, spaces become underscores, and 'quiz_3' becomes 'quiz3'. Path
-    separators (forward and back slashes) become '-' so a title like 'I/O' can't
-    point into a subfolder; every other character is kept so existing quizzes keep
+    Lower-cased, spaces become underscores, and 'quiz_3' becomes 'quiz3'. A '/'
+    becomes '-' so a title like 'I/O' can't point into a subfolder (such files
+    could never be saved); every other character is kept so existing quizzes keep
     the file prefix their earlier files were saved under.
     """
     name = title.lower().replace(" ", "_")
     # Remove underscore between 'quiz' and number so filenames read 'quizX_' not 'quiz_X_'
     name = re.sub(r'^quiz_(\d)', r'quiz\1', name)
-    return name.replace("/", "-").replace("\\", "-")
+    return name.replace("/", "-")
+
+
+# Set when an interactive send was stopped early (Ctrl-C / EOF); canvigator.py then
+# exits non-zero instead of printing "Done".
+SEND_STOPPED_EARLY = False
 
 
 def _bonusCommentText(p_bonus, r_bonus, bonus_val):
@@ -751,10 +756,12 @@ def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False
     else:
         print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).\n")
 
+    global SEND_STOPPED_EARLY
     sent_messages = []
     try:
         _sendEach(canvas, messages, subject_str, send_all, sent_messages)
     except (KeyboardInterrupt, EOFError):
+        SEND_STOPPED_EARLY = True
         # Return what was already sent so the caller still records it; otherwise a
         # re-run would message those students again.
         print(f"\n\nStopped early: {len(sent_messages)} message(s) were sent and will be recorded. "
@@ -2212,18 +2219,14 @@ class CanvigatorQuiz:
             print("--send-all set — sending every feedback without per-student confirmation.")
         else:
             print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).")
-        n_sent = 0
-        stopped = False
-        try:
-            for idx, convo_id, row in to_send:
-                if self._sendOneAssessment(df, idx, convo_id, row, dry_run, send_all=send_all):
-                    n_sent += 1
-        except (KeyboardInterrupt, EOFError):
-            # Fall through to the save below so rows already sent keep sent_assessment=1.
-            stopped = True
-            print(f"\n\nStopped early: {n_sent} feedback message(s) were sent and will be recorded.")
-            logger.warning(f"send-follow-up-assessments interrupted after {n_sent} sent")
+        n_sent, stopped = self._sendAssessmentRows(df, to_send, dry_run, send_all)
 
+        if dry_run and stopped:
+            # A partial preview must not count as a reviewed dry run, or it would unlock --send-all.
+            print("\n\n[DRY-RUN] Preview stopped early; no dry-run record was saved, so --send-all stays locked.")
+            return
+        if stopped:
+            print(f"\n\nStopped early: {n_sent} feedback message(s) were sent and will be recorded.")
         if dry_run:
             self._saveAssessmentsDryRunManifest(to_send)
             print(f"\n[DRY-RUN] Would have sent {len(to_send)} feedback message(s). No changes written.")
@@ -2232,6 +2235,25 @@ class CanvigatorQuiz:
         df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
         print(f"\n{'Stopped early. ' if stopped else ''}Sent {n_sent} feedback message(s); updated {path.name}.")
         logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
+
+    def _sendAssessmentRows(self, df, to_send, dry_run, send_all):
+        """Send (or preview) each row; return (n_sent, stopped_early).
+
+        A Ctrl-C / EOF stops the loop but is not re-raised, so the caller still
+        saves the rows already sent (sent_assessment=1) and a re-run doesn't
+        send them again.
+        """
+        global SEND_STOPPED_EARLY
+        n_sent = 0
+        try:
+            for idx, convo_id, row in to_send:
+                if self._sendOneAssessment(df, idx, convo_id, row, dry_run, send_all=send_all):
+                    n_sent += 1
+        except (KeyboardInterrupt, EOFError):
+            SEND_STOPPED_EARLY = True
+            logger.warning(f"send-follow-up-assessments {'preview ' if dry_run else ''}interrupted after {n_sent} sent")
+            return n_sent, True
+        return n_sent, False
 
     def _saveAssessmentsDryRunManifest(self, to_send):
         """Write a *_assessments_sent_dryrun_YYYYMMDD.csv listing rows that would be sent.

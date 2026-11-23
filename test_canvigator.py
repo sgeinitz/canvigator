@@ -6226,10 +6226,10 @@ class TestManifestLookupWithSpecialTitles:
         ('Quiz 3', 'quiz3'),
         ('Quiz 3: Loops [Ch. 4]', 'quiz3:_loops_[ch._4]'),
         ('Quiz 5 I/O', 'quiz5_i-o'),
-        ('Quiz 6 A\\B', 'quiz6_a-b'),
+        ('Quiz 6 A\\B', 'quiz6_a\\b'),
     ])
     def test_quiz_name_from_title(self, title, expected):
-        """Only path separators change; every other title keeps its existing file prefix."""
+        """Only '/' changes (it could never be saved); every other title keeps its existing file prefix."""
         from canvigator_quiz import _quizNameFromTitle
         assert _quizNameFromTitle(title) == expected
 
@@ -6273,3 +6273,100 @@ class TestAwardBonusConfirmation:
         with patch('builtins.input', side_effect=AssertionError('should not prompt')):
             quiz.awardBonusPoints(dry_run=True)
         sub.update_score_and_comments.assert_not_called()
+
+
+class TestSafetyFixFollowUps:
+    """Follow-ups from the review of the student-safety fixes."""
+
+    def test_stopped_dry_run_preview_writes_no_dry_run_record(self, tmp_path, capsys):
+        """Ctrl-C during a feedback dry-run preview must not unlock --send-all with a dry-run record."""
+        quiz = _bare_quiz(tmp_path)
+        cols = quiz.ASSESSMENTS_COLUMNS
+        rows = [{c: '' for c in cols} for _ in range(3)]
+        for i, r in enumerate(rows):
+            r.update(student_id=11 + i, student_name=f'S{i}', question_id=100, result='pass',
+                     feedback=f'Nice work {i}', sent_assessment=0)
+        pd.DataFrame(rows, columns=cols).to_csv(quiz._assessmentsPath(), index=False)
+        quiz._buildConversationLookup = lambda: {}
+        quiz._collectAssessmentsToSend = lambda df, lookup: [(i, 511 + i, df.iloc[i]) for i in range(3)]
+        quiz._sendOneAssessment = MagicMock(side_effect=[False, KeyboardInterrupt()])
+        quiz.sendFollowUpAssessments(dry_run=True)
+        assert list(tmp_path.glob('*dryrun*')) == []
+        out = capsys.readouterr().out
+        assert 'will be recorded' not in out
+        assert 'no dry-run record' in out
+
+    def test_help_still_wins_over_new_argument_checks(self):
+        """`<task> --help` shows help even with -d or a stray argument."""
+        for args in (('create-quiz', '--help', '-d'), ('award-bonus', 'extra', '--help')):
+            rc, out = _run_cli_no_canvas(*args)
+            assert rc == 0, out
+            assert 'Unrecognized' not in out and 'does not support' not in out
+
+    def test_dry_run_error_does_not_claim_a_confirmation(self):
+        """The create tasks don't ask before creating, so the error must not say they do."""
+        rc, out = _run_cli_no_canvas('create-quiz', '--dry-run')
+        assert rc != 0
+        assert 'asks before' not in out
+        assert 'right away' in out
+
+    @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
+    def test_interrupted_send_is_flagged_for_a_nonzero_exit(self, stop, monkeypatch):
+        """After a stopped send, SEND_STOPPED_EARLY is set so the CLI exits non-zero."""
+        import canvigator_quiz as cq
+        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
+        canvas = MagicMock()
+        with patch('builtins.input', side_effect=[stop()]):
+            cq._interactiveSend(canvas, [(11, 'Ann Lee', 'm1', 'missed')], 'subj', 'hdr')
+        assert cq.SEND_STOPPED_EARLY is True
+
+    def test_uninterrupted_send_leaves_the_flag_clear(self, monkeypatch):
+        """A normal run doesn't set the flag."""
+        import canvigator_quiz as cq
+        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
+        with patch('builtins.input', return_value=''):
+            cq._interactiveSend(MagicMock(), [(11, 'Ann Lee', 'm1', 'missed')], 'subj', 'hdr')
+        assert cq.SEND_STOPPED_EARLY is False
+
+    def test_cli_exits_nonzero_when_a_send_stopped_early(self):
+        """canvigator.py checks the flag before printing '*** Done ***'."""
+        src = (Path(__file__).parent / 'canvigator.py').read_text()
+        assert src.index('SEND_STOPPED_EARLY') < src.rindex('*** Done ***')
+        assert 'sys.exit(130)' in src
+
+    def test_constructor_uses_the_safe_prefix(self, tmp_path):
+        """CanvigatorQuiz.__init__ builds the file prefix with _quizNameFromTitle."""
+        from canvigator_quiz import CanvigatorQuiz
+
+        class _Config:
+            data_path = tmp_path
+            quiz_prefix = ''
+
+            def modifyQuizPrefix(self, new_prefix):
+                self.quiz_prefix = new_prefix
+
+        canvas_quiz = SimpleNamespace(id=5, title='Quiz 5 I/O', published=False, get_questions=lambda: [])
+        quiz = CanvigatorQuiz(MagicMock(), MagicMock(), canvas_quiz, _Config(), skip_student_data=True)
+        assert quiz.config.quiz_prefix == 'quiz5_i-o_'
+
+    def test_retake_only_award_also_asks(self, tmp_path):
+        """The retake-only path shows the same confirmation; Enter cancels."""
+        quiz, sub = TestAwardBonusConfirmation()._quiz(tmp_path)
+        quiz.df_paired_students = None
+        quiz.df_retake_students = pd.DataFrame({'id': [11], 'retake_bonus': [0.75]})
+        with patch('builtins.input', return_value=''):
+            quiz.awardBonusPoints(dry_run=False)
+        sub.update_score_and_comments.assert_not_called()
+
+    def test_bonus_comment_text(self):
+        """The submission comment wording is unchanged by the refactor."""
+        from canvigator_quiz import _bonusCommentText
+        assert _bonusCommentText(1.0, 0.5, 1.5) == "Bonus points: partner bonus = 1.0, retake bonus = 0.5 (total = 1.5)"
+        assert _bonusCommentText(0.0, 0.5, 0.5) == "Bonus points: retake bonus = 0.5 (total = 0.5)"
+
+    @pytest.mark.parametrize('task', ['award-bonus', 'award-bonus-partner-only', 'award-bonus-retake-only'])
+    def test_help_mentions_the_confirmation(self, task):
+        """Each award task's help says a live run asks first and that Canvas replaces an existing bonus."""
+        from canvigator_help import TASK_HELP
+        text = TASK_HELP[task]['description']
+        assert 'asks' in text and 'replaces' in text

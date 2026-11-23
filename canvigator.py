@@ -304,6 +304,11 @@ if task not in tasks:
     print(f"Invalid task: '{task}'. Run with --help to see available tasks.")
     sys.exit(1)
 
+if help_requested:
+    import canvigator_help as ch
+    ch.print_task_help(task)
+    sys.exit(0)
+
 # Every known flag has been removed from `args` above and no task takes a
 # positional argument, so anything left over is a typo (e.g. `--dryrun`).
 # Stop rather than run the task for real without it.
@@ -315,13 +320,10 @@ if len(args) > 1:
 # These tasks create things on Canvas and have no dry run; don't silently ignore -d.
 NO_DRY_RUN_TASKS = frozenset({'create-quiz', 'create-media-recording-assignment'})
 if dry_run and task in NO_DRY_RUN_TASKS:
-    print(f"Error: {task} does not support --dry-run (it shows what it will create and asks before creating).")
+    print(f"Error: {task} does not support --dry-run; it makes its changes on Canvas right away. "
+          "Run it without --dry-run when you're ready.")
     sys.exit(1)
 
-if help_requested:
-    import canvigator_help as ch
-    ch.print_task_help(task)
-    sys.exit(0)
 
 if consent_csv is not None and task != 'export-anon-data':
     print("Error: --consent applies only to export-anon-data.")
@@ -477,5 +479,10 @@ else:
             task, quiz, dry_run, tag, reply_window_days,
             send_all=send_all, choose_model=choose_model_flag, save_transcript=save_transcript_flag,
         )
+
+if cq.SEND_STOPPED_EARLY:
+    # Messages already sent were recorded; exit non-zero so the stop isn't mistaken for success.
+    print("\n*** Stopped early: see the messages above ***\n")
+    sys.exit(130)
 
 print("\n*** Done ***\n")

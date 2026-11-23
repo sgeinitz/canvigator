@@ -158,6 +158,10 @@ TASK_HELP = {
             "reflects every attempt through now; if the quiz's submission CSVs "
             "were written within the last 10 minutes (e.g. by a prior dry run) "
             "they are reused instead of refetching."
+            " A live run shows how many students and points it will award and "
+            "asks [y/N] before changing anything. Canvas replaces (does not add "
+            "to) a bonus already on an attempt, so running partner-only and "
+            "retake-only separately keeps only the later one."
         ),
         'prerequisites': [],
         'inputs': [
@@ -185,6 +189,10 @@ TASK_HELP = {
             "as award-bonus; sets fudge points on each partnered student's best "
             "attempt. Submission data is auto-fetched (with the 10-minute "
             "cache) so detection reflects every attempt through now."
+            " A live run shows how many students and points it will award and "
+            "asks [y/N] before changing anything. Canvas replaces (does not add "
+            "to) a bonus already on an attempt, so running partner-only and "
+            "retake-only separately keeps only the later one."
         ),
         'prerequisites': [],
         'inputs': [
@@ -209,6 +217,10 @@ TASK_HELP = {
             "award-bonus; sets fudge points on each qualifying retaker's best "
             "attempt. Submission data is auto-fetched (with the 10-minute "
             "cache) so detection reflects every attempt through now."
+            " A live run shows how many students and points it will award and "
+            "asks [y/N] before changing anything. Canvas replaces (does not add "
+            "to) a bonus already on an attempt, so running partner-only and "
+            "retake-only separately keeps only the later one."
         ),
         'prerequisites': [],
         'inputs': [

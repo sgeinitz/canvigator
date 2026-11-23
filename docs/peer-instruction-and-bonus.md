@@ -25,7 +25,13 @@ Per-task `--help` is also available from the CLI:
 3. Run **`award-bonus`** (or `award-bonus-partner-only` /
    `award-bonus-retake-only`) to detect partners and/or retakers and award
    fudge points on each student's best attempt. Use `--dry-run` first to
-   preview without writing to Canvas.
+   preview without writing to Canvas. A live run shows how many students and
+   points it will award and asks `[y/N]` before changing anything.
+
+   Canvas **replaces** (does not add to) a bonus already on an attempt, so
+   award both bonuses together with `award-bonus` rather than running
+   `award-bonus-partner-only` and later `award-bonus-retake-only`; the second
+   run would overwrite the first.
 
 ---
 
@@ -84,7 +90,9 @@ must have been run first for the same quiz so that the submission CSVs exist.
 
 Use `--dry-run` to preview which students would receive bonus points without
 modifying anything in Canvas. In dry-run mode the scores CSV is named
-`*_scores_w_bonus_dryrun_*.csv`.
+`*_scores_w_bonus_dryrun_*.csv`. A live run first shows how many students and
+points it will award and asks `[y/N]`; anything other than `y` cancels without
+changing Canvas.
 
 ---
 
