@@ -36,6 +36,15 @@ def _isValidMediaFile(path, min_bytes=1024):
 
 # Retry policy for transient upstream errors (e.g. Ollama cloud 5xx).
 _CHAT_MAX_ATTEMPTS = 4
+# HTTP statuses that mean the account can't be used (bad key, no credit, no access);
+# every later call would fail the same way, so callers stop instead of skipping a question.
+_ACCOUNT_ERROR_STATUSES = (401, 402, 403)
+
+
+class LLMAccountError(RuntimeError):
+    """Ollama refused the request for an account reason (401/402/403); retrying or moving on won't help."""
+
+
 _CHAT_BACKOFF_BASE_SECS = 1.0
 
 
@@ -52,6 +61,12 @@ def _chat_with_retry(client, **chat_kwargs):
             return client.chat(**chat_kwargs)
         except Exception as e:
             status_code = getattr(e, "status_code", None)
+            if status_code in _ACCOUNT_ERROR_STATUSES:
+                detail = getattr(e, "error", None) or str(e)
+                raise LLMAccountError(
+                    f"Ollama refused the request (HTTP {status_code}): {detail}. "
+                    "Check OLLAMA_API_KEY and your Ollama account."
+                ) from e
             transient = status_code is not None and 500 <= status_code < 600
             if not transient or attempt >= _CHAT_MAX_ATTEMPTS:
                 raise
@@ -414,6 +429,8 @@ def tag_question(row, client, model):
         )
         content = resp["message"]["content"]
         return _parse_tags(content)
+    except LLMAccountError:
+        raise
     except Exception as e:
         logger.warning(f"LLM tagging failed for question {row.get('question_id')}: {e}")
         return []
@@ -542,6 +559,8 @@ def classify_question_mode(row, client, model):
         )
         content = resp["message"]["content"]
         return _parse_question_mode(content)
+    except LLMAccountError:
+        raise
     except Exception as e:
         logger.warning(f"LLM classify failed for question {row.get('question_id')}: {e}")
         return "explain"
@@ -568,6 +587,8 @@ def generate_open_ended_candidates(row, client, model, mode, n=3):
         )
         content = resp["message"]["content"].strip()
         return _parse_candidates(content, n=n)
+    except LLMAccountError:
+        raise
     except Exception as e:
         logger.warning(f"LLM generation failed for question {row.get('question_id')}: {e}")
         return []
@@ -616,6 +637,8 @@ def generate_assessment_guide(row, client, model, mode, open_ended_question):
         # Collapse any accidental newlines into spaces — guide should be a single paragraph.
         content = re.sub(r"\s*\n+\s*", " ", content).strip().strip('"\'')
         return content
+    except LLMAccountError:
+        raise
     except Exception as e:
         logger.warning(f"LLM assessment-guide generation failed for question {row.get('question_id')}: {e}")
         return ""
@@ -717,6 +740,8 @@ def generate_structured_rubric(row, client, model, mode, open_ended_question):
             options={"temperature": 0.3},
         )
         return _parse_structured_rubric(resp["message"]["content"], mode)
+    except LLMAccountError:
+        raise
     except Exception as e:
         logger.warning(f"LLM structured-rubric generation failed for question {row.get('question_id')}: {e}")
         return _empty_rubric(mode)
@@ -854,6 +879,8 @@ def generate_exemplars(row, client, model, mode, open_ended_question, rubric):
             options={"temperature": 0.5},
         )
         return _parse_exemplars(resp["message"]["content"])
+    except LLMAccountError:
+        raise
     except Exception as e:
         logger.warning(f"LLM exemplar generation failed for question {row.get('question_id')}: {e}")
         return dict(_EMPTY_EXEMPLARS)
@@ -1571,6 +1598,14 @@ def assess_replies(replies, question_info_row, model=None, audio_model=None,
     return results
 
 
+def _question_label(row):
+    """Short display label for a question row: its name, else its id, else '?'."""
+    label = row.get('question_name') or row.get('question_id')
+    if not isinstance(label, str):
+        label = str(label) if label is not None else '?'
+    return label
+
+
 def generate_open_ended_questions(rows, model=None, n=3, progress=None):
     """Classify and generate n candidate open-ended questions per input row.
 
@@ -1606,9 +1641,7 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
     results = []
     frame = 0
     for i, row in enumerate(rows, start=1):
-        label = row.get('question_name') or row.get('question_id')
-        if not isinstance(label, str):
-            label = str(label) if label is not None else '?'
+        label = _question_label(row)
         if spin_fn:
             spin_fn(frame, f"[{i}/{total}] {label} — classifying")
             frame += 1
@@ -1640,6 +1673,8 @@ def generate_open_ended_questions(rows, model=None, n=3, progress=None):
                 print(" done")
             if not candidates:
                 logger.warning(f"No candidates generated for question {row.get('question_id')}")
+        except LLMAccountError:
+            raise
         except Exception as e:
             logger.warning(f"Question {row.get('question_id')} failed and was skipped: {e}")
             if not spin_fn:

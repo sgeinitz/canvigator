@@ -652,6 +652,19 @@ def generateOpenEndedQuestions(tagged_csv_path):
     import canvigator_llm
     results = canvigator_llm.generate_open_ended_questions(rows, progress=(spin, spin_done))
 
+    with_candidates = {r['question_id'] for r in results if r['open_ended_question']}
+    failed = [f"Q{r.get('position')}" for r in rows if r.get('question_id') not in with_candidates]
+    if rows and len(failed) == len(rows):
+        raise RuntimeError(
+            f"No follow-up candidates were generated for any of the {len(rows)} questions, so nothing was saved. "
+            "See the warnings above, then re-run 'generate-follow-up-questions'."
+        )
+    if failed:
+        logger.warning(
+            f"{len(failed)} of {len(rows)} questions got no candidates ({', '.join(failed)}); "
+            "their rows are empty. Re-run 'generate-follow-up-questions' to retry."
+        )
+
     out_df = pd.DataFrame(results, columns=[
         'selected_question', 'question_id', 'position', 'question_name',
         'keywords', 'question_mode', 'est_difficulty', 'open_ended_question', 'assessment_guide',
@@ -1021,6 +1034,17 @@ class CanvigatorQuiz:
         if tag:
             import canvigator_llm
             canvigator_llm.tag_questions(rows, progress=(spin, spin_done))
+            untagged = [f"Q{r['position']}" for r in rows if not r.get('keywords')]
+            if rows and len(untagged) == len(rows):
+                raise RuntimeError(
+                    f"Tagging failed for all {len(rows)} questions, so no tagged questions file was saved. "
+                    "See the warnings above, then re-run 'get-quiz-questions --tag'."
+                )
+            if untagged:
+                logger.warning(
+                    f"{len(untagged)} of {len(rows)} questions got no tags ({', '.join(untagged)}); "
+                    "their keywords are empty. Re-run 'get-quiz-questions --tag' to retry."
+                )
 
         columns = ['quiz_id', 'assignment_id', 'question_id', 'position', 'question_name', 'question_type']
         if tag:
