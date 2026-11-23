@@ -512,7 +512,9 @@ TASK_HELP = {
             "published, future-due quiz. If the quiz's submission CSVs were "
             "written within the last 10 minutes, they are reused instead of "
             "refetching from Canvas — making the typical dry-run-then-real "
-            "workflow fast on the second run."
+            "workflow fast on the second run. Stopping partway (Ctrl-C / "
+            "Ctrl-D) keeps the log of reminders already sent and exits with "
+            "code 130; a re-run does not skip students already reminded."
         ),
         'prerequisites': [
             "get-quiz-questions --tag must have produced "
@@ -564,7 +566,9 @@ TASK_HELP = {
             "refetching from Canvas. A question that already has a follow-up "
             "assignment is refused (one delivery method per question). "
             "Message delivery, step 1 of 3; the "
-            "assignment-delivery equivalent is create-follow-up-assignment."
+            "assignment-delivery equivalent is create-follow-up-assignment. "
+            "Stopping partway (Ctrl-C / Ctrl-D) records the students already "
+            "messaged, so a re-run skips them, and exits with code 130."
         ),
         'prerequisites': [
             "get-quiz-questions --tag must have produced "
@@ -667,7 +671,9 @@ TASK_HELP = {
             "returned by review-return-follow-up-assignment. "
             "Message delivery, step 3 of 3; the "
             "assignment-delivery equivalent is "
-            "review-return-follow-up-assignment."
+            "review-return-follow-up-assignment. "
+            "Stopping partway (Ctrl-C / Ctrl-D) saves the rows already sent, "
+            "so a re-run doesn't resend them, and exits with code 130."
         ),
         'prerequisites': [
             "assess-replies must have produced "

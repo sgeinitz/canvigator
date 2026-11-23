@@ -2233,6 +2233,8 @@ class CanvigatorQuiz:
         df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
         prefix = "\n\nStopped early. " if stopped else "\n"
         print(f"{prefix}Sent {n_sent} feedback message(s); updated {path.name}.")
+        if stopped:
+            print("If you stopped while a message was being sent, check Canvas for that student.")
         logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
 
     def _sendAssessmentRows(self, df, to_send, dry_run, send_all):

@@ -6217,6 +6217,7 @@ class TestSendsRecordedOnInterrupt:
         out = capsys.readouterr().out
         assert out.count('Stopped early') == 1   # one notice, after the record is saved
         assert 'Stopped early. Sent 1 feedback message(s); updated' in out
+        assert 'check Canvas for that student' in out   # a message in flight at the stop may be unrecorded
         assert cq.SEND_STOPPED_EARLY is True
 
     def test_feedback_send_without_a_stop_leaves_the_flag_clear(self, tmp_path, monkeypatch):

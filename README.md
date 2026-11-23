@@ -71,7 +71,7 @@ All tasks begin by prompting you to select a course (unless `--crn` is
 supplied). Output files are written to `data/<course>/` and
 `figures/<course>/`, where `<course>` is derived from the Canvas course code.
 In the file names referenced from the docs below, `<quiz>` is the quiz title
-(lowercased, spaces replaced with underscores), `<id>` is the Canvas quiz ID,
+(lowercased, spaces replaced with underscores, `/` replaced with `-`), `<id>` is the Canvas quiz ID,
 and `YYYYMMDD` is the current date.
 
 

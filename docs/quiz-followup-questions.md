@@ -262,13 +262,15 @@ that happened; perfect-score students with no blur events are encouraged to
 retake once more before the due date.
 
 When not in `--dry-run` mode, the instructor is prompted for each student
-with a full message preview and a `[send/SKIP]` choice (default: skip), so
+with a full message preview and a `[y/N]` choice (default: skip), so
 every send is reviewed before going to Canvas.
 
 Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: the reminders
 already sent are still written to the `*_reminder_sent_*.csv` log, Canvigator
 prints "Stopped early", and it exits with code 130 instead of 0. A re-run does
-not skip students who were already reminded, so check the log first.
+not skip students who were already reminded, so check the log first. If you
+stop while a message is being sent, that one may reach Canvas without being
+logged; Canvigator says so, and you can check Canvas for that student.
 
 **Before running:** `get-quiz-questions --tag` must have produced
 `*_questions_w_tags_*.csv` for the quiz. The reminder task will not run
@@ -338,7 +340,7 @@ the open-ended question: `explain` asks the student to record a short voice
 response, while `draw` asks them to attach a photo of a hand-drawn diagram.
 
 When not in `--dry-run` mode, the instructor is prompted for each student
-with a full message preview and a `[send/SKIP]` choice (default: skip). Only
+with a full message preview and a `[y/N]` choice (default: skip). Only
 messages the instructor approves are sent and recorded in the manifest.
 Submissions are auto-refreshed via `getAllSubmissionsAndEvents()` on every
 run so the recipient list reflects the latest attempts.
@@ -346,7 +348,9 @@ run so the recipient list reflects the latest attempts.
 Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: the students already
 messaged are recorded in the manifest, so running the task again won't message
 them twice. Canvigator prints "Stopped early" and exits with code 130 instead
-of 0.
+of 0. If you stop while a message is being sent, that one may reach Canvas
+without being recorded; Canvigator says so, and you can check Canvas for that
+student before re-running.
 
 **Before running:** `get-quiz-questions --tag` and then
 `generate-follow-up-questions` must have been run for the same quiz so both
@@ -475,7 +479,9 @@ assessment needs correction; the curated text is what the student sees.
 Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: rows already sent
 are saved with `sent_assessment=1`, so running the task again won't send them
 twice. Canvigator prints "Stopped early" and exits with code 130 instead of 0.
-A stopped `--dry-run` preview saves no dry-run record.
+If you stop while a message is being sent, that one may reach Canvas without
+being saved; Canvigator says so, and you can check Canvas for that student
+before re-running. A stopped `--dry-run` preview saves no dry-run record.
 
 **Before running:** `assess-replies` must have produced
 `*_followup_assessments.csv`.

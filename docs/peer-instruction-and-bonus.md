@@ -92,7 +92,7 @@ Use `--dry-run` to preview which students would receive bonus points without
 modifying anything in Canvas. In dry-run mode the scores CSV is named
 `*_scores_w_bonus_dryrun_*.csv`. A live run first shows how many students and
 points it will award and asks `[y/N]`; anything other than `y` cancels without
-changing Canvas.
+changing Canvas or writing the scores CSV.
 
 ---
 
