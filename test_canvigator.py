@@ -9,6 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _clear_send_stopped_flag(monkeypatch):
+    """Start every test with SEND_STOPPED_EARLY clear, so a stop in one test can't leak into the next."""
+    import canvigator_quiz as cq
+    monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
+
+
 # ---------------------------------------------------------------------------
 # canvigator_utils tests
 # ---------------------------------------------------------------------------
@@ -6197,10 +6204,9 @@ class TestSendsRecordedOnInterrupt:
         assert pd.read_csv(files[0])['student_id'].tolist() == [11]
 
     @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
-    def test_feedback_send_saves_rows_sent_before_interrupt(self, stop, tmp_path, capsys, monkeypatch):
+    def test_feedback_send_saves_rows_sent_before_interrupt(self, stop, tmp_path, capsys):
         """send-follow-up-assessments writes sent_assessment=1 for rows sent before Ctrl-C / Ctrl-D, and flags the stop."""
         import canvigator_quiz as cq
-        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
         quiz = _bare_quiz(tmp_path)
         cols = quiz.ASSESSMENTS_COLUMNS
         rows = [{c: '' for c in cols} for _ in range(3)]
@@ -6220,10 +6226,9 @@ class TestSendsRecordedOnInterrupt:
         assert 'Stopped while sending' not in out   # stopped at a prompt: nothing was in flight
         assert cq.SEND_STOPPED_EARLY is True
 
-    def test_feedback_send_without_a_stop_leaves_the_flag_clear(self, tmp_path, monkeypatch):
+    def test_feedback_send_without_a_stop_leaves_the_flag_clear(self, tmp_path):
         """Answering every prompt (here: skip all) is a normal finish, not a stop."""
         import canvigator_quiz as cq
-        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
         quiz = _bare_quiz(tmp_path)
         cols = quiz.ASSESSMENTS_COLUMNS
         rows = [{c: '' for c in cols} for _ in range(2)]
@@ -6243,9 +6248,7 @@ class TestSendTasksKeepRecordsAfterStop:
 
     STUDENTS = [{'id': 11, 'name': 'Ann Lee'}, {'id': 12, 'name': 'Bo Diaz'}, {'id': 13, 'name': 'Cy Park'}]
 
-    def _quiz(self, tmp_path, monkeypatch):
-        import canvigator_quiz as cq
-        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
+    def _quiz(self, tmp_path):
         quiz = _bare_quiz(tmp_path)
         quiz.canvas.create_conversation.return_value = [SimpleNamespace(id=501)]
         quiz.canvas_course = SimpleNamespace(students=self.STUDENTS,
@@ -6260,10 +6263,10 @@ class TestSendTasksKeepRecordsAfterStop:
         return [int(c.args[0][0]) for c in canvas.create_conversation.call_args_list]
 
     @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
-    def test_quiz_reminder_log_kept_after_stop(self, stop, tmp_path, monkeypatch):
+    def test_quiz_reminder_log_kept_after_stop(self, stop, tmp_path):
         """send-quiz-reminder: send to the first student, stop -> the reminder log lists that student."""
         import canvigator_quiz as cq
-        quiz = self._quiz(tmp_path, monkeypatch)
+        quiz = self._quiz(tmp_path)
         quiz._loadQuestionInfo = lambda: {}
         quiz._buildQuizScores = lambda: {}
         quiz._classifyStudentForQuiz = lambda *a, **k: ('no attempt', None)
@@ -6280,7 +6283,6 @@ class TestSendTasksKeepRecordsAfterStop:
         import canvigator_course
         import canvigator_quiz as cq
         from canvigator_course import CanvigatorCourse
-        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
         monkeypatch.setattr(canvigator_course.cu, 'is_quiz_open_for_reminder', lambda q: True)
         q = SimpleNamespace(id=999, title='Quiz 3', points_possible=5, due_at='2099-01-01T00:00:00Z')
         per_quiz = SimpleNamespace(_tryLoadRecentSubmissions=lambda: True, all_subs_by_question=pd.DataFrame(),
@@ -6300,10 +6302,10 @@ class TestSendTasksKeepRecordsAfterStop:
         assert pd.read_csv(files[0])['student_id'].tolist() == [11]
         assert cq.SEND_STOPPED_EARLY is True
 
-    def test_follow_up_question_record_kept_and_rerun_skips_sent_student(self, tmp_path, monkeypatch):
+    def test_follow_up_question_record_kept_and_rerun_skips_sent_student(self, tmp_path):
         """send-follow-up-question: send to the first student, stop; a re-run then messages only the other two."""
         import canvigator_quiz as cq
-        quiz = self._quiz(tmp_path, monkeypatch)
+        quiz = self._quiz(tmp_path)
         quiz._loadQuestionInfo = lambda: {100: {'position': 2, 'keywords': 'water'}}
         quiz._loadOpenEndedQuestions = lambda: {100: {'question_mode': 'explain', 'open_ended_question': 'Explain it.'}}
         quiz._classifyStudentsByQuestionResult = lambda qid, df, info: {11: 'missed', 12: 'correct', 13: 'missed'}
@@ -6517,19 +6519,17 @@ class TestSafetyFixFollowUps:
         assert 'right away' in out
 
     @pytest.mark.parametrize('stop', [KeyboardInterrupt, EOFError])
-    def test_interrupted_send_is_flagged_for_a_nonzero_exit(self, stop, monkeypatch):
+    def test_interrupted_send_is_flagged_for_a_nonzero_exit(self, stop):
         """After a stopped send, SEND_STOPPED_EARLY is set so the CLI exits non-zero."""
         import canvigator_quiz as cq
-        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
         canvas = MagicMock()
         with patch('builtins.input', side_effect=[stop()]):
             cq._interactiveSend(canvas, [(11, 'Ann Lee', 'm1', 'missed')], 'subj', 'hdr')
         assert cq.SEND_STOPPED_EARLY is True
 
-    def test_uninterrupted_send_leaves_the_flag_clear(self, monkeypatch):
+    def test_uninterrupted_send_leaves_the_flag_clear(self):
         """A normal run doesn't set the flag."""
         import canvigator_quiz as cq
-        monkeypatch.setattr(cq, 'SEND_STOPPED_EARLY', False)
         with patch('builtins.input', return_value=''):
             cq._interactiveSend(MagicMock(), [(11, 'Ann Lee', 'm1', 'missed')], 'subj', 'hdr')
         assert cq.SEND_STOPPED_EARLY is False
@@ -6560,6 +6560,7 @@ class TestSafetyFixFollowUps:
                                 cwd=repo, env=env, timeout=30)
         assert result.returncode == rc_expected, result.stdout + result.stderr
         assert text in result.stdout
+        assert ('*** Done ***' in result.stdout) == (not stopped)
 
     def test_constructor_uses_the_safe_prefix(self, tmp_path):
         """CanvigatorQuiz.__init__ builds the file prefix with _quizNameFromTitle."""
