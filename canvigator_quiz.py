@@ -163,6 +163,12 @@ def _hasRecentDryRunManifest(data_path, pattern, max_age_minutes=10):
     return latest.stat().st_mtime >= cutoff_ts
 
 
+def _discardRecentDryRunManifests(data_path, pattern):
+    """Delete the dry-run manifests that would let ``--send-all`` skip a fresh, complete preview."""
+    while _hasRecentDryRunManifest(data_path, pattern):
+        find_latest_csv(data_path, pattern + '_dryrun_').unlink()
+
+
 def _writeManifestCsv(manifest_df, csv_name, dry_run):
     """Write a send manifest, appending to today's file for real sends.
 
@@ -2185,8 +2191,8 @@ class CanvigatorQuiz:
         flip ``sent_assessment`` to ``1`` and stamp ``sent_at``; the file is then
         rewritten in place.
         """
+        pattern = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_assessments_sent"
         if send_all:
-            pattern = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_assessments_sent"
             if not _hasRecentDryRunManifest(self.config.data_path, pattern):
                 raise RuntimeError(
                     "--send-all requires a fresh --dry-run of send-follow-up-assessments "
@@ -2222,8 +2228,11 @@ class CanvigatorQuiz:
         n_sent, stopped = self._sendAssessmentRows(df, to_send, dry_run, send_all)
 
         if dry_run and stopped:
-            # A partial preview must not count as a reviewed dry run, or it would unlock --send-all.
-            print("\n\n[DRY-RUN] Preview stopped early; no dry-run record was saved, so --send-all stays locked.")
+            # A partial preview must not count as a reviewed dry run, and neither may an earlier full
+            # one (its feedback may have been edited since), or either would unlock --send-all.
+            _discardRecentDryRunManifests(self.config.data_path, pattern)
+            print("\n\n[DRY-RUN] Preview stopped early, so no dry-run record is kept and --send-all stays "
+                  "locked until a full --dry-run.")
             return
         if dry_run:
             self._saveAssessmentsDryRunManifest(to_send)

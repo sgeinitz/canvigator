@@ -481,7 +481,9 @@ are saved with `sent_assessment=1`, so running the task again won't send them
 twice. Canvigator prints "Stopped early" and exits with code 130 instead of 0.
 If you stop while a message is being sent, that one may reach Canvas without
 being saved; Canvigator says so, and you can check Canvas for that student
-before re-running. A stopped `--dry-run` preview saves no dry-run record.
+before re-running. A stopped `--dry-run` preview saves no dry-run record and
+also clears one saved in the last 10 minutes, so `--send-all` stays locked
+until a full `--dry-run` has run.
 
 **Before running:** `assess-replies` must have produced
 `*_followup_assessments.csv`.

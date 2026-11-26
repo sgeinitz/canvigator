@@ -6429,6 +6429,44 @@ class TestSafetyFixFollowUps:
         assert 'will be recorded' not in out
         assert 'no dry-run record' in out
 
+    def test_stopped_preview_relocks_send_all_after_an_earlier_full_preview(self, tmp_path):
+        """Full preview, then a stopped one (e.g. after editing feedback) -> --send-all refuses and sends nothing."""
+        quiz = _bare_quiz(tmp_path)
+        cols = quiz.ASSESSMENTS_COLUMNS
+        rows = [{c: '' for c in cols} for _ in range(3)]
+        for i, r in enumerate(rows):
+            r.update(student_id=11 + i, student_name=f'S{i}', question_id=100, result='pass',
+                     feedback=f'Nice work {i}', sent_assessment=0)
+        pd.DataFrame(rows, columns=cols).to_csv(quiz._assessmentsPath(), index=False)
+        quiz._buildConversationLookup = lambda: {}
+        quiz._collectAssessmentsToSend = lambda df, lookup: [(i, 511 + i, df.iloc[i]) for i in range(3)]
+        quiz.sendFollowUpAssessments(dry_run=True)
+        assert len(list(tmp_path.glob('*_assessments_sent_dryrun_*.csv'))) == 1
+        with patch.object(quiz, '_sendOneAssessment', side_effect=[False, KeyboardInterrupt()]):
+            quiz.sendFollowUpAssessments(dry_run=True)
+        assert list(tmp_path.glob('*_assessments_sent_dryrun_*.csv')) == []
+        with pytest.raises(RuntimeError, match='--send-all requires a fresh --dry-run'):
+            quiz.sendFollowUpAssessments(send_all=True)
+        quiz.canvas.get_conversation.assert_not_called()
+
+    def test_discard_removes_only_the_dry_run_records_that_unlock_send_all(self, tmp_path):
+        """Recent dry-run records go (yesterday's too, near midnight); an old one and the real-send log stay."""
+        import os
+        import time
+        from canvigator_quiz import _discardRecentDryRunManifests, _hasRecentDryRunManifest
+        pattern = 'quiz3_999_assessments_sent'
+        old = tmp_path / f'{pattern}_dryrun_20261101.csv'
+        before_midnight = tmp_path / f'{pattern}_dryrun_20261124.csv'
+        today = tmp_path / f'{pattern}_dryrun_20261125.csv'
+        sent_log = tmp_path / f'{pattern}_20261125.csv'
+        for f in (old, before_midnight, today, sent_log):
+            f.write_text('student_id\n11\n')
+        an_hour_ago = time.time() - 3600
+        os.utime(old, (an_hour_ago, an_hour_ago))
+        _discardRecentDryRunManifests(tmp_path, pattern)
+        assert sorted(f.name for f in tmp_path.iterdir()) == [sent_log.name, old.name]
+        assert not _hasRecentDryRunManifest(tmp_path, pattern)
+
     def test_help_still_wins_over_new_argument_checks(self):
         """`<task> --help` shows help even with -d or a stray argument."""
         for args in (('create-quiz', '--help', '-d'), ('award-bonus', 'extra', '--help')):
