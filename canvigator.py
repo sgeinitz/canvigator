@@ -182,11 +182,11 @@ while '--help' in args:
     args.remove('--help')
 
 dry_run = '--dry-run' in args
-if dry_run:
+while '--dry-run' in args:   # a repeated flag is harmless
     args.remove('--dry-run')
 
 send_all = '--send-all' in args
-if send_all:
+while '--send-all' in args:   # a repeated flag is harmless
     args.remove('--send-all')
 
 if dry_run and send_all:
@@ -194,27 +194,27 @@ if dry_run and send_all:
     sys.exit(1)
 
 tag = '--tag' in args
-if tag:
+while '--tag' in args:   # a repeated flag is harmless
     args.remove('--tag')
 
 all_quizzes_flag = '--all' in args
-if all_quizzes_flag:
+while '--all' in args:   # a repeated flag is harmless
     args.remove('--all')
 
 auto_grade_flag = '--auto-grade' in args
-if auto_grade_flag:
+while '--auto-grade' in args:   # a repeated flag is harmless
     args.remove('--auto-grade')
 
 cloud_questions_flag = '--cloud-questions' in args
-if cloud_questions_flag:
+while '--cloud-questions' in args:   # a repeated flag is harmless
     args.remove('--cloud-questions')
 
 choose_model_flag = '--choose-model' in args
-if choose_model_flag:
+while '--choose-model' in args:   # a repeated flag is harmless
     args.remove('--choose-model')
 
 save_transcript_flag = '--save-transcript' in args
-if save_transcript_flag:
+while '--save-transcript' in args:   # a repeated flag is harmless
     args.remove('--save-transcript')
 
 crn = None
@@ -308,6 +308,22 @@ if help_requested:
     import canvigator_help as ch
     ch.print_task_help(task)
     sys.exit(0)
+
+# Every known flag has been removed from `args` above and no task takes a
+# positional argument, so anything left over is a typo (e.g. `--dryrun`).
+# Stop rather than run the task for real without it.
+if len(args) > 1:
+    print(f"Error: Unrecognized argument(s): {' '.join(args[1:])}. "
+          f"Run 'python canvigator.py {task} --help' to see this task's options.")
+    sys.exit(1)
+
+# These tasks create things on Canvas and have no dry run; don't silently ignore -d.
+NO_DRY_RUN_TASKS = frozenset({'create-quiz', 'create-media-recording-assignment'})
+if dry_run and task in NO_DRY_RUN_TASKS:
+    print(f"Error: {task} does not support --dry-run; it makes its changes on Canvas right away. "
+          "Run it without --dry-run when you're ready.")
+    sys.exit(1)
+
 
 if consent_csv is not None and task != 'export-anon-data':
     print("Error: --consent applies only to export-anon-data.")
@@ -463,5 +479,10 @@ else:
             task, quiz, dry_run, tag, reply_window_days,
             send_all=send_all, choose_model=choose_model_flag, save_transcript=save_transcript_flag,
         )
+
+if cq.SEND_STOPPED_EARLY:
+    # Messages already sent were recorded; exit non-zero so the stop isn't mistaken for success.
+    print("\n*** Stopped early: see the messages above ***\n")
+    sys.exit(130)
 
 print("\n*** Done ***\n")

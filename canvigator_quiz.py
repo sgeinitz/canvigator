@@ -2,6 +2,7 @@ import time
 import random
 import logging
 import csv
+import glob
 import requests
 import math
 import numpy as np
@@ -160,6 +161,12 @@ def _hasRecentDryRunManifest(data_path, pattern, max_age_minutes=10):
         return False
     cutoff_ts = (datetime.now() - timedelta(minutes=max_age_minutes)).timestamp()
     return latest.stat().st_mtime >= cutoff_ts
+
+
+def _discardRecentDryRunManifests(data_path, pattern):
+    """Delete the dry-run manifests that would let ``--send-all`` skip a fresh, complete preview."""
+    while _hasRecentDryRunManifest(data_path, pattern):
+        find_latest_csv(data_path, pattern + '_dryrun_').unlink()
 
 
 def _writeManifestCsv(manifest_df, csv_name, dry_run):
@@ -706,6 +713,35 @@ def _sendOrPreviewMessages(messages, subject_str, header_label):
     logger.info(f"Quiz reminders (dry run) would be sent: {len(messages)}")
 
 
+def _quizNameFromTitle(title):
+    """Return the file-name stem for a quiz title (e.g. 'Quiz 3' -> 'quiz3').
+
+    Lower-cased, spaces become underscores, and 'quiz_3' becomes 'quiz3'. A '/'
+    becomes '-' so a title like 'I/O' can't point into a subfolder (such files
+    could never be saved); every other character is kept so existing quizzes keep
+    the file prefix their earlier files were saved under.
+    """
+    name = title.lower().replace(" ", "_")
+    # Remove underscore between 'quiz' and number so filenames read 'quizX_' not 'quiz_X_'
+    name = re.sub(r'^quiz_(\d)', r'quiz\1', name)
+    return name.replace("/", "-")
+
+
+# Set when an interactive send was stopped early (Ctrl-C / EOF); canvigator.py then
+# exits non-zero instead of printing "Done".
+SEND_STOPPED_EARLY = False
+
+
+def _bonusCommentText(p_bonus, r_bonus, bonus_val):
+    """Return the submission comment describing a student's bonus breakdown."""
+    comment_parts = []
+    if p_bonus > 0:
+        comment_parts.append(f"partner bonus = {p_bonus}")
+    if r_bonus > 0:
+        comment_parts.append(f"retake bonus = {r_bonus}")
+    return "Bonus points: " + ", ".join(comment_parts) + f" (total = {bonus_val})"
+
+
 def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False):
     """Interactively prompt the instructor to send or skip each message.
 
@@ -726,7 +762,32 @@ def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False
     else:
         print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).\n")
 
+    global SEND_STOPPED_EARLY
     sent_messages = []
+    try:
+        _sendEach(canvas, messages, subject_str, send_all, sent_messages)
+    except (KeyboardInterrupt, EOFError):
+        SEND_STOPPED_EARLY = True
+        # Return what was already sent so the caller still records it; otherwise a
+        # re-run would message those students again.
+        print(f"\n\nStopped early: {len(sent_messages)} message(s) were sent and will be recorded.")
+        logger.warning(f"Interactive send interrupted after {len(sent_messages)} sent")
+
+    n_sent = len(sent_messages)
+    n_skipped = len(messages) - n_sent
+    print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
+    logger.info(f"Interactive send: {n_sent} sent, {n_skipped} skipped")
+    return sent_messages
+
+
+def _inFlightStopNotice(student_name, student_id):
+    """Return the warning printed when a stop lands during the Canvas call that sends a student's message."""
+    return (f"\n  Stopped while sending to {student_name} (id: {student_id}). The message may have "
+            "reached Canvas without being recorded: check Canvas before re-running.")
+
+
+def _sendEach(canvas, messages, subject_str, send_all, sent_messages):
+    """Prompt for and send each message, appending sent ones to ``sent_messages`` as it goes."""
     for i, (student_id, student_name, message_str, reason) in enumerate(messages, 1):
         print(f"--- Student {i}/{len(messages)} ---")
         print(f"  To: {student_name} (id: {student_id}, {reason})")
@@ -744,6 +805,10 @@ def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False
                 convos = canvas.create_conversation(
                     [str(student_id)], message_str, subject=subject_str, force_new=True
                 )
+            except KeyboardInterrupt:
+                # The message may have reached Canvas without being recorded.
+                print(_inFlightStopNotice(student_name, student_id))
+                raise
             except Exception as e:
                 print(f"  -> ERROR sending: {e}\n")
                 logger.warning(f"create_conversation failed for student id={student_id}: {e}")
@@ -753,12 +818,6 @@ def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False
             sent_messages.append((student_id, student_name, message_str, reason, convo_id))
         else:
             print("  -> Skipped.\n")
-
-    n_sent = len(sent_messages)
-    n_skipped = len(messages) - n_sent
-    print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
-    logger.info(f"Interactive send: {n_sent} sent, {n_skipped} skipped")
-    return sent_messages
 
 
 REPORT_POLL_SECONDS = 2.0             # how often to ask Canvas whether the quiz report is ready
@@ -851,9 +910,7 @@ class CanvigatorQuiz:
         self.published = canvas_quiz.published
         self.verbose = verbose
         self.config = config
-        self.quiz_name = self.canvas_quiz.title.lower().replace(" ", "_")
-        # Remove underscore between 'quiz' and number so filenames read 'quizX_' not 'quiz_X_'
-        self.quiz_name = re.sub(r'^quiz_(\d)', r'quiz\1', self.quiz_name)
+        self.quiz_name = _quizNameFromTitle(self.canvas_quiz.title)
         self.config.modifyQuizPrefix(self.quiz_name + "_")
 
         self.quiz_df = None
@@ -1663,7 +1720,7 @@ class CanvigatorQuiz:
         """
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
         files = sorted(
-            f for f in self.config.data_path.glob(file_prefix + "followup_sent_*.csv")
+            f for f in self.config.data_path.glob(glob.escape(file_prefix) + "followup_sent_*.csv")
             if '_dryrun_' not in f.name
         )
         if not files:
@@ -2086,7 +2143,7 @@ class CanvigatorQuiz:
         """Scan all *_followup_sent_*.csv manifests for (student_id, question_id) -> conversation_id."""
         file_prefix = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_"
         lookup = {}
-        for f in self.config.data_path.glob(file_prefix + "followup_sent_*.csv"):
+        for f in self.config.data_path.glob(glob.escape(file_prefix) + "followup_sent_*.csv"):
             if '_dryrun_' in f.name:
                 continue
             try:
@@ -2143,8 +2200,8 @@ class CanvigatorQuiz:
         flip ``sent_assessment`` to ``1`` and stamp ``sent_at``; the file is then
         rewritten in place.
         """
+        pattern = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_assessments_sent"
         if send_all:
-            pattern = f"{self.config.quiz_prefix}{self.canvas_quiz.id}_assessments_sent"
             if not _hasRecentDryRunManifest(self.config.data_path, pattern):
                 raise RuntimeError(
                     "--send-all requires a fresh --dry-run of send-follow-up-assessments "
@@ -2177,19 +2234,43 @@ class CanvigatorQuiz:
             print("--send-all set — sending every feedback without per-student confirmation.")
         else:
             print("For each student, enter 'y' + Enter to send, or just Enter to skip (default).")
-        n_sent = 0
-        for idx, convo_id, row in to_send:
-            if self._sendOneAssessment(df, idx, convo_id, row, dry_run, send_all=send_all):
-                n_sent += 1
+        n_sent, stopped = self._sendAssessmentRows(df, to_send, dry_run, send_all)
 
+        if dry_run and stopped:
+            # A partial preview must not count as a reviewed dry run, and neither may an earlier full
+            # one (its feedback may have been edited since), or either would unlock --send-all.
+            _discardRecentDryRunManifests(self.config.data_path, pattern)
+            print("\n\n[DRY-RUN] Preview stopped early, so no dry-run record is kept and --send-all stays "
+                  "locked until a full --dry-run.")
+            return
         if dry_run:
             self._saveAssessmentsDryRunManifest(to_send)
             print(f"\n[DRY-RUN] Would have sent {len(to_send)} feedback message(s). No changes written.")
             return
 
         df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
-        print(f"\nSent {n_sent} feedback message(s); updated {path.name}.")
+        prefix = "\n\nStopped early. " if stopped else "\n"
+        print(f"{prefix}Sent {n_sent} feedback message(s); updated {path.name}.")
         logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
+
+    def _sendAssessmentRows(self, df, to_send, dry_run, send_all):
+        """Send (or preview) each row; return (n_sent, stopped_early).
+
+        A Ctrl-C / EOF stops the loop but is not re-raised, so the caller still
+        saves the rows already sent (sent_assessment=1) and a re-run doesn't
+        send them again.
+        """
+        global SEND_STOPPED_EARLY
+        n_sent = 0
+        try:
+            for idx, convo_id, row in to_send:
+                if self._sendOneAssessment(df, idx, convo_id, row, dry_run, send_all=send_all):
+                    n_sent += 1
+        except (KeyboardInterrupt, EOFError):
+            SEND_STOPPED_EARLY = True
+            logger.warning(f"send-follow-up-assessments {'preview ' if dry_run else ''}interrupted after {n_sent} sent")
+            return n_sent, True
+        return n_sent, False
 
     def _saveAssessmentsDryRunManifest(self, to_send):
         """Write a *_assessments_sent_dryrun_YYYYMMDD.csv listing rows that would be sent.
@@ -2277,6 +2358,10 @@ class CanvigatorQuiz:
         try:
             convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
             convo.add_message(message_body)
+        except KeyboardInterrupt:
+            # The feedback may have reached Canvas without sent_assessment being set.
+            print(_inFlightStopNotice(student_name, row.get('student_id', '?')))
+            raise
         except Exception as e:
             logger.warning(f"add_message({convo_id}) failed for {student_name}: {e}")
             print(f"     ERROR: {e}")
@@ -3043,6 +3128,20 @@ class CanvigatorQuiz:
             quiz_summary.at[row_index, 'finish'] = sub.finished_at
             quiz_summary.at[row_index, 'minutes'] = sub.time_spent / 60.0
 
+    def _confirmBonusAward(self, quiz_summary):
+        """Show what a live award-bonus run will change on Canvas and ask; True only on 'y'."""
+        awarded = quiz_summary[quiz_summary['bonus'] > 0]
+        if awarded.empty:
+            return True
+        print(f"\nAbout to award bonus points on Canvas for '{self.canvas_quiz.title}': "
+              f"{len(awarded)} student(s), {awarded['bonus'].sum():g} points in total.")
+        print("Canvas replaces any bonus already on a student's attempt (it does not add), so a later "
+              "partner-only or retake-only run overwrites this one. Each student also gets a comment.")
+        if input("Award these bonus points? [y/N]: ").strip().lower() != 'y':
+            print("Cancelled; nothing was changed on Canvas.")
+            return False
+        return True
+
     def awardBonusPoints(self, dry_run=False):
         """Award bonus points to students by setting fudge points (partner bonus, retake bonus, or both)."""
         has_partner = getattr(self, 'df_paired_students', None) is not None and not self.df_paired_students.empty
@@ -3084,6 +3183,9 @@ class CanvigatorQuiz:
         quiz_summary.drop(columns='lastname', inplace=True)
         quiz_summary.reset_index(drop=True, inplace=True)
 
+        if not dry_run and not self._confirmBonusAward(quiz_summary):
+            return
+
         # Get the Canvas Assignment corresponding to this quiz (needed for leaving submission comments)
         assignment = self.canvas_course.canvas_course.get_assignment(self.canvas_quiz.assignment_id)
 
@@ -3114,12 +3216,7 @@ class CanvigatorQuiz:
                 # Build a comment describing the bonus breakdown
                 p_bonus = row['partner_bonus'].values[0]
                 r_bonus = row['retake_bonus'].values[0]
-                comment_parts = []
-                if p_bonus > 0:
-                    comment_parts.append(f"partner bonus = {p_bonus}")
-                if r_bonus > 0:
-                    comment_parts.append(f"retake bonus = {r_bonus}")
-                comment_text = "Bonus points: " + ", ".join(comment_parts) + f" (total = {bonus_val})"
+                comment_text = _bonusCommentText(p_bonus, r_bonus, bonus_val)
 
                 if dry_run:
                     student_name = quiz_summary.at[row.index[0], 'name']
