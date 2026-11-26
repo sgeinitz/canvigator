@@ -6217,7 +6217,7 @@ class TestSendsRecordedOnInterrupt:
         out = capsys.readouterr().out
         assert out.count('Stopped early') == 1   # one notice, after the record is saved
         assert 'Stopped early. Sent 1 feedback message(s); updated' in out
-        assert 'check Canvas for that student' in out   # a message in flight at the stop may be unrecorded
+        assert 'Stopped while sending' not in out   # stopped at a prompt: nothing was in flight
         assert cq.SEND_STOPPED_EARLY is True
 
     def test_feedback_send_without_a_stop_leaves_the_flag_clear(self, tmp_path, monkeypatch):
@@ -6428,6 +6428,41 @@ class TestSafetyFixFollowUps:
         out = capsys.readouterr().out
         assert 'will be recorded' not in out
         assert 'no dry-run record' in out
+        assert 'Stopped while sending' not in out
+
+    def test_ctrl_c_during_the_canvas_send_names_the_student(self, capsys):
+        """Ctrl-C inside create_conversation: say whose message may be on Canvas unrecorded; keep the earlier send."""
+        import canvigator_quiz as cq
+        canvas = MagicMock()
+        canvas.create_conversation.side_effect = [[SimpleNamespace(id=501)], KeyboardInterrupt()]
+        messages = [(11, 'Ann Lee', 'm1', 'missed'), (12, 'Bo Diaz', 'm2', 'missed'), (13, 'Cy Park', 'm3', 'missed')]
+        sent = cq._interactiveSend(canvas, messages, 'subj', 'hdr', send_all=True)
+        assert [m[0] for m in sent] == [11]
+        out = capsys.readouterr().out
+        assert 'Stopped while sending to Bo Diaz (id: 12)' in out
+        assert out.count('Stopped while sending') == 1
+        assert cq.SEND_STOPPED_EARLY is True
+
+    def test_ctrl_c_during_the_feedback_send_names_the_student(self, tmp_path, capsys):
+        """Ctrl-C inside add_message: name that student; their row stays unsent, the earlier row is saved."""
+        import canvigator_quiz as cq
+        quiz = _bare_quiz(tmp_path)
+        cols = quiz.ASSESSMENTS_COLUMNS
+        rows = [{c: '' for c in cols} for _ in range(3)]
+        for i, r in enumerate(rows):
+            r.update(student_id=11 + i, student_name=f'S{i}', question_id=100, result='pass',
+                     feedback=f'Nice work {i}', sent_assessment=0)
+        pd.DataFrame(rows, columns=cols).to_csv(quiz._assessmentsPath(), index=False)
+        quiz._buildConversationLookup = lambda: {}
+        quiz._collectAssessmentsToSend = lambda df, lookup: [(i, 511 + i, df.iloc[i]) for i in range(3)]
+        quiz.canvas.get_conversation.return_value.add_message.side_effect = [None, KeyboardInterrupt()]
+        with patch('builtins.input', return_value='y'):
+            quiz.sendFollowUpAssessments()
+        assert pd.read_csv(quiz._assessmentsPath())['sent_assessment'].tolist() == [1, 0, 0]
+        out = capsys.readouterr().out
+        assert 'Stopped while sending to S1 (id: 12)' in out
+        assert 'Stopped early. Sent 1 feedback message(s)' in out
+        assert cq.SEND_STOPPED_EARLY is True
 
     def test_stopped_preview_relocks_send_all_after_an_earlier_full_preview(self, tmp_path):
         """Full preview, then a stopped one (e.g. after editing feedback) -> --send-all refuses and sends nothing."""

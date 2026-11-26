@@ -770,8 +770,7 @@ def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False
         SEND_STOPPED_EARLY = True
         # Return what was already sent so the caller still records it; otherwise a
         # re-run would message those students again.
-        print(f"\n\nStopped early: {len(sent_messages)} message(s) were sent and will be recorded. "
-              "If you stopped while a message was being sent, check Canvas for that student.")
+        print(f"\n\nStopped early: {len(sent_messages)} message(s) were sent and will be recorded.")
         logger.warning(f"Interactive send interrupted after {len(sent_messages)} sent")
 
     n_sent = len(sent_messages)
@@ -779,6 +778,12 @@ def _interactiveSend(canvas, messages, subject_str, header_label, send_all=False
     print(f"\n{n_sent} message(s) sent, {n_skipped} skipped.")
     logger.info(f"Interactive send: {n_sent} sent, {n_skipped} skipped")
     return sent_messages
+
+
+def _inFlightStopNotice(student_name, student_id):
+    """Return the warning printed when a stop lands during the Canvas call that sends a student's message."""
+    return (f"\n  Stopped while sending to {student_name} (id: {student_id}). The message may have "
+            "reached Canvas without being recorded: check Canvas before re-running.")
 
 
 def _sendEach(canvas, messages, subject_str, send_all, sent_messages):
@@ -800,6 +805,10 @@ def _sendEach(canvas, messages, subject_str, send_all, sent_messages):
                 convos = canvas.create_conversation(
                     [str(student_id)], message_str, subject=subject_str, force_new=True
                 )
+            except KeyboardInterrupt:
+                # The message may have reached Canvas without being recorded.
+                print(_inFlightStopNotice(student_name, student_id))
+                raise
             except Exception as e:
                 print(f"  -> ERROR sending: {e}\n")
                 logger.warning(f"create_conversation failed for student id={student_id}: {e}")
@@ -2242,8 +2251,6 @@ class CanvigatorQuiz:
         df.to_csv(path, index=False, columns=self.ASSESSMENTS_COLUMNS)
         prefix = "\n\nStopped early. " if stopped else "\n"
         print(f"{prefix}Sent {n_sent} feedback message(s); updated {path.name}.")
-        if stopped:
-            print("If you stopped while a message was being sent, check Canvas for that student.")
         logger.info(f"Sent {n_sent} follow-up feedback messages; updated {path}")
 
     def _sendAssessmentRows(self, df, to_send, dry_run, send_all):
@@ -2351,6 +2358,10 @@ class CanvigatorQuiz:
         try:
             convo = self.canvas.get_conversation(convo_id, auto_mark_as_read=False)
             convo.add_message(message_body)
+        except KeyboardInterrupt:
+            # The feedback may have reached Canvas without sent_assessment being set.
+            print(_inFlightStopNotice(student_name, row.get('student_id', '?')))
+            raise
         except Exception as e:
             logger.warning(f"add_message({convo_id}) failed for {student_name}: {e}")
             print(f"     ERROR: {e}")

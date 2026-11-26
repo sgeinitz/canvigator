@@ -270,7 +270,8 @@ already sent are still written to the `*_reminder_sent_*.csv` log, Canvigator
 prints "Stopped early", and it exits with code 130 instead of 0. A re-run does
 not skip students who were already reminded, so check the log first. If you
 stop while a message is being sent, that one may reach Canvas without being
-logged; Canvigator says so, and you can check Canvas for that student.
+logged; Canvigator names that student so you can check Canvas, and if it
+arrived, skip them on the re-run.
 
 **Before running:** `get-quiz-questions --tag` must have produced
 `*_questions_w_tags_*.csv` for the quiz. The reminder task will not run
@@ -349,8 +350,11 @@ Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: the students already
 messaged are recorded in the manifest, so running the task again won't message
 them twice. Canvigator prints "Stopped early" and exits with code 130 instead
 of 0. If you stop while a message is being sent, that one may reach Canvas
-without being recorded; Canvigator says so, and you can check Canvas for that
-student before re-running.
+without being recorded; Canvigator names that student so you can check Canvas
+before re-running. If it arrived, re-run without `--send-all` and skip that
+student at their prompt, so they don't get the question twice. Their
+conversation isn't in the manifest, so `assess-replies` won't pick up their
+reply.
 
 **Before running:** `get-quiz-questions --tag` and then
 `generate-follow-up-questions` must have been run for the same quiz so both
@@ -480,8 +484,9 @@ Stopping partway (Ctrl-C, or Ctrl-D at a prompt) is safe: rows already sent
 are saved with `sent_assessment=1`, so running the task again won't send them
 twice. Canvigator prints "Stopped early" and exits with code 130 instead of 0.
 If you stop while a message is being sent, that one may reach Canvas without
-being saved; Canvigator says so, and you can check Canvas for that student
-before re-running. A stopped `--dry-run` preview saves no dry-run record and
+being saved; Canvigator names that student so you can check Canvas before
+re-running. If it arrived, set `sent_assessment` to `1` on their row in
+`*_followup_assessments.csv` so the re-run doesn't send it again. A stopped `--dry-run` preview saves no dry-run record and
 also clears one saved in the last 10 minutes, so `--send-all` stays locked
 until a full `--dry-run` has run.
 
