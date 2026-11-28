@@ -6598,3 +6598,290 @@ class TestSafetyFixFollowUps:
         from canvigator_help import TASK_HELP
         text = TASK_HELP[task]['description']
         assert 'asks' in text and 'replaces' in text
+
+
+# ---------------------------------------------------------------------------
+# Follow-up generation: account errors, all-failed runs
+# ---------------------------------------------------------------------------
+
+def _gen_rows(n=3):
+    """Tagged-question rows like *_questions_w_tags_*.csv produces."""
+    return [{'question_id': 100 + i, 'position': i, 'question_name': f'Q{i}',
+             'question_text': f'<p>Question {i} text</p>', 'keywords': f'topic{i}', 'answers': '[]'}
+            for i in range(1, n + 1)]
+
+
+def _fake_chat_client(fail_when):
+    """Return a MagicMock client whose chat() raises ConnectionError when fail_when(user_prompt) is true.
+
+    Successful calls return a reply that every generation step can parse.
+    """
+    import json as _json
+
+    def chat(model=None, messages=None, options=None, **_kw):
+        user = [m for m in messages if m['role'] == 'user'][-1]['content']
+        if fail_when(user):
+            raise ConnectionError("simulated network failure")
+        last = user.strip().splitlines()[-1]
+        if last.startswith('Tags:'):
+            content = 'alpha, beta'
+        elif last.startswith('Best assessment mode'):
+            content = 'explain'
+        elif 'must start with' in last:
+            content = '1. Explain one.\n2. Explain two.\n3. Explain three.'
+        elif last.startswith('Rubric JSON:'):
+            content = _json.dumps({'canonical_answer': 'x', 'pass_criteria': ['y']})
+        elif last.startswith('Exemplars JSON:'):
+            content = _json.dumps({'exemplar_pass': 'p', 'exemplar_fail': 'f'})
+        else:
+            content = 'A short guide.'
+        return {'message': {'content': content}}
+
+    client = MagicMock()
+    client.chat.side_effect = chat
+    return client
+
+
+class TestLLMAccountErrors:
+    """401/402/403 from Ollama are account problems: stop at once instead of failing every call quietly."""
+
+    @pytest.mark.parametrize('status', [401, 402, 403])
+    def test_chat_with_retry_raises_account_error_without_retrying(self, status):
+        """An account refusal raises LLMAccountError carrying Ollama's message, after one call."""
+        import ollama
+        import canvigator_llm
+        client = MagicMock()
+        client.chat.side_effect = ollama.ResponseError('Add usage credits', status)
+        with pytest.raises(canvigator_llm.LLMAccountError) as exc:
+            canvigator_llm._chat_with_retry(client, model='m', messages=[])
+        assert client.chat.call_count == 1
+        assert str(status) in str(exc.value)
+        assert 'Add usage credits' in str(exc.value)
+
+    def test_other_client_errors_are_unchanged(self):
+        """A 404 (e.g. unknown model) still raises the original ResponseError after one call, not LLMAccountError."""
+        import ollama
+        import canvigator_llm
+        client = MagicMock()
+        client.chat.side_effect = ollama.ResponseError('model not found', 404)
+        with pytest.raises(ollama.ResponseError) as exc:
+            canvigator_llm._chat_with_retry(client, model='m', messages=[])
+        assert not isinstance(exc.value, canvigator_llm.LLMAccountError)
+        assert client.chat.call_count == 1   # a client error is not retried like a 5xx
+
+    def test_tagging_stops_on_first_account_error(self, monkeypatch):
+        """tag_questions raises on a 402 instead of logging it for every question."""
+        import ollama
+        import canvigator_llm
+        client = MagicMock()
+        client.chat.side_effect = ollama.ResponseError('Add usage credits', 402)
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: client)
+        with pytest.raises(canvigator_llm.LLMAccountError):
+            canvigator_llm.tag_questions(_gen_rows(3))
+        assert client.chat.call_count == 1
+
+    def test_generation_stops_on_first_account_error(self, monkeypatch):
+        """generate_open_ended_questions raises on a 401 instead of emitting empty rows."""
+        import ollama
+        import canvigator_llm
+        client = MagicMock()
+        client.chat.side_effect = ollama.ResponseError('unauthorized', 401)
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: client)
+        with pytest.raises(canvigator_llm.LLMAccountError):
+            canvigator_llm.generate_open_ended_questions(_gen_rows(3))
+        assert client.chat.call_count == 1
+
+
+class TestTaggingFailureReporting:
+    """Tagging (get-quiz-questions --tag) must not report success or save a file when it failed."""
+
+    def _quiz(self, tmp_path, n=3):
+        """Return a CanvigatorQuiz built without __init__, with n stub questions."""
+        from canvigator_quiz import CanvigatorQuiz
+        quiz = CanvigatorQuiz.__new__(CanvigatorQuiz)
+        quiz.canvas_quiz = SimpleNamespace(id=999, assignment_id=1)
+        quiz.config = SimpleNamespace(data_path=tmp_path, quiz_prefix='quiz')
+        quiz.quiz_questions = [
+            SimpleNamespace(id=100 + i, question_name=f'Q{i}', question_type='multiple_choice_question',
+                            question_text=f'<p>Question {i} text</p>', points_possible=1.0, answers=[])
+            for i in range(1, n + 1)
+        ]
+        return quiz
+
+    def test_all_questions_untagged_raises_and_saves_nothing(self, tmp_path, monkeypatch):
+        """When every tagging call fails, no *_questions_w_tags_* file is written."""
+        import canvigator_llm
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: _fake_chat_client(lambda u: True))
+        with pytest.raises(RuntimeError, match='all 3 questions'):
+            self._quiz(tmp_path).getQuizQuestions(tag=True)
+        assert list(tmp_path.glob('*questions_w_tags*')) == []
+
+    def test_some_questions_untagged_saves_and_names_them(self, tmp_path, monkeypatch, caplog):
+        """A partial failure still saves the file but warns which questions have no tags."""
+        import canvigator_llm
+        client = _fake_chat_client(lambda u: 'Question 2 text' in u)
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: client)
+        with caplog.at_level('WARNING'):
+            self._quiz(tmp_path).getQuizQuestions(tag=True)
+        df = pd.read_csv(next(tmp_path.glob('*questions_w_tags*')))
+        assert df['keywords'].isna().tolist() == [False, True, False]
+        assert any('1 of 3 questions' in r.message and 'Q2' in r.message for r in caplog.records)
+
+
+class TestGenerationFailureReporting:
+    """Generation (generate-follow-up-questions) must not report success or save a file when it failed."""
+
+    def _tagged_csv(self, tmp_path):
+        """Write a 3-question *_questions_w_tags_* CSV and return its path."""
+        path = tmp_path / 'quiz999_questions_w_tags_20260101.csv'
+        pd.DataFrame(_gen_rows(3)).to_csv(path, index=False)
+        return path
+
+    def test_all_questions_failed_raises_and_saves_nothing(self, tmp_path, monkeypatch):
+        """When no question gets any candidate, no *_open_ended_* file is written."""
+        import canvigator_llm
+        import canvigator_quiz
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: _fake_chat_client(lambda u: True))
+        with pytest.raises(RuntimeError, match='any of the 3 questions'):
+            canvigator_quiz.generateOpenEndedQuestions(self._tagged_csv(tmp_path))
+        assert list(tmp_path.glob('*open_ended*')) == []
+
+    def test_some_questions_failed_saves_and_names_them(self, tmp_path, monkeypatch, caplog):
+        """A partial failure still saves all rows but warns which questions have no candidates."""
+        import canvigator_llm
+        import canvigator_quiz
+        client = _fake_chat_client(lambda u: 'Question 2 text' in u)
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: client)
+        with caplog.at_level('WARNING'):
+            canvigator_quiz.generateOpenEndedQuestions(self._tagged_csv(tmp_path))
+        df = pd.read_csv(next(tmp_path.glob('*open_ended*')))
+        assert len(df) == 9
+        assert df.groupby('position')['open_ended_question'].apply(lambda s: s.notna().any()).tolist() == [True, False, True]
+        assert any('1 of 3 questions' in r.message and 'Q2' in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# 5xx retries, later generation steps stopping on account errors, missing rubric/exemplar report
+# ---------------------------------------------------------------------------
+
+class TestServerErrorRetries:
+    """5xx errors are retried with backoff, up to 4 calls in all (unchanged from main; pinned here)."""
+
+    def _err(self, status=503):
+        import ollama
+        return ollama.ResponseError('service unavailable', status)
+
+    def test_server_error_every_time_raises_after_four_calls(self, monkeypatch):
+        """Four 5xx replies in a row -> the original ResponseError after exactly 4 calls."""
+        import ollama
+        import canvigator_llm
+        monkeypatch.setattr(canvigator_llm.time, 'sleep', lambda s: None)
+        client = MagicMock()
+        client.chat.side_effect = self._err()
+        with pytest.raises(ollama.ResponseError):
+            canvigator_llm._chat_with_retry(client, model='m', messages=[])
+        assert client.chat.call_count == 4
+
+    def test_three_server_errors_then_reply_succeeds(self, monkeypatch):
+        """Three 5xx then a reply -> the reply, with growing waits between tries."""
+        import canvigator_llm
+        waits = []
+        monkeypatch.setattr(canvigator_llm.time, 'sleep', waits.append)
+        client = MagicMock()
+        client.chat.side_effect = [self._err(), self._err(500), self._err(502), {'message': {'content': 'ok'}}]
+        assert canvigator_llm._chat_with_retry(client, model='m', messages=[]) == {'message': {'content': 'ok'}}
+        assert client.chat.call_count == 4
+        assert waits == [1.0, 2.0, 4.0]
+
+
+class TestLaterStepsStopOnAccountError:
+    """An account error in any generation step stops the run, not just in the first (classify) call."""
+
+    @pytest.mark.parametrize('step', ['candidates', 'guide', 'rubric', 'exemplars'])
+    def test_later_generation_steps_also_stop(self, monkeypatch, step):
+        """An account error in the candidates, guide, rubric or exemplar step stops the run (not just classify)."""
+        import canvigator_llm
+
+        def fail_when(user):
+            """True for this step's prompt (same prompt endings _fake_chat_client answers by)."""
+            last = user.strip().splitlines()[-1]
+            if step == 'candidates':
+                return 'must start with' in last
+            if step == 'rubric':
+                return last.startswith('Rubric JSON:')
+            if step == 'exemplars':
+                return last.startswith('Exemplars JSON:')
+            other = ('Tags:', 'Best assessment mode', 'Rubric JSON:', 'Exemplars JSON:')
+            return not last.startswith(other) and 'must start with' not in last
+
+        client = _fake_chat_client(lambda u: False)
+        ok_chat = client.chat.side_effect
+
+        def chat(**kw):
+            user = [m for m in kw['messages'] if m['role'] == 'user'][-1]['content']
+            if fail_when(user):
+                raise canvigator_llm.LLMAccountError('simulated: Ollama refused the request (HTTP 402)')
+            return ok_chat(**kw)
+
+        client.chat.side_effect = chat
+        monkeypatch.setattr(canvigator_llm, '_chat_with_retry', lambda c, **kw: c.chat(**kw))
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: client)
+        with pytest.raises(canvigator_llm.LLMAccountError):
+            canvigator_llm.generate_open_ended_questions(_gen_rows(2))
+
+
+class TestMissingRubricAndExemplarReport:
+    """generate-follow-up-questions names candidates whose rubric or example answers came back empty."""
+
+    def test_missing_rubric_or_exemplars_are_named(self, tmp_path, monkeypatch, caplog):
+        """A candidate with an empty rubric and one with empty exemplars are both listed in one warning."""
+        import canvigator_llm
+        import canvigator_quiz
+        path = tmp_path / 'quiz999_questions_w_tags_20260101.csv'
+        pd.DataFrame(_gen_rows(2)).to_csv(path, index=False)
+        state = {'rubric': 0, 'exemplars': 0}
+
+        def fail_some(user):
+            last = user.strip().splitlines()[-1]
+            for kind, marker in (('rubric', 'Rubric JSON:'), ('exemplars', 'Exemplars JSON:')):
+                if last.startswith(marker):
+                    state[kind] += 1
+                    # 2nd rubric call (Q1 candidate 2) and 6th exemplars call (Q2 candidate 3) fail
+                    return (kind, state[kind]) in (('rubric', 2), ('exemplars', 6))
+            return False
+
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: _fake_chat_client(fail_some))
+        with caplog.at_level('WARNING'):
+            canvigator_quiz.generateOpenEndedQuestions(path)
+        msgs = [r.message for r in caplog.records if 'missing a rubric or example answers' in r.message]
+        assert len(msgs) == 1
+        assert '2 of 6 candidates' in msgs[0]
+        assert 'Q1 candidate 2' in msgs[0] and 'Q2 candidate 3' in msgs[0]
+
+    def test_either_missing_example_answer_is_named(self, caplog):
+        """A candidate missing only its failing example, or only its passing one, is named; a complete one isn't."""
+        import json
+        from canvigator_quiz import _warnMissingRubricsOrExemplars
+        rubric = json.dumps({'canonical_answer': 'x', 'pass_criteria': ['y']})
+        rows = [
+            {'open_ended_question': 'Explain A.', 'position': 1, 'rubric_json': rubric, 'exemplar_pass': 'p', 'exemplar_fail': ''},
+            {'open_ended_question': 'Explain B.', 'position': 1, 'rubric_json': rubric, 'exemplar_pass': '', 'exemplar_fail': 'f'},
+            {'open_ended_question': 'Explain C.', 'position': 1, 'rubric_json': rubric, 'exemplar_pass': 'p', 'exemplar_fail': 'f'},
+        ]
+        with caplog.at_level('WARNING'):
+            _warnMissingRubricsOrExemplars(rows)
+        msgs = [r.message for r in caplog.records if 'missing a rubric or example answers' in r.message]
+        assert len(msgs) == 1
+        assert '2 of 3 candidates' in msgs[0]
+        assert 'Q1 candidate 1' in msgs[0] and 'Q1 candidate 2' in msgs[0] and 'Q1 candidate 3' not in msgs[0]
+
+    def test_complete_output_has_no_missing_warning(self, tmp_path, monkeypatch, caplog):
+        """When every candidate has a rubric and exemplars, no such warning is logged."""
+        import canvigator_llm
+        import canvigator_quiz
+        path = tmp_path / 'quiz999_questions_w_tags_20260101.csv'
+        pd.DataFrame(_gen_rows(2)).to_csv(path, index=False)
+        monkeypatch.setattr(canvigator_llm, '_make_client', lambda cloud=False: _fake_chat_client(lambda u: False))
+        with caplog.at_level('WARNING'):
+            canvigator_quiz.generateOpenEndedQuestions(path)
+        assert not any('missing a rubric' in r.message for r in caplog.records)
